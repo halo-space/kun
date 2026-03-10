@@ -1,0 +1,12 @@
+---
+description: Rust module naming conventions for this project
+alwaysApply: true
+---
+
+# Rust Module Naming
+
+- Follow Rust 2024 layout conventions and target Rust `1.94.0`.
+- When code is already inside a module directory such as `request/browser.rs` or `request/http.rs`, do not repeat the path name in local type or function names.
+- Prefer concise names such as `request::browser::Config`, `request::browser::Engine`, and `request::http::Config`.
+- For query APIs, use `one` for a single result and `all` for multiple results instead of `get` / `getall`.
+- Avoid redundant names such as `BrowserRequestConfig`, `HttpRequestConfig`, or similarly repeated module-prefixed identifiers unless there is a real ambiguity that cannot be solved by the module path itself.
