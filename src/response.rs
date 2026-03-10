@@ -64,27 +64,27 @@ impl Response {
     }
 
     pub fn css(&self, selector: impl Into<String>) -> CssQuery {
-        CssQuery::new(selector)
+        CssQuery::new(self.text.clone(), selector)
     }
 
     pub fn xpath(&self, selector: impl Into<String>) -> XPathQuery {
-        XPathQuery::new(selector)
+        XPathQuery::new(self.text.clone(), selector)
     }
 
     pub fn json(&self, selector: Option<impl Into<String>>) -> JsonQuery {
-        JsonQuery::new(selector.map(Into::into))
+        JsonQuery::new(self.text.clone(), selector.map(Into::into))
     }
 
     pub fn xml(&self, selector: impl Into<String>) -> XmlQuery {
-        XmlQuery::new(selector)
+        XmlQuery::new(self.text.clone(), selector)
     }
 
     pub fn regex(&self, pattern: impl Into<String>) -> RegexQuery {
-        RegexQuery::new(pattern, Some("text".to_string()))
+        RegexQuery::new(self.text.clone(), pattern, Some("text".to_string()))
     }
 
     pub fn ai(&self, prompt: impl Into<String>) -> AiQuery {
-        AiQuery::new(prompt, Some("html".to_string()))
+        AiQuery::new(self.text.clone(), prompt, Some("html".to_string()))
     }
 
     pub fn follow(&self, url: impl Into<String>) -> Request {
@@ -176,6 +176,7 @@ mod tests {
         let query = response.css("h1.title");
 
         assert_eq!(query.node.selector, "h1.title");
+        assert_eq!(query.input, "<h1>x</h1>");
     }
 
     #[test]
@@ -184,6 +185,7 @@ mod tests {
         let query = response.xpath("//h1");
 
         assert_eq!(query.node.selector, "//h1");
+        assert_eq!(query.input, response.text);
     }
 
     #[test]
@@ -203,6 +205,7 @@ mod tests {
         let query = response.xml("//item/title");
 
         assert_eq!(query.node.selector, "//item/title");
+        assert_eq!(query.input, response.text);
     }
 
     #[test]

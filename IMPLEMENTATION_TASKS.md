@@ -87,14 +87,12 @@ src/
     traits.rs
     chain.rs
     types.rs
-    builtin.rs
-    builtin/
-      retry_by_status.rs
-      retry_by_error.rs
-      dedup.rs
-      rate_limit.rs
-      cookies.rs
-      proxy.rs
+    retry_by_status.rs
+    retry_by_error.rs
+    dedup.rs
+    rate_limit.rs
+    cookies.rs
+    proxy.rs
 
   plugins.rs
   plugins/
@@ -433,8 +431,12 @@ P0 step 字段：
 - `middleware/traits.rs`
 - `middleware/chain.rs`
 - `middleware/types.rs`
-- `middleware/builtin.rs`
-- `middleware/builtin/*.rs`
+- `middleware/retry_by_status.rs`
+- `middleware/retry_by_error.rs`
+- `middleware/dedup.rs`
+- `middleware/rate_limit.rs`
+- `middleware/cookies.rs`
+- `middleware/proxy.rs`
 - `runtime.rs`
 - `runtime/compile.rs`
 
@@ -585,6 +587,10 @@ P0 先做：
 5. callback 或 DSL step
 6. 产出 item / follow request
 7. ack / nack / retry
+
+实现约束：
+
+- 像 `execute_spider_once()` 这种命名可以作为过渡实现存在，但后续主循环成型后，必须优先收敛成更清晰的 `run()` 语义，或者直接并入最终 engine 主循环，不能长期保留为最终架构命名。
 
 #### 10.3 统一代码 callback 和 DSL step
 

@@ -1,9 +1,10 @@
 use crate::error::SpiderError;
+use crate::future::BoxFuture;
 use crate::scheduler::types::ScheduledTask;
 
-pub trait Scheduler {
-    fn enqueue(&mut self, task: ScheduledTask) -> Result<(), SpiderError>;
-    fn lease(&mut self) -> Result<Option<ScheduledTask>, SpiderError>;
-    fn ack(&mut self) -> Result<(), SpiderError>;
-    fn nack(&mut self) -> Result<(), SpiderError>;
+pub trait Scheduler: Send {
+    fn enqueue<'a>(&'a mut self, task: ScheduledTask) -> BoxFuture<'a, Result<(), SpiderError>>;
+    fn lease<'a>(&'a mut self) -> BoxFuture<'a, Result<Option<ScheduledTask>, SpiderError>>;
+    fn ack<'a>(&'a mut self) -> BoxFuture<'a, Result<(), SpiderError>>;
+    fn nack<'a>(&'a mut self) -> BoxFuture<'a, Result<(), SpiderError>>;
 }

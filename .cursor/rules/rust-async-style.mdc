@@ -1,0 +1,12 @@
+---
+description: Rust async implementation rules for this project
+alwaysApply: true
+---
+
+# Rust Async Style
+
+- Prefer asynchronous implementations whenever a code path may involve I/O, waiting, scheduling, downloading, browser automation, rule loading, or output/pipeline work.
+- Do not introduce the `async_trait` crate.
+- Use Rust native async directly on Rust `1.94.0`.
+- When async abstraction is needed, prefer native async traits, concrete async methods, or explicit future types over macro-based async trait erasure.
+- Keep synchronous code only for pure in-memory transforms, parsing helpers, and simple value/object utilities.

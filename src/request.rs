@@ -5,6 +5,7 @@ use crate::value::Value;
 use browser::Config as BrowserConfig;
 use http::Config as HttpConfig;
 use std::collections::BTreeMap;
+use std::fmt::{Display, Formatter};
 
 pub type Metadata = BTreeMap<String, Value>;
 pub type Headers = BTreeMap<String, Vec<String>>;
@@ -14,6 +15,33 @@ pub enum RequestMode {
     #[default]
     Http,
     Browser,
+}
+
+impl RequestMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Browser => "browser",
+        }
+    }
+}
+
+impl Display for RequestMode {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl TryFrom<&str> for RequestMode {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "http" => Ok(Self::Http),
+            "browser" => Ok(Self::Browser),
+            other => Err(format!("unsupported request mode: {other}")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]

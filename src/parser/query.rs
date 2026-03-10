@@ -1,4 +1,5 @@
 use crate::value::Value;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Kind {
@@ -121,19 +122,51 @@ impl ValueQuery {
     }
 }
 
-fn stringify(value: &Value, trim: bool) -> Option<String> {
+pub(crate) fn stringify(value: &Value, trim: bool) -> Option<String> {
     let text = match value {
         Value::Null => return None,
         Value::Bool(value) => value.to_string(),
         Value::Number(value) => value.to_string(),
         Value::String(value) => value.clone(),
+        Value::Array(values) => render_array(values),
+        Value::Object(values) => render_object(values),
     };
 
+    Some(trim_text(&text, trim))
+}
+
+pub(crate) fn trim_text(text: &str, trim: bool) -> String {
     if trim {
-        Some(text.trim().to_string())
+        text.trim().to_string()
     } else {
-        Some(text)
+        text.to_string()
     }
+}
+
+fn render_array(values: &[Value]) -> String {
+    let rendered = values
+        .iter()
+        .filter_map(|value| stringify(value, false))
+        .map(|value| format!("\"{}\"", escape_json(&value)))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    format!("[{rendered}]")
+}
+
+fn render_object(values: &BTreeMap<String, Value>) -> String {
+    let rendered = values
+        .iter()
+        .filter_map(|(key, value)| stringify(value, false).map(|value| (key, value)))
+        .map(|(key, value)| format!("\"{}\":\"{}\"", escape_json(key), escape_json(&value)))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    format!("{{{rendered}}}")
+}
+
+fn escape_json(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 #[cfg(test)]

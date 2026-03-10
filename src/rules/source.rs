@@ -1,7 +1,8 @@
 use crate::error::SpiderError;
-use crate::rules::schema::RulesConfig;
+use crate::future::BoxFuture;
+use crate::rules::schema::Config;
 use crate::value::Value;
 
-pub trait RulesSource {
-    fn load(&self, config: &RulesConfig) -> Result<Value, SpiderError>;
+pub trait Source: Send + Sync {
+    fn load<'a>(&'a self, config: &'a Config) -> BoxFuture<'a, Result<Value, SpiderError>>;
 }

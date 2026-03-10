@@ -21,7 +21,11 @@ description: Guides Rust implementation for this spider project using Rust 2024 
 - Prefer `foo.rs` and `foo/` submodule layouts instead.
 - Inside a module directory, avoid repeating the module or file name in type and function names.
 - Prefer concise names like `request::browser::Config` and `request::browser::Engine`, not `BrowserRequestConfig` or other redundant path-prefixed names.
+- Apply the same rule in `rules/`, e.g. `rules::source::Source`, `rules::local::Source`, and `rules::inline::Source`.
 - For parser query APIs, prefer `one` and `all` over `get` and `getall`.
+- Prefer asynchronous implementations whenever the code path may perform I/O, waiting, scheduling, downloading, browser control, or pipeline/output work.
+- Do not use the `async_trait` crate.
+- Use Rust's native async support directly, and prefer designs that work with native async traits and futures on Rust `1.94.0`.
 
 ## P0 Scope
 
@@ -137,6 +141,7 @@ P0 implementations:
 - middleware invocation
 - callback or DSL dispatch
 - retry / ack / nack decisions
+- Transitional entrypoints such as `execute_spider_once()` are acceptable while iterating, but they must converge later into a clearer `run()` shape or be folded into the final engine main loop instead of becoming permanent public architecture.
 
 ## Browser Planning Rule
 

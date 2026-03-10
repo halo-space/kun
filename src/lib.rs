@@ -1,6 +1,7 @@
 pub mod downloader;
 pub mod engine;
 pub mod error;
+pub mod future;
 pub mod item;
 pub mod middleware;
 pub mod parser;

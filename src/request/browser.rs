@@ -1,7 +1,34 @@
+use std::fmt::{Display, Formatter};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Driver {
     #[default]
     Playwright,
+}
+
+impl Driver {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Playwright => "playwright",
+        }
+    }
+}
+
+impl Display for Driver {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl TryFrom<&str> for Driver {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "playwright" => Ok(Self::Playwright),
+            other => Err(format!("unsupported browser driver: {other}")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -9,6 +36,33 @@ pub enum Engine {
     #[default]
     Chromium,
     GoogleChrome,
+}
+
+impl Engine {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Chromium => "chromium",
+            Self::GoogleChrome => "google_chrome",
+        }
+    }
+}
+
+impl Display for Engine {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl TryFrom<&str> for Engine {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "chromium" => Ok(Self::Chromium),
+            "google_chrome" | "google-chrome" | "chrome" => Ok(Self::GoogleChrome),
+            other => Err(format!("unsupported browser engine: {other}")),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
