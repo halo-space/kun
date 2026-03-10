@@ -2,6 +2,7 @@ use crate::error::SpiderError;
 use crate::request::browser::{Config as BrowserConfig, Driver, Engine, Viewport};
 use crate::request::http::Config as HttpConfig;
 use crate::request::{Headers, RequestMode};
+use crate::runtime::Config as RuntimeConfig;
 use crate::rules::schema::{
     Compiled, CompiledStep, Dsl, FetchConfig, FetchPlan, FieldConfig, FieldPlan, LinkConfig,
     LinkPlan, LinkTargetConfig, LinkTargetPlan, ParseConfig, ParsePlan, SelectorKind, SourceKind,
@@ -168,6 +169,7 @@ fn compile_step(step: StepConfig) -> Result<CompiledStep, SpiderError> {
         callback: step.callback,
         fetch: compile_fetch(step.fetch)?,
         parse: compile_parse(step.parse)?,
+        runtime: compile_runtime(step.runtime)?,
     })
 }
 
@@ -215,6 +217,14 @@ fn compile_parse(parse: ParseConfig) -> Result<ParsePlan, SpiderError> {
             .into_iter()
             .map(compile_link)
             .collect::<Result<Vec<_>, _>>()?,
+    })
+}
+
+fn compile_runtime(runtime: BTreeMap<String, Value>) -> Result<RuntimeConfig, SpiderError> {
+    Ok(RuntimeConfig {
+        schedule: section_map(&runtime, "schedule", "step.runtime.schedule")?,
+        retry: section_map(&runtime, "retry", "step.runtime.retry")?,
+        dedup: section_map(&runtime, "dedup", "step.runtime.dedup")?,
     })
 }
 
@@ -403,6 +413,18 @@ fn optional_map_value(value: &BTreeMap<String, Value>, key: &str) -> BTreeMap<St
         .unwrap_or_default()
 }
 
+fn section_map(
+    value: &BTreeMap<String, Value>,
+    key: &str,
+    label: &str,
+) -> Result<BTreeMap<String, Value>, SpiderError> {
+    let Some(value) = value.get(key) else {
+        return Ok(BTreeMap::new());
+    };
+
+    expect_object(value, label).cloned()
+}
+
 fn parse_list<T>(
     value: Option<&Value>,
     parse: impl Fn(&Value) -> Result<T, SpiderError>,
@@ -571,6 +593,11 @@ mod tests {
                                 "fingerprint_profile":"desktop_zh_cn"
                             }
                         },
+                        "runtime":{
+                            "schedule":{
+                                "interval_ms":1000
+                            }
+                        },
                         "parse":{
                             "links":[
                                 {
@@ -626,6 +653,10 @@ mod tests {
                 .as_ref()
                 .and_then(|config| config.fingerprint_profile.as_deref()),
             Some("desktop_zh_cn")
+        );
+        assert_eq!(
+            compiled.steps[0].runtime.schedule.get("interval_ms"),
+            Some(&Value::Number(1000.0))
         );
     }
 

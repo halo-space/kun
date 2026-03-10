@@ -1,6 +1,8 @@
+use crate::engine::context::EngineContext;
+use crate::engine::types::Flow;
+use crate::error::SpiderError;
 use crate::middleware::traits::Middleware;
 use crate::middleware::types::{MiddlewareConfig, MiddlewareType};
-use crate::error::SpiderError;
 use crate::future::BoxFuture;
 
 pub struct MiddlewareEntry {
@@ -32,37 +34,49 @@ impl MiddlewareChain {
     pub fn process_request<'a>(
         &'a self,
         kind: MiddlewareType,
-    ) -> BoxFuture<'a, Result<(), SpiderError>> {
+        context: &'a mut EngineContext,
+    ) -> BoxFuture<'a, Result<Flow, SpiderError>> {
         Box::pin(async move {
             for entry in self.entries.iter().filter(|entry| matches_type(entry, kind)) {
-                entry.middleware.process_request().await?;
+                let flow = entry.middleware.process_request(context).await?;
+                if !matches!(flow, Flow::Continue) {
+                    return Ok(flow);
+                }
             }
-            Ok(())
+            Ok(Flow::Continue)
         })
     }
 
     pub fn process_response<'a>(
         &'a self,
         kind: MiddlewareType,
-    ) -> BoxFuture<'a, Result<(), SpiderError>> {
+        context: &'a mut EngineContext,
+    ) -> BoxFuture<'a, Result<Flow, SpiderError>> {
         Box::pin(async move {
             for entry in self.entries.iter().filter(|entry| matches_type(entry, kind)) {
-                entry.middleware.process_response().await?;
+                let flow = entry.middleware.process_response(context).await?;
+                if !matches!(flow, Flow::Continue) {
+                    return Ok(flow);
+                }
             }
-            Ok(())
+            Ok(Flow::Continue)
         })
     }
 
     pub fn process_exception<'a>(
         &'a self,
         kind: MiddlewareType,
+        context: &'a mut EngineContext,
         error: &'a SpiderError,
-    ) -> BoxFuture<'a, Result<(), SpiderError>> {
+    ) -> BoxFuture<'a, Result<Flow, SpiderError>> {
         Box::pin(async move {
             for entry in self.entries.iter().filter(|entry| matches_type(entry, kind)) {
-                entry.middleware.process_exception(error).await?;
+                let flow = entry.middleware.process_exception(context, error).await?;
+                if !matches!(flow, Flow::Continue) {
+                    return Ok(flow);
+                }
             }
-            Ok(())
+            Ok(Flow::Continue)
         })
     }
 }
@@ -74,6 +88,9 @@ fn matches_type(entry: &MiddlewareEntry, kind: MiddlewareType) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::context::EngineContext;
+    use crate::engine::types::Flow;
+    use crate::request::Request;
     use std::collections::BTreeMap;
     use std::future::Future;
     use std::pin::Pin;
@@ -101,8 +118,10 @@ mod tests {
             Box::new(Record::new("disabled", log.clone())),
         );
 
-        block_on(chain.process_request(MiddlewareType::Download)).unwrap();
+        let mut context = EngineContext::new(Request::new("https://example.com"));
+        let flow = block_on(chain.process_request(MiddlewareType::Download, &mut context)).unwrap();
 
+        assert_eq!(flow, Flow::Continue);
         assert_eq!(*log.lock().unwrap(), vec!["first:req", "second:req"]);
     }
 
@@ -122,8 +141,10 @@ mod tests {
             Box::new(Record::new("spider", log.clone())),
         );
 
-        block_on(chain.process_response(MiddlewareType::Spider)).unwrap();
+        let mut context = EngineContext::new(Request::new("https://example.com"));
+        let flow = block_on(chain.process_response(MiddlewareType::Spider, &mut context)).unwrap();
 
+        assert_eq!(flow, Flow::Continue);
         assert_eq!(*log.lock().unwrap(), vec!["spider:res"]);
     }
 
@@ -148,7 +169,10 @@ mod tests {
     }
 
     impl Middleware for Record {
-        fn process_request<'a>(&'a self) -> BoxFuture<'a, Result<(), SpiderError>> {
+        fn process_request<'a>(
+            &'a self,
+            _context: &'a mut EngineContext,
+        ) -> BoxFuture<'a, Result<Flow, SpiderError>> {
             Box::pin(async move {
                 self.log.lock().unwrap().push(match self.name {
                     "first" => "first:req",
@@ -158,11 +182,14 @@ mod tests {
                     "spider" => "spider:req",
                     _ => "unknown:req",
                 });
-                Ok(())
+                Ok(Flow::Continue)
             })
         }
 
-        fn process_response<'a>(&'a self) -> BoxFuture<'a, Result<(), SpiderError>> {
+        fn process_response<'a>(
+            &'a self,
+            _context: &'a mut EngineContext,
+        ) -> BoxFuture<'a, Result<Flow, SpiderError>> {
             Box::pin(async move {
                 self.log.lock().unwrap().push(match self.name {
                     "first" => "first:res",
@@ -172,7 +199,7 @@ mod tests {
                     "spider" => "spider:res",
                     _ => "unknown:res",
                 });
-                Ok(())
+                Ok(Flow::Continue)
             })
         }
     }

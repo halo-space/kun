@@ -112,6 +112,7 @@ pub struct CompiledStep {
     pub callback: Option<String>,
     pub fetch: FetchPlan,
     pub parse: ParsePlan,
+    pub runtime: crate::runtime::Config,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

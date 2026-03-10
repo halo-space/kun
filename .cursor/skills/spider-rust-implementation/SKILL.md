@@ -120,7 +120,7 @@ P0 implementations:
 
 ### `plugins`
 
-- `plugins.toml` parsing
+- parse project-level `plugins.toml`, not an internal library self-registration manifest
 - `(kind, name)` registry
 - override checks
 

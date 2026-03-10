@@ -764,6 +764,11 @@ process_exception(ctx, error) -> Retry(backoff_ms, reason) | Respond(response_st
 
 - `plugins.toml`
 
+补充定位：
+
+- 本仓库作为库时，`local / inline / retry_by_status / retry_by_error / dedup / rate_limit / cookies / proxy` 这类能力直接作为内置实现提供，不需要库自己再依赖一份内部 `plugins.toml` 来注册
+- `plugins.toml` 的职责是留给使用该库的业务项目，用于声明它们自己的扩展能力、覆盖项或自定义实现
+
 ### 9.2 为什么需要插件机制
 
 最终配置用户只关心：
@@ -841,8 +846,8 @@ override = false
 正确流程：
 
 1. 项目开发者实现插件
-2. 在 `plugins.toml` 里声明
-3. 框架启动时自动加载
+2. 在自己项目的 `plugins.toml` 里声明
+3. 框架启动时从项目侧清单自动加载
 4. 配置用户在 `MIDDLEWARES` 中显式启用
 
 例如：
@@ -968,6 +973,7 @@ Engine 负责：
 - `MIDDLEWARES` 每项固定为：`enabled / type / order / options`
 - 中间件类别先支持：`download / spider`
 - 插件机制采用：`plugins.toml + 自动加载`
+- 内置能力不依赖库内部 `plugins.toml` 注册；`plugins.toml` 主要用于使用方项目扩展
 - 插件类别统一为：`middleware / rules / provider / storage`
 - 同类同名覆盖必须显式 `override = true`
 

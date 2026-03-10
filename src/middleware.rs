@@ -29,21 +29,21 @@ pub fn build(configs: &Map) -> Result<MiddlewareChain, SpiderError> {
     let mut chain = MiddlewareChain::default();
 
     for (key, config) in configs {
-        chain.push(key.clone(), config.clone(), instantiate(key)?);
+        chain.push(key.clone(), config.clone(), instantiate(key, configs)?);
     }
 
     Ok(chain)
 }
 
-fn instantiate(key: &str) -> Result<Box<dyn Middleware>, SpiderError> {
+fn instantiate(key: &str, configs: &Map) -> Result<Box<dyn Middleware>, SpiderError> {
     let middleware: Box<dyn Middleware> = match key {
-        "retry_by_status" => Box::new(RetryByStatusMiddleware),
-        "retry_by_error" => Box::new(RetryByErrorMiddleware),
-        "dedup" => Box::new(DedupMiddleware),
-        "interval_gate" => Box::new(IntervalGateMiddleware),
-        "rate_limit" => Box::new(RateLimitMiddleware),
-        "cookies" => Box::new(CookiesMiddleware),
-        "proxy" => Box::new(ProxyMiddleware),
+        "retry_by_status" => Box::new(RetryByStatusMiddleware::new(&configs[key].options)),
+        "retry_by_error" => Box::new(RetryByErrorMiddleware::new(&configs[key].options)),
+        "dedup" => Box::new(DedupMiddleware::new(&configs[key].options)),
+        "interval_gate" => Box::new(IntervalGateMiddleware::new(&configs[key].options)),
+        "rate_limit" => Box::new(RateLimitMiddleware::new(&configs[key].options)),
+        "cookies" => Box::new(CookiesMiddleware::new(&configs[key].options)),
+        "proxy" => Box::new(ProxyMiddleware::new(&configs[key].options)),
         other => {
             return Err(SpiderError::engine(format!(
                 "unknown middleware key: {other}"
