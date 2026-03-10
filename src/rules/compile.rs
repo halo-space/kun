@@ -1,4 +1,5 @@
 use crate::error::SpiderError;
+use crate::middleware::{Map as MiddlewareMap, MiddlewareConfig, MiddlewareType};
 use crate::request::browser::{Config as BrowserConfig, Driver, Engine, Viewport};
 use crate::request::http::Config as HttpConfig;
 use crate::request::{Headers, RequestMode};
@@ -66,6 +67,7 @@ fn parse_step(value: &Value) -> Result<StepConfig, SpiderError> {
         route: optional_map(step, "route"),
         output: optional_map(step, "output"),
         runtime: optional_map(step, "runtime"),
+        middlewares: parse_step_middlewares(step.get("MIDDLEWARES"))?,
     })
 }
 
@@ -170,6 +172,7 @@ fn compile_step(step: StepConfig) -> Result<CompiledStep, SpiderError> {
         fetch: compile_fetch(step.fetch)?,
         parse: compile_parse(step.parse)?,
         runtime: compile_runtime(step.runtime)?,
+        middlewares: compile_middlewares(step.middlewares)?,
     })
 }
 
@@ -423,6 +426,54 @@ fn section_map(
     };
 
     expect_object(value, label).cloned()
+}
+
+fn parse_step_middlewares(value: Option<&Value>) -> Result<BTreeMap<String, Value>, SpiderError> {
+    let Some(value) = value else {
+        return Ok(BTreeMap::new());
+    };
+    value
+        .as_object()
+        .cloned()
+        .ok_or_else(|| SpiderError::rules("step MIDDLEWARES must be an object"))
+}
+
+fn compile_middlewares(raw: BTreeMap<String, Value>) -> Result<MiddlewareMap, SpiderError> {
+    let mut map = MiddlewareMap::new();
+
+    for (key, value) in raw {
+        let entry = value
+            .as_object()
+            .ok_or_else(|| SpiderError::rules(format!("MIDDLEWARES.{key} must be an object")))?;
+
+        let enabled = entry.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+        let r#type = match entry.get("type").and_then(Value::as_str).unwrap_or("download") {
+            "download" => MiddlewareType::Download,
+            "spider" => MiddlewareType::Spider,
+            other => return Err(SpiderError::rules(format!("MIDDLEWARES.{key}.type: unsupported {other}"))),
+        };
+        let order = entry
+            .get("order")
+            .and_then(Value::as_f64)
+            .unwrap_or(100.0) as i32;
+        let options = entry
+            .get("options")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+
+        map.insert(
+            key,
+            MiddlewareConfig {
+                enabled,
+                r#type,
+                order,
+                options,
+            },
+        );
+    }
+
+    Ok(map)
 }
 
 fn parse_list<T>(
@@ -708,5 +759,50 @@ mod tests {
             compile_rules(rules).unwrap_err(),
             SpiderError::Rules("unsupported selector_type: unknown".to_string())
         );
+    }
+
+    #[test]
+    fn compile_rules_supports_step_middlewares() {
+        let rules = Value::String(
+            r#"{
+                "steps":[
+                    {
+                        "id":"parse",
+                        "impl":"dsl",
+                        "fetch":{"request":{}},
+                        "parse":{"fields":[],"links":[]},
+                        "MIDDLEWARES":{
+                            "retry_by_status":{
+                                "enabled":true,
+                                "type":"download",
+                                "order":200,
+                                "options":{"count":5,"status":[429,503]}
+                            },
+                            "dedup":{"enabled":false}
+                        }
+                    }
+                ]
+            }"#
+                .to_string(),
+        );
+
+        let compiled = compile_rules(rules).unwrap();
+
+        assert_eq!(compiled.steps[0].id, "parse");
+        assert!(compiled.steps[0].middlewares.contains_key("retry_by_status"));
+        assert!(compiled.steps[0].middlewares.contains_key("dedup"));
+        assert_eq!(
+            compiled.steps[0].middlewares["retry_by_status"].enabled,
+            true
+        );
+        assert_eq!(compiled.steps[0].middlewares["retry_by_status"].order, 200);
+        assert_eq!(
+            compiled.steps[0].middlewares["retry_by_status"]
+                .options
+                .get("count")
+                .and_then(Value::as_f64),
+            Some(5.0)
+        );
+        assert_eq!(compiled.steps[0].middlewares["dedup"].enabled, false);
     }
 }

@@ -195,7 +195,11 @@ where
         if !self.step_middlewares.contains_key(step_id) {
             let runtime = effective_runtime(spider.runtime(), compiled, step_id)?;
             let defaults = compile_runtime(&runtime)?;
-            let merged = merge_middleware(defaults, spider.middlewares());
+            let step_overrides = step_middlewares(compiled, step_id);
+            let merged = merge_middleware(
+                merge_middleware(defaults, spider.middlewares()),
+                step_overrides,
+            );
             let middleware = build_middleware(&merged)?;
             self.step_middlewares.insert(step_id.to_string(), middleware);
         }
@@ -359,6 +363,19 @@ fn effective_runtime(
         .ok_or_else(|| SpiderError::engine(format!("step not found: {step_id}")))?;
 
     Ok(merge_runtime(&spider_runtime, &step.runtime))
+}
+
+fn step_middlewares(compiled: Option<&Compiled>, step_id: &str) -> crate::middleware::Map {
+    let Some(compiled) = compiled else {
+        return crate::middleware::Map::new();
+    };
+
+    compiled
+        .steps
+        .iter()
+        .find(|step| step.id == step_id)
+        .map(|step| step.middlewares.clone())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -761,6 +778,48 @@ mod tests {
         assert!(second.is_none());
         assert_eq!(*fetches.lock().unwrap(), 1);
         assert!(engine.step_middlewares.contains_key("detail"));
+    }
+
+    #[test]
+    fn engine_applies_step_middlewares_override_spider() {
+        let mut scheduler = MemoryScheduler::default();
+        block_on(scheduler.enqueue(ScheduledTask::new(
+            Request::new("https://example.com/detail/1")
+                .with_meta("next_step", Value::String("detail".to_string())),
+        )))
+        .unwrap();
+
+        let compiled = compile_rules(Value::String(
+            r#"{
+                "steps":[
+                    {
+                        "id":"detail",
+                        "impl":"code",
+                        "callback":"parse_detail",
+                        "runtime":{"schedule":{"interval_ms":10}},
+                        "MIDDLEWARES":{
+                            "dedup":{"enabled":false,"order":999}
+                        }
+                    }
+                ]
+            }"#
+            .to_string(),
+        ))
+        .unwrap();
+
+        let mut engine = Engine::new(scheduler, HtmlHttpDownloader, BrowserDownloader);
+        block_on(engine.execute_spider_once(&FlowSpider, Some(&compiled))).unwrap();
+
+        let dedup = engine
+            .step_middlewares
+            .get("detail")
+            .unwrap()
+            .entries
+            .iter()
+            .find(|entry| entry.key == "dedup")
+            .unwrap();
+        assert!(!dedup.config.enabled);
+        assert_eq!(dedup.config.order, 999);
     }
 
     fn block_on<F: Future>(future: F) -> F::Output {

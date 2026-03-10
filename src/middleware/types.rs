@@ -7,7 +7,7 @@ pub enum MiddlewareType {
     Spider,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MiddlewareConfig {
     pub enabled: bool,
     pub r#type: MiddlewareType,

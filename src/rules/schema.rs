@@ -114,6 +114,7 @@ pub struct CompiledStep {
     pub fetch: FetchPlan,
     pub parse: ParsePlan,
     pub runtime: crate::runtime::Config,
+    pub middlewares: crate::middleware::Map,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
