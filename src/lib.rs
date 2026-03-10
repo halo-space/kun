@@ -1,4 +1,4 @@
-pub mod downloader;
+pub mod download;
 pub mod engine;
 pub mod error;
 pub mod future;

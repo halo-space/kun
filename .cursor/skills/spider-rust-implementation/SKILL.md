@@ -1,6 +1,6 @@
 ---
 name: spider-rust-implementation
-description: Guides Rust implementation for this spider project using Rust 2024 conventions. Use when planning or writing Rust modules, traits, registries, plugin loaders, scheduler, engine, downloader, or P0/P1 implementation boundaries.
+description: Guides Rust implementation for this spider project using Rust 2024 conventions. Use when planning or writing Rust modules, traits, registries, plugin loaders, scheduler, engine, download, or P0/P1 implementation boundaries.
 ---
 
 # Spider Rust Implementation
@@ -43,8 +43,8 @@ P0 must focus on the minimal working kernel:
 - built-in middleware
 - `plugins.toml` loading
 - memory scheduler
-- HTTP downloader
-- browser downloader minimal path
+- HTTP download
+- browser download minimal path
 - engine main loop
 
 Do not let P0 absorb OCR or advanced plugin systems.
@@ -60,7 +60,7 @@ Do not let P0 absorb OCR or advanced plugin systems.
 - `middleware`
 - `plugins`
 - `scheduler`
-- `downloader`
+- `download`
 - `engine`
 - `item`
 - `error`
@@ -129,9 +129,9 @@ P0 implementations:
 - scheduler trait
 - memory scheduler implementation
 
-### `downloader`
+### `download`
 
-- downloader trait
+- download trait
 - HTTP implementation
 - browser implementation placeholder or minimal adapter
 
@@ -168,7 +168,7 @@ Browser is in P0, but keep it minimal:
 Keep interfaces narrow and composable:
 
 - scheduler trait
-- downloader trait
+- download trait
 - middleware trait with `process_request / process_response / process_exception`
 - rules loader abstraction
 - plugin registry keyed by `(kind, name)`

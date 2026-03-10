@@ -1,22 +1,26 @@
-use crate::downloader::traits::Downloader;
+use crate::download::traits::Downloader;
 use crate::error::SpiderError;
 use crate::future::BoxFuture;
-use crate::request::RequestMode;
 use crate::request::Request;
+use crate::request::RequestMode;
 use crate::response::Response;
 
 #[derive(Default)]
-pub struct HttpDownloader;
+pub struct BrowserDownloader;
 
-impl Downloader for HttpDownloader {
+impl Downloader for BrowserDownloader {
     fn fetch<'a>(&'a self, request: &'a Request) -> BoxFuture<'a, Result<Response, SpiderError>> {
         Box::pin(async move {
-            if request.mode != RequestMode::Http {
-                return Err(SpiderError::download("http downloader received non-http request"));
+            if request.mode != RequestMode::Browser {
+                return Err(SpiderError::download(
+                    "browser downloader received non-browser request",
+                ));
             }
 
-            let mut response = Response::from_request(request.clone(), 200, Default::default(), Vec::new());
-            response.protocol = Some("HTTP/1.1".to_string());
+            let mut response =
+                Response::from_request(request.clone(), 200, Default::default(), Vec::new());
+            response.protocol = Some("browser".to_string());
+            response.flags.push("browser".to_string());
             Ok(response)
         })
     }
@@ -25,21 +29,22 @@ impl Downloader for HttpDownloader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::downloader::traits::Downloader;
+    use crate::download::traits::Downloader;
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::Arc;
     use std::task::{Context, Poll, Wake, Waker};
 
     #[test]
-    fn http_downloader_returns_response_for_http_request() {
-        let downloader = HttpDownloader;
-        let request = Request::new("https://example.com");
+    fn browser_downloader_returns_response_for_browser_request() {
+        let downloader = BrowserDownloader;
+        let request = Request::browser("https://example.com");
 
         let response = block_on(downloader.fetch(&request)).unwrap();
 
         assert_eq!(response.url, "https://example.com");
-        assert_eq!(response.protocol.as_deref(), Some("HTTP/1.1"));
+        assert_eq!(response.protocol.as_deref(), Some("browser"));
+        assert_eq!(response.flags, vec!["browser".to_string()]);
     }
 
     fn block_on<F: Future>(future: F) -> F::Output {

@@ -111,8 +111,8 @@ src/
     memory.rs
     types.rs
 
-  downloader.rs
-  downloader/
+  download.rs
+  download/
     traits.rs
     http.rs
     browser.rs
@@ -509,10 +509,10 @@ P0 先做：
 - `scheduler/traits.rs`
 - `scheduler/memory.rs`
 - `scheduler/types.rs`
-- `downloader.rs`
-- `downloader/traits.rs`
-- `downloader/http.rs`
-- `downloader/browser.rs`
+- `download.rs`
+- `download/traits.rs`
+- `download/http.rs`
+- `download/browser.rs`
 
 ### 任务
 
@@ -587,7 +587,7 @@ P0 先做：
 
 1. `Scheduler.lease`
 2. request middleware
-3. downloader
+3. download
 4. response / exception middleware
 5. callback 或 DSL step
 6. 产出 item / follow request
@@ -704,7 +704,7 @@ P0 完成后，至少要跑通下面三个示例。
 7. `middleware`
 8. `runtime`
 9. `scheduler`
-10. `downloader`
+10. `download`
 11. `engine`
 12. `plugins`
 

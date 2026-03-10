@@ -1,7 +1,7 @@
 pub mod context;
 pub mod types;
 
-use crate::downloader::traits::Downloader;
+use crate::download::traits::Downloader;
 use crate::engine::context::EngineContext;
 use crate::engine::types::Flow;
 use crate::error::SpiderError;
@@ -364,7 +364,7 @@ fn effective_runtime(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::downloader::{BrowserDownloader, HttpDownloader};
+    use crate::download::{BrowserDownloader, HttpDownloader};
     use crate::engine::context::EngineContext;
     use crate::engine::types::Flow;
     use crate::middleware::traits::Middleware;
@@ -810,7 +810,7 @@ mod tests {
 
     struct HtmlHttpDownloader;
 
-    impl crate::downloader::traits::Downloader for HtmlHttpDownloader {
+    impl crate::download::traits::Downloader for HtmlHttpDownloader {
         fn fetch<'a>(
             &'a self,
             request: &'a Request,
@@ -828,7 +828,7 @@ mod tests {
 
     struct FlowHttpDownloader;
 
-    impl crate::downloader::traits::Downloader for FlowHttpDownloader {
+    impl crate::download::traits::Downloader for FlowHttpDownloader {
         fn fetch<'a>(
             &'a self,
             request: &'a Request,
@@ -855,7 +855,7 @@ mod tests {
         statuses: Vec<u16>,
     }
 
-    impl crate::downloader::traits::Downloader for CountHttpDownloader {
+    impl crate::download::traits::Downloader for CountHttpDownloader {
         fn fetch<'a>(
             &'a self,
             request: &'a Request,
