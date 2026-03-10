@@ -22,6 +22,7 @@ pub struct StepConfig {
     pub route: BTreeMap<String, Value>,
     pub output: BTreeMap<String, Value>,
     pub runtime: BTreeMap<String, Value>,
+    pub middlewares: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Default)]
