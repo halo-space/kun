@@ -1,0 +1,47 @@
+[[plugins]]
+name = "local"
+kind = "rules"
+entry = "builtin:rules.local"
+override = false
+
+[[plugins]]
+name = "inline"
+kind = "rules"
+entry = "builtin:rules.inline"
+override = false
+
+[[plugins]]
+name = "retry_by_status"
+kind = "middleware"
+entry = "builtin:middleware.retry_by_status"
+override = false
+
+[[plugins]]
+name = "retry_by_error"
+kind = "middleware"
+entry = "builtin:middleware.retry_by_error"
+override = false
+
+[[plugins]]
+name = "dedup"
+kind = "middleware"
+entry = "builtin:middleware.dedup"
+override = false
+
+[[plugins]]
+name = "rate_limit"
+kind = "middleware"
+entry = "builtin:middleware.rate_limit"
+override = false
+
+[[plugins]]
+name = "cookies"
+kind = "middleware"
+entry = "builtin:middleware.cookies"
+override = false
+
+[[plugins]]
+name = "proxy"
+kind = "middleware"
+entry = "builtin:middleware.proxy"
+override = false
