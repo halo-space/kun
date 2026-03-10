@@ -144,8 +144,8 @@
 
 最小方法集合：
 
-- `get()`
-- `getall()`
+- `one()`
+- `all()`
 - `text()`
 - `html()`
 - `attr(name)`

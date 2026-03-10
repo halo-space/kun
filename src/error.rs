@@ -1,6 +1,6 @@
 use std::fmt::{Display, Formatter};
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpiderError {
     RequestBuild(String),
     Download(String),
@@ -26,3 +26,33 @@ impl Display for SpiderError {
 }
 
 impl std::error::Error for SpiderError {}
+
+impl SpiderError {
+    pub fn request_build(message: impl Into<String>) -> Self {
+        Self::RequestBuild(message.into())
+    }
+
+    pub fn download(message: impl Into<String>) -> Self {
+        Self::Download(message.into())
+    }
+
+    pub fn parse(message: impl Into<String>) -> Self {
+        Self::Parse(message.into())
+    }
+
+    pub fn rules(message: impl Into<String>) -> Self {
+        Self::Rules(message.into())
+    }
+
+    pub fn plugin(message: impl Into<String>) -> Self {
+        Self::Plugin(message.into())
+    }
+
+    pub fn scheduler(message: impl Into<String>) -> Self {
+        Self::Scheduler(message.into())
+    }
+
+    pub fn engine(message: impl Into<String>) -> Self {
+        Self::Engine(message.into())
+    }
+}

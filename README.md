@@ -97,7 +97,7 @@ class QuotesSpider(Spider):
     }
 
     async def parse(self, response):
-        for href in response.css(".quote a::attr(href)").getall():
+        for href in response.css(".quote a::attr(href)").all():
             yield response.follow(href, callback=self.parse_detail)
 
     async def parse_detail(self, response):
@@ -234,13 +234,13 @@ response.regex(r"...", options={"trim": False}).group(1)
 
 建议兼容：
 
-- `response.css(".title::text").get()`
-- `response.css(".list a::attr(href)").getall()`
+- `response.css(".title::text").one()`
+- `response.css(".list a::attr(href)").all()`
 
 同时支持统一 API 风格：
 
 - `response.css(".title").text()`
-- `response.css(".list a").attr("href").getall()`
+- `response.css(".list a").attr("href").all()`
 
 ### 3.6 follow 行为
 
@@ -437,12 +437,10 @@ async def parse(self, response):
     "mode": "browser",
     "browser": {
       "driver": "playwright",
-      "channel": "chromium",
+      "engine": "chromium",
       "headless": true,
       "stealth": true,
-      "fingerprint": {
-        "enabled": true
-      },
+      "fingerprint_profile": "desktop_zh_cn",
       "launch_options": {},
       "context_options": {},
       "page_options": {},
@@ -460,7 +458,7 @@ async def parse(self, response):
 - Playwright 驱动
 - 支持 `Chromium` 与 `Google Chrome`
 - 高级 stealth 能力
-- fingerprint 伪装能力
+- fingerprint profile 能力
 - 挑战页、验证页处理扩展点
 
 说明：

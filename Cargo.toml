@@ -4,3 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+regex = "1.12.3"
+scraper = "0.25.0"
+serde_json = "1.0.149"
+sxd-document = "0.3.2"
+sxd-xpath = "0.4.2"

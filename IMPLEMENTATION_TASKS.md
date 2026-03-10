@@ -250,8 +250,8 @@ src/
 
 至少支持：
 
-- `get()`
-- `getall()`
+- `one()`
+- `all()`
 - `text()`
 - `html()`
 - `attr(name)`
@@ -537,8 +537,8 @@ P0 先做：
 
 - 保留 `Request.mode = browser`
 - 支持最小 Playwright 驱动接入
-- 保留 `Chromium` / `Google Chrome` channel 配置入口
-- 为 stealth / fingerprint / challenge-page 处理预留扩展字段
+- 保留 `Chromium` / `Google Chrome` engine 配置入口
+- 为 stealth / fingerprint profile / challenge-page 处理预留扩展字段
 - P0 先追求能跑通最小页面抓取，不追求完整能力覆盖
 
 ### 验收标准

@@ -9,7 +9,7 @@ pub mod xpath;
 pub use ai::AiQuery;
 pub use css::CssQuery;
 pub use json::JsonQuery;
-pub use query::{NodeQuery, ValueQuery};
+pub use query::{Kind, NodeQuery, ValueQuery};
 pub use regex::RegexQuery;
 pub use xml::XmlQuery;
 pub use xpath::XPathQuery;

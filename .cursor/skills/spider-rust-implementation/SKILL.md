@@ -16,8 +16,12 @@ description: Guides Rust implementation for this spider project using Rust 2024 
 
 - Implementation target is Rust.
 - Follow Rust 2024 conventions.
+- Current Rust toolchain target is `1.94.0`.
 - Do not use `mod.rs`.
 - Prefer `foo.rs` and `foo/` submodule layouts instead.
+- Inside a module directory, avoid repeating the module or file name in type and function names.
+- Prefer concise names like `request::browser::Config` and `request::browser::Engine`, not `BrowserRequestConfig` or other redundant path-prefixed names.
+- For parser query APIs, prefer `one` and `all` over `get` and `getall`.
 
 ## P0 Scope
 
