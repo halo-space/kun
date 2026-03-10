@@ -572,6 +572,8 @@ async def parse(self, response):
 
 不引入独立 `transforms` 配置块。复杂处理仍然优先回到代码 callback。
 
+`ai` 解析的底层模型调用实现，后续可优先基于 Rust 库 `async-openai` 接入，作为统一 provider/client 的首选候选；当前阶段先固定对外 API 和执行链，不在这一轮主流程里提前实现具体模型调用细节。
+
 ---
 
 ## 6) Runtime 设计
@@ -1032,6 +1034,7 @@ Rust 实现层面建议遵循 Rust 2024 风格模块布局：
 
 - `response.ocr`
 - `rules.type = redis / db / http`
+- `response.ai` 的真实 provider 接入，优先评估基于 `async-openai` 实现底层模型调用
 - `provider / storage` 插件类别
 - step 级更细粒度覆盖与合并规则
 - 更完整的事件系统

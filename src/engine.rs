@@ -3,10 +3,11 @@ pub mod types;
 
 use crate::downloader::traits::Downloader;
 use crate::error::SpiderError;
-use crate::middleware::{MiddlewareChain, MiddlewareType};
+use crate::middleware::{build as build_middleware, MiddlewareChain, MiddlewareType};
 use crate::request::RequestMode;
 use crate::response::Response;
 use crate::rules::Compiled;
+use crate::runtime::compile::{compile as compile_runtime, merge as merge_middleware};
 use crate::scheduler::traits::Scheduler;
 use crate::spider::{Output as SpiderOutput, Spider};
 
@@ -15,6 +16,7 @@ pub struct Engine<S, H, B> {
     pub http: H,
     pub browser: B,
     pub middleware: MiddlewareChain,
+    pub spider_middleware: MiddlewareChain,
 }
 
 impl<S, H, B> Engine<S, H, B>
@@ -29,6 +31,7 @@ where
             http,
             browser,
             middleware: MiddlewareChain::default(),
+            spider_middleware: MiddlewareChain::default(),
         }
     }
 
@@ -77,13 +80,13 @@ where
     where
         P: Spider,
     {
+        self.refresh_spider_middleware(spider)?;
+
         let Some(task) = self.scheduler.lease().await? else {
             return Ok(None);
         };
 
-        self.middleware
-            .process_request(MiddlewareType::Download)
-            .await?;
+        self.process_request(MiddlewareType::Download).await?;
 
         let response = match task.request.mode {
             RequestMode::Http => self.http.fetch(&task.request).await,
@@ -92,18 +95,12 @@ where
 
         match response {
             Ok(response) => {
-                self.middleware
-                    .process_response(MiddlewareType::Download)
-                    .await?;
-                self.middleware
-                    .process_request(MiddlewareType::Spider)
-                    .await?;
+                self.process_response(MiddlewareType::Download).await?;
+                self.process_request(MiddlewareType::Spider).await?;
                 let output = spider.dispatch(&response, compiled).await;
                 match output {
                     Ok(output) => {
-                        self.middleware
-                            .process_response(MiddlewareType::Spider)
-                            .await?;
+                        self.process_response(MiddlewareType::Spider).await?;
                         for request in output.requests.iter().cloned() {
                             self.scheduler
                                 .enqueue(crate::scheduler::types::ScheduledTask { request })
@@ -113,22 +110,47 @@ where
                         Ok(Some(output))
                     }
                     Err(error) => {
-                        self.middleware
-                            .process_exception(MiddlewareType::Spider, &error)
-                            .await?;
+                        self.process_exception(MiddlewareType::Spider, &error).await?;
                         self.scheduler.nack().await?;
                         Err(error)
                     }
                 }
             }
             Err(error) => {
-                self.middleware
-                    .process_exception(MiddlewareType::Download, &error)
-                    .await?;
+                self.process_exception(MiddlewareType::Download, &error).await?;
                 self.scheduler.nack().await?;
                 Err(error)
             }
         }
+    }
+
+    fn refresh_spider_middleware<P: Spider>(&mut self, spider: &P) -> Result<(), SpiderError> {
+        let defaults = compile_runtime(&spider.runtime())?;
+        let merged = merge_middleware(defaults, spider.middlewares());
+        self.spider_middleware = build_middleware(&merged)?;
+        Ok(())
+    }
+
+    async fn process_request(&self, kind: MiddlewareType) -> Result<(), SpiderError> {
+        self.middleware.process_request(kind).await?;
+        self.spider_middleware.process_request(kind).await?;
+        Ok(())
+    }
+
+    async fn process_response(&self, kind: MiddlewareType) -> Result<(), SpiderError> {
+        self.middleware.process_response(kind).await?;
+        self.spider_middleware.process_response(kind).await?;
+        Ok(())
+    }
+
+    async fn process_exception(
+        &self,
+        kind: MiddlewareType,
+        error: &SpiderError,
+    ) -> Result<(), SpiderError> {
+        self.middleware.process_exception(kind, error).await?;
+        self.spider_middleware.process_exception(kind, error).await?;
+        Ok(())
     }
 }
 
@@ -313,6 +335,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn engine_loads_runtime_middlewares_and_applies_explicit_overrides() {
+        let mut scheduler = MemoryScheduler::default();
+        block_on(scheduler.enqueue(ScheduledTask {
+            request: Request::new("https://example.com"),
+        }))
+        .unwrap();
+
+        let mut engine = Engine::new(scheduler, HtmlHttpDownloader, BrowserDownloader);
+        block_on(engine.execute_spider_once(&RuntimeSpider, None))
+            .unwrap()
+            .unwrap();
+
+        let keys = engine
+            .spider_middleware
+            .entries
+            .iter()
+            .map(|entry| entry.key.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(keys.contains(&"retry_by_error"));
+        assert!(keys.contains(&"interval_gate"));
+        assert!(keys.contains(&"rate_limit"));
+        assert!(keys.contains(&"dedup"));
+
+        let dedup = engine
+            .spider_middleware
+            .entries
+            .iter()
+            .find(|entry| entry.key == "dedup")
+            .unwrap();
+        assert!(!dedup.config.enabled);
+        assert_eq!(dedup.config.order, 999);
+    }
+
     fn block_on<F: Future>(future: F) -> F::Output {
         let waker = Waker::from(Arc::new(NoopWake));
         let mut future = Pin::from(Box::new(future));
@@ -443,6 +500,52 @@ mod tests {
                     Err(SpiderError::engine(format!("unknown callback: {other}")))
                 }),
             }
+        }
+    }
+
+    struct RuntimeSpider;
+
+    impl Spider for RuntimeSpider {
+        fn name(&self) -> &str {
+            "runtime"
+        }
+
+        fn runtime(&self) -> crate::runtime::Config {
+            crate::runtime::Config {
+                schedule: [
+                    ("interval_ms".to_string(), Value::Number(1000.0)),
+                    ("rate_per_minute".to_string(), Value::Number(60.0)),
+                ]
+                .into_iter()
+                .collect(),
+                retry: [("count".to_string(), Value::Number(3.0))]
+                    .into_iter()
+                    .collect(),
+                dedup: [("enabled".to_string(), Value::Bool(true))]
+                    .into_iter()
+                    .collect(),
+            }
+        }
+
+        fn middlewares(&self) -> crate::middleware::Map {
+            [(
+                "dedup".to_string(),
+                MiddlewareConfig {
+                    enabled: false,
+                    r#type: MiddlewareType::Download,
+                    order: 999,
+                    options: BTreeMap::new(),
+                },
+            )]
+            .into_iter()
+            .collect()
+        }
+
+        fn parse<'a>(
+            &'a self,
+            _response: &'a Response,
+        ) -> crate::future::BoxFuture<'a, Result<SpiderOutput, SpiderError>> {
+            Box::pin(async { Ok(SpiderOutput::empty()) })
         }
     }
 }

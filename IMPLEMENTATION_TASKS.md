@@ -289,6 +289,7 @@ src/
 - 提供统一 `response.ai(prompt, source="html", options=None)` 入口
 - 支持最小可用调用链与 `options` 透传
 - P0 重点是接口、配置和执行链打通；具体 provider 可先接最小实现或 mock
+- 后续真实模型调用优先评估基于 Rust 库 `async-openai` 封装 provider/client，但不影响当前主链路推进
 
 ### 验收标准
 
@@ -709,6 +710,11 @@ P0 完成后，至少要跑通下面三个示例。
 - provider/storage 插件
 - 事件系统
 - 高级动态配置
+
+补充说明：
+
+- `AI` 解析能力的真实 provider 接入已经预留方向，后续可优先基于 `async-openai` 实现
+- 当前阶段仍然先保持 `parser::ai` 为接口和执行链占位，不让模型接入阻塞主流程
 
 ---
 

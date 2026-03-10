@@ -1,8 +1,10 @@
 use crate::error::SpiderError;
 use crate::future::BoxFuture;
 use crate::item::Item;
+use crate::middleware::Map as MiddlewareMap;
 use crate::request::Request;
 use crate::response::Response;
+use crate::runtime::Config as RuntimeConfig;
 use crate::rules::{apply as apply_dsl, Compiled, CompiledStep, StepImpl};
 
 #[derive(Debug, Default)]
@@ -25,6 +27,14 @@ pub trait Spider: Send + Sync {
 
     fn start_urls(&self) -> Vec<String> {
         Vec::new()
+    }
+
+    fn runtime(&self) -> RuntimeConfig {
+        RuntimeConfig::default()
+    }
+
+    fn middlewares(&self) -> MiddlewareMap {
+        MiddlewareMap::new()
     }
 
     fn parse<'a>(&'a self, _response: &'a Response) -> BoxFuture<'a, Result<Output, SpiderError>> {
