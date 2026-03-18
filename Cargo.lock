@@ -543,7 +543,7 @@ dependencies = [
 
 [[package]]
 name = "halo-spider"
-version = "0.0.3"
+version = "0.0.4"
 dependencies = [
  "futures",
  "headless_chrome",
