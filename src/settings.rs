@@ -81,6 +81,15 @@ impl Settings {
         self
     }
 
+    pub fn with_middleware(
+        mut self,
+        key: impl Into<String>,
+        config: crate::middleware::MiddlewareConfig,
+    ) -> Self {
+        self.middlewares.insert(key.into(), config);
+        self
+    }
+
     pub fn with_runtime(mut self, runtime: RuntimeConfig) -> Self {
         self.runtime_override = Some(runtime);
         self

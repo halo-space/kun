@@ -25,17 +25,17 @@
 //! 运行：cargo run --example quotes_code
 //! 按 Ctrl+C 优雅退出（引擎会在当前轮次结束后关闭）
 
-use spider::download::{BrowserDownloader, HttpDownloader};
-use spider::engine::Engine;
-use spider::error::SpiderError;
-use spider::item::Item;
-use spider::pipeline::Pipeline;
-use spider::response::Response;
-use spider::scheduler::memory::MemoryScheduler;
-use spider::settings::Settings;
-use spider::spider::{Output, Spider};
-use spider::value::Value;
-use spider::{cb, spider_callbacks};
+use halo_spider::download::{BrowserDownloader, HttpDownloader};
+use halo_spider::engine::Engine;
+use halo_spider::error::SpiderError;
+use halo_spider::item::Item;
+use halo_spider::pipeline::Pipeline;
+use halo_spider::response::Response;
+use halo_spider::scheduler::memory::MemoryScheduler;
+use halo_spider::settings::Settings;
+use halo_spider::spider::{Output, Spider};
+use halo_spider::value::Value;
+use halo_spider::{cb, spider_callbacks};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

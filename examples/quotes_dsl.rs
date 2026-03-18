@@ -11,15 +11,15 @@
 //!
 //! 运行方式：cargo run --example quotes_dsl
 
-use spider::download::{BrowserDownloader, HttpDownloader};
-use spider::engine::Engine;
-use spider::error::SpiderError;
-use spider::response::Response;
-use spider::rules::{apply as apply_dsl, Compiled};
-use spider::rules::compile::compile_rules;
-use spider::scheduler::memory::MemoryScheduler;
-use spider::spider::{Output, Spider};
-use spider::value::Value;
+use halo_spider::download::{BrowserDownloader, HttpDownloader};
+use halo_spider::engine::Engine;
+use halo_spider::error::SpiderError;
+use halo_spider::response::Response;
+use halo_spider::rules::{apply as apply_dsl, Compiled};
+use halo_spider::rules::compile::compile_rules;
+use halo_spider::scheduler::memory::MemoryScheduler;
+use halo_spider::spider::{Output, Spider};
+use halo_spider::value::Value;
 
 struct QuotesDslSpider {
     compiled: Compiled,

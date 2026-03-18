@@ -1,7 +1,12 @@
 [package]
-name = "spider"
-version = "0.1.0"
+name = "halo-spider"
+version = "0.0.1"
 edition = "2024"
+description = "A fast, async web crawling framework inspired by Scrapy, built in Rust"
+license = "MIT"
+repository = "https://github.com/halo-space/kun"
+keywords = ["spider", "crawler", "scraper", "async", "web"]
+categories = ["web-programming", "asynchronous"]
 
 [features]
 default = []

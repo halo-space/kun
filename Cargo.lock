@@ -487,6 +487,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "halo-spider"
+version = "0.0.1"
+dependencies = [
+ "headless_chrome",
+ "quick-xml",
+ "regex",
+ "reqwest",
+ "scraper",
+ "serde",
+ "serde_json",
+ "sxd-document",
+ "sxd-xpath",
+ "thiserror",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "webbrowser",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1647,27 +1668,6 @@ dependencies = [
  "byteorder",
  "libc",
  "winapi",
-]
-
-[[package]]
-name = "spider"
-version = "0.1.0"
-dependencies = [
- "headless_chrome",
- "quick-xml",
- "regex",
- "reqwest",
- "scraper",
- "serde",
- "serde_json",
- "sxd-document",
- "sxd-xpath",
- "thiserror",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
- "webbrowser",
 ]
 
 [[package]]

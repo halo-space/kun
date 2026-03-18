@@ -5,7 +5,7 @@ use crate::download::traits::Downloader;
 use crate::engine::context::EngineContext;
 use crate::engine::types::Flow;
 use crate::error::SpiderError;
-use crate::middleware::{build as build_middleware, MiddlewareChain, MiddlewareType};
+use crate::middleware::{build as build_middleware, FactoryRegistry, MiddlewareChain, MiddlewareType};
 use crate::request::RequestMode;
 use crate::response::Response;
 use crate::rules::Compiled;
@@ -26,6 +26,7 @@ pub struct Engine<S, H, B, P = ()> {
     pub settings: Settings,
     pub middleware: MiddlewareChain,
     pub spider_middleware: MiddlewareChain,
+    pub custom_factories: FactoryRegistry,
     step_middlewares: BTreeMap<String, MiddlewareChain>,
     active_spider: Option<String>,
     active_step: String,
@@ -48,6 +49,7 @@ where
             settings: Settings::default(),
             middleware: MiddlewareChain::default(),
             spider_middleware: MiddlewareChain::default(),
+            custom_factories: FactoryRegistry::new(),
             step_middlewares: BTreeMap::new(),
             active_spider: None,
             active_step: "parse".to_string(),
@@ -83,12 +85,53 @@ where
             settings: self.settings,
             middleware: self.middleware,
             spider_middleware: self.spider_middleware,
+            custom_factories: self.custom_factories,
             step_middlewares: self.step_middlewares,
             active_spider: self.active_spider,
             active_step: self.active_step,
             allowed_domains: self.allowed_domains,
             shutdown: self.shutdown,
         }
+    }
+
+    /// 直接注册一个自定义中间件实例到引擎级中间件链。
+    ///
+    /// 这个中间件对所有请求/响应生效。
+    ///
+    /// ```ignore
+    /// engine.add_middleware(
+    ///     "custom_ua",
+    ///     MiddlewareConfig { enabled: true, r#type: MiddlewareType::Download, order: 50, .. },
+    ///     Box::new(MyUaMiddleware),
+    /// );
+    /// ```
+    pub fn add_middleware(
+        mut self,
+        key: impl Into<String>,
+        config: crate::middleware::MiddlewareConfig,
+        middleware: Box<dyn crate::middleware::Middleware>,
+    ) -> Self {
+        self.middleware.push(key, config, middleware);
+        self
+    }
+
+    /// 注册一个自定义中间件工厂。
+    ///
+    /// 注册后，可以在 `Settings::middlewares` 或 DSL 规则的 `MIDDLEWARES` 中
+    /// 用同名 key 引用，引擎会自动调用工厂创建实例。
+    ///
+    /// ```ignore
+    /// engine.register_middleware("custom_ua", |options| {
+    ///     Ok(Box::new(MyUaMiddleware::new(options)))
+    /// });
+    /// ```
+    pub fn register_middleware(
+        mut self,
+        key: impl Into<String>,
+        factory: impl Fn(&std::collections::BTreeMap<String, crate::value::Value>) -> Result<Box<dyn crate::middleware::Middleware>, SpiderError> + Send + Sync + 'static,
+    ) -> Self {
+        self.custom_factories.register(key, factory);
+        self
     }
 
     /// 获取一个可 Clone 的停止句柄。
@@ -414,7 +457,7 @@ where
                 merge_middleware(defaults, self.settings.middlewares.clone()),
                 step_overrides,
             );
-            let middleware = build_middleware(&merged)?;
+            let middleware = build_middleware(&merged, &self.custom_factories)?;
             self.step_middlewares.insert(step_id.to_string(), middleware);
         }
 
