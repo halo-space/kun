@@ -1,11 +1,65 @@
 use crate::error::SpiderError;
-use crate::future::BoxFuture;
 use crate::item::Item;
-use crate::middleware::Map as MiddlewareMap;
 use crate::request::Request;
 use crate::response::Response;
-use crate::runtime::Config as RuntimeConfig;
+use crate::rules::Config as RulesConfig;
 use crate::rules::{apply as apply_dsl, Compiled, CompiledStep, StepImpl};
+
+/// 将方法名转为回调字符串，写法接近函数引用。
+///
+/// ```rust,ignore
+/// // 以下三种写法完全等价：
+/// request.with_callback(cb!(parse_detail))      // 像传函数引用
+/// request.with_callback(cb!(Self::parse_detail)) // 也支持 Self:: 前缀
+/// request.with_callback("parse_detail")          // 直接写字符串
+/// ```
+///
+/// 底层就是 `stringify!`，编译期零开销。
+/// 好处：拼写错误会在 `call()` 路由时报错而非静默忽略，
+/// 且代码搜索 `cb!(parse_detail)` 比搜字符串更精确。
+#[macro_export]
+macro_rules! cb {
+    (Self::$method:ident) => { stringify!($method) };
+    ($method:ident) => { stringify!($method) };
+}
+
+/// 自动生成 `call()` 的路由分发，免去手写 match。
+///
+/// ```rust,ignore
+/// impl Spider for MySpider {
+///     fn name(&self) -> &str { "my" }
+///
+///     async fn parse(&self, response: &Response) -> Result<Output, SpiderError> {
+///         let req = response.follow(url)
+///             .with_callback(cb!(Self::parse_detail));  // 像传函数引用
+///         Ok(Output { items: vec![], requests: vec![req] })
+///     }
+///
+///     spider_callbacks!(parse, parse_detail, parse_comment);
+/// }
+///
+/// impl MySpider {
+///     async fn parse_detail(&self, r: &Response) -> Result<Output, SpiderError> { ... }
+///     async fn parse_comment(&self, r: &Response) -> Result<Output, SpiderError> { ... }
+/// }
+/// ```
+#[macro_export]
+macro_rules! spider_callbacks {
+    ($($method:ident),+ $(,)?) => {
+        async fn call(
+            &self,
+            name: &str,
+            response: &$crate::response::Response,
+        ) -> Result<$crate::spider::Output, $crate::error::SpiderError> {
+            match name {
+                $(stringify!($method) => self.$method(response).await,)+
+                other => Err($crate::error::SpiderError::engine(
+                    format!("unknown callback: {other}"),
+                )),
+            }
+        }
+    };
+}
 
 #[derive(Debug, Default)]
 pub struct Output {
@@ -15,13 +69,11 @@ pub struct Output {
 
 impl Output {
     pub fn empty() -> Self {
-        Self {
-            items: Vec::new(),
-            requests: Vec::new(),
-        }
+        Self::default()
     }
 }
 
+#[allow(async_fn_in_trait)]
 pub trait Spider: Send + Sync {
     fn name(&self) -> &str;
 
@@ -29,57 +81,51 @@ pub trait Spider: Send + Sync {
         Vec::new()
     }
 
-    fn runtime(&self) -> RuntimeConfig {
-        RuntimeConfig::default()
+    /// 允许爬取的域名列表。空列表表示不限制。
+    /// 引擎会在入队前过滤不属于这些域名的请求。
+    fn allowed_domains(&self) -> Vec<String> {
+        Vec::new()
     }
 
-    fn middlewares(&self) -> MiddlewareMap {
-        MiddlewareMap::new()
+    fn rules(&self) -> Option<RulesConfig> {
+        None
     }
 
-    fn parse<'a>(&'a self, _response: &'a Response) -> BoxFuture<'a, Result<Output, SpiderError>> {
-        Box::pin(async { Ok(Output::empty()) })
+    async fn parse(&self, _response: &Response) -> Result<Output, SpiderError> {
+        Ok(Output::empty())
     }
 
-    fn call<'a>(
-        &'a self,
-        name: &'a str,
-        response: &'a Response,
-    ) -> BoxFuture<'a, Result<Output, SpiderError>> {
+    async fn call(&self, name: &str, response: &Response) -> Result<Output, SpiderError> {
         match name {
-            "parse" => self.parse(response),
-            other => Box::pin(async move {
-                Err(SpiderError::engine(format!("unknown callback: {other}")))
-            }),
+            "parse" => self.parse(response).await,
+            other => Err(SpiderError::engine(format!("unknown callback: {other}"))),
         }
     }
 
-    fn dispatch<'a>(
-        &'a self,
-        response: &'a Response,
-        compiled: Option<&'a Compiled>,
-    ) -> BoxFuture<'a, Result<Output, SpiderError>> {
-        Box::pin(async move {
-            let Some(step) = resolve_step(response, compiled)? else {
-                return self.parse(response).await;
-            };
+    async fn dispatch(
+        &self,
+        response: &Response,
+        compiled: Option<&Compiled>,
+    ) -> Result<Output, SpiderError> {
+        let Some(step) = resolve_step(response, compiled)? else {
+            return self.parse(response).await;
+        };
 
-            match step.r#impl {
-                StepImpl::Dsl => {
-                    let output = apply_dsl(response, step)?;
-                    Ok(Output {
-                        items: output.items,
-                        requests: output.requests,
-                    })
-                }
-                StepImpl::Code => {
-                    let callback = step.callback.as_deref().ok_or_else(|| {
-                        SpiderError::engine(format!("code step {} missing callback", step.id))
-                    })?;
-                    self.call(callback, response).await
-                }
+        match step.r#impl {
+            StepImpl::Dsl => {
+                let output = apply_dsl(response, step)?;
+                Ok(Output {
+                    items: output.items,
+                    requests: output.requests,
+                })
             }
-        })
+            StepImpl::Code => {
+                let callback = step.callback.as_deref().ok_or_else(|| {
+                    SpiderError::engine(format!("code step {} missing callback", step.id))
+                })?;
+                self.call(callback, response).await
+            }
+        }
     }
 }
 
@@ -118,36 +164,26 @@ mod tests {
             "test"
         }
 
-        fn parse<'a>(&'a self, response: &'a Response) -> BoxFuture<'a, Result<Output, SpiderError>> {
+        async fn parse(&self, response: &Response) -> Result<Output, SpiderError> {
             let title = response.css("h1.title::text").one().unwrap_or_default();
-            Box::pin(async move {
-                Ok(Output {
-                    items: vec![Item::new().with_field("title", Value::String(title))],
-                    requests: Vec::new(),
-                })
+            Ok(Output {
+                items: vec![Item::new().with_field("title", Value::String(title))],
+                requests: Vec::new(),
             })
         }
 
-        fn call<'a>(
-            &'a self,
-            name: &'a str,
-            response: &'a Response,
-        ) -> BoxFuture<'a, Result<Output, SpiderError>> {
-            match name {
-                "parse" => self.parse(response),
-                "parse_detail" => Box::pin(async move {
-                    Ok(Output {
-                        items: vec![Item::new().with_field(
-                            "detail",
-                            Value::String(response.url.clone()),
-                        )],
-                        requests: Vec::new(),
-                    })
-                }),
-                other => Box::pin(async move {
-                    Err(SpiderError::engine(format!("unknown callback: {other}")))
-                }),
-            }
+        spider_callbacks!(parse, parse_detail);
+    }
+
+    impl TestSpider {
+        async fn parse_detail(&self, response: &Response) -> Result<Output, SpiderError> {
+            Ok(Output {
+                items: vec![Item::new().with_field(
+                    "detail",
+                    Value::String(response.url.clone()),
+                )],
+                requests: Vec::new(),
+            })
         }
     }
 

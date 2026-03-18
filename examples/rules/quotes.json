@@ -1,0 +1,95 @@
+{
+  "steps": [
+    {
+      "id": "parse",
+      "impl": "dsl",
+      "parse": {
+        "fields": [
+          {
+            "name": "text",
+            "source": "html",
+            "selector_type": "css",
+            "selector": ["span.text"],
+            "attribute": "text"
+          },
+          {
+            "name": "author",
+            "source": "html",
+            "selector_type": "css",
+            "selector": ["small.author"],
+            "attribute": "text"
+          },
+          {
+            "name": "tags",
+            "source": "html",
+            "selector_type": "css",
+            "selector": ["div.tags a.tag"],
+            "attribute": "text",
+            "multiple": true
+          }
+        ],
+        "links": [
+          {
+            "name": "next_page",
+            "source": "html",
+            "selector_type": "css",
+            "selector": ["li.next a"],
+            "attribute": "attr:href",
+            "to": {
+              "next_step": "parse"
+            }
+          },
+          {
+            "name": "author_detail",
+            "source": "html",
+            "selector_type": "css",
+            "selector": ["div.quote span a"],
+            "attribute": "attr:href",
+            "to": {
+              "next_step": "detail",
+              "meta_patch": {
+                "from_list": true
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "detail",
+      "impl": "dsl",
+      "parse": {
+        "fields": [
+          {
+            "name": "name",
+            "source": "html",
+            "selector_type": "css",
+            "selector": ["h3.author-title"],
+            "attribute": "text"
+          },
+          {
+            "name": "born_date",
+            "source": "html",
+            "selector_type": "css",
+            "selector": ["span.author-born-date"],
+            "attribute": "text"
+          },
+          {
+            "name": "born_location",
+            "source": "html",
+            "selector_type": "css",
+            "selector": ["span.author-born-location"],
+            "attribute": "text"
+          },
+          {
+            "name": "bio",
+            "source": "html",
+            "selector_type": "css",
+            "selector": ["div.author-description"],
+            "attribute": "text"
+          }
+        ]
+      }
+    }
+  ]
+}

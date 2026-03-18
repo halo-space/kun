@@ -1,8 +1,8 @@
 use crate::error::SpiderError;
-use crate::future::BoxFuture;
 use crate::request::Request;
 use crate::response::Response;
 
+#[allow(async_fn_in_trait)]
 pub trait Downloader: Send + Sync {
-    fn fetch<'a>(&'a self, request: &'a Request) -> BoxFuture<'a, Result<Response, SpiderError>>;
+    async fn fetch(&self, request: &Request) -> Result<Response, SpiderError>;
 }

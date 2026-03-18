@@ -142,6 +142,16 @@ impl Request {
         self
     }
 
+    pub fn with_cookie(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.http_mut().cookies.insert(key.into(), value.into());
+        self
+    }
+
+    pub fn with_cookies(mut self, cookies: BTreeMap<String, String>) -> Self {
+        self.http_mut().cookies.extend(cookies);
+        self
+    }
+
     pub fn with_http(mut self, http: HttpConfig) -> Self {
         self.http = Some(http);
         self.mode = RequestMode::Http;

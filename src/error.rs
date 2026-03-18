@@ -1,31 +1,22 @@
-use std::fmt::{Display, Formatter};
+use thiserror::Error;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum SpiderError {
+    #[error("request build error: {0}")]
     RequestBuild(String),
+    #[error("download error: {0}")]
     Download(String),
+    #[error("parse error: {0}")]
     Parse(String),
+    #[error("rules error: {0}")]
     Rules(String),
+    #[error("plugin error: {0}")]
     Plugin(String),
+    #[error("scheduler error: {0}")]
     Scheduler(String),
+    #[error("engine error: {0}")]
     Engine(String),
 }
-
-impl Display for SpiderError {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::RequestBuild(msg) => write!(f, "request build error: {msg}"),
-            Self::Download(msg) => write!(f, "download error: {msg}"),
-            Self::Parse(msg) => write!(f, "parse error: {msg}"),
-            Self::Rules(msg) => write!(f, "rules error: {msg}"),
-            Self::Plugin(msg) => write!(f, "plugin error: {msg}"),
-            Self::Scheduler(msg) => write!(f, "scheduler error: {msg}"),
-            Self::Engine(msg) => write!(f, "engine error: {msg}"),
-        }
-    }
-}
-
-impl std::error::Error for SpiderError {}
 
 impl SpiderError {
     pub fn request_build(message: impl Into<String>) -> Self {

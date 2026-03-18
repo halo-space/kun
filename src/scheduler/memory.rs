@@ -1,5 +1,4 @@
 use crate::error::SpiderError;
-use crate::future::BoxFuture;
 use crate::scheduler::traits::Scheduler;
 use crate::scheduler::types::ScheduledTask;
 use std::collections::VecDeque;
@@ -34,44 +33,40 @@ impl MemoryScheduler {
 }
 
 impl Scheduler for MemoryScheduler {
-    fn enqueue<'a>(&'a mut self, task: ScheduledTask) -> BoxFuture<'a, Result<(), SpiderError>> {
-        Box::pin(async move {
-            self.push_task(task);
-            Ok(())
-        })
+    async fn enqueue(&mut self, task: ScheduledTask) -> Result<(), SpiderError> {
+        self.push_task(task);
+        Ok(())
     }
 
-    fn lease<'a>(&'a mut self) -> BoxFuture<'a, Result<Option<ScheduledTask>, SpiderError>> {
-        Box::pin(async move {
-            if self.inflight.is_some() {
-                return Ok(None);
-            }
+    async fn lease(&mut self) -> Result<Option<ScheduledTask>, SpiderError> {
+        if self.inflight.is_some() {
+            return Ok(None);
+        }
 
-            self.promote_delayed();
+        self.promote_delayed();
 
-            let Some(task) = self.ready.pop_front() else {
-                return Ok(None);
-            };
+        let Some(task) = self.ready.pop_front() else {
+            return Ok(None);
+        };
 
-            self.inflight = Some(task.clone());
-            Ok(Some(task))
-        })
+        self.inflight = Some(task.clone());
+        Ok(Some(task))
     }
 
-    fn ack<'a>(&'a mut self) -> BoxFuture<'a, Result<(), SpiderError>> {
-        Box::pin(async move {
-            self.inflight = None;
-            Ok(())
-        })
+    async fn ack(&mut self) -> Result<(), SpiderError> {
+        self.inflight = None;
+        Ok(())
     }
 
-    fn nack<'a>(&'a mut self) -> BoxFuture<'a, Result<(), SpiderError>> {
-        Box::pin(async move {
-            if let Some(task) = self.inflight.take() {
-                self.ready.push_front(task);
-            }
-            Ok(())
-        })
+    async fn nack(&mut self) -> Result<(), SpiderError> {
+        if let Some(task) = self.inflight.take() {
+            self.ready.push_front(task);
+        }
+        Ok(())
+    }
+
+    async fn has_pending(&self) -> Result<bool, SpiderError> {
+        Ok(!self.ready.is_empty() || !self.delayed.is_empty() || self.inflight.is_some())
     }
 }
 

@@ -1,7 +1,7 @@
 pub mod certificate;
 pub mod follow;
 
-use crate::parser::{AiQuery, CssQuery, JsonQuery, RegexQuery, XmlQuery, XPathQuery};
+use crate::parser::{AiQuery, CssQuery, FeedQuery, JsonQuery, RegexQuery, XmlQuery, XPathQuery};
 use crate::request::{Headers, Metadata, Request};
 use certificate::CertificateInfo;
 use follow::build_follow_request;
@@ -85,6 +85,10 @@ impl Response {
 
     pub fn ai(&self, prompt: impl Into<String>) -> AiQuery {
         AiQuery::new(self.text.clone(), prompt, Some("html".to_string()))
+    }
+
+    pub fn feed(&self) -> FeedQuery {
+        FeedQuery::new(self.text.clone())
     }
 
     pub fn follow(&self, url: impl Into<String>) -> Request {
