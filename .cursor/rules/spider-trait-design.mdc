@@ -1,0 +1,13 @@
+---
+description: Spider trait design and callback conventions
+alwaysApply: true
+---
+
+# Spider Trait Design
+
+- Spider 只负责定义：name、start_urls、allowed_domains、rules、parse、callback 分发。
+- Spider 不持有 runtime 配置、middleware 配置或 Settings，这些属于 Engine 层。
+- `parse` 是唯一的默认入口回调，`start_urls` 默认路由到 `parse`。
+- 使用宏生成 callback 分发逻辑，消除手写 match 样板代码。
+- callback 引用在用户侧应接近函数引用的写法体验，内部使用字符串分发。
+- 额外的 parse 方法放在 Spider 实现块中，不放在 trait impl 内。

@@ -22,6 +22,7 @@ use std::time::Duration;
 pub struct Settings {
     pub download_delay: Duration,
     pub concurrent_requests: usize,
+    pub concurrent_requests_per_domain: usize,
     pub retry_times: u32,
     pub retry_http_codes: Vec<u16>,
     pub dedup_enabled: bool,
@@ -35,6 +36,7 @@ impl Default for Settings {
         Self {
             download_delay: Duration::from_millis(0),
             concurrent_requests: 16,
+            concurrent_requests_per_domain: 8,
             retry_times: 2,
             retry_http_codes: vec![500, 502, 503, 504, 408],
             dedup_enabled: true,
@@ -53,6 +55,11 @@ impl Settings {
 
     pub fn concurrent_requests(mut self, n: usize) -> Self {
         self.concurrent_requests = n;
+        self
+    }
+
+    pub fn concurrent_requests_per_domain(mut self, n: usize) -> Self {
+        self.concurrent_requests_per_domain = n;
         self
     }
 

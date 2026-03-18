@@ -7,7 +7,7 @@ use std::collections::VecDeque;
 pub struct MemoryScheduler {
     ready: VecDeque<ScheduledTask>,
     delayed: Vec<ScheduledTask>,
-    inflight: Option<ScheduledTask>,
+    inflight: Vec<ScheduledTask>,
 }
 
 impl MemoryScheduler {
@@ -39,34 +39,31 @@ impl Scheduler for MemoryScheduler {
     }
 
     async fn lease(&mut self) -> Result<Option<ScheduledTask>, SpiderError> {
-        if self.inflight.is_some() {
-            return Ok(None);
-        }
-
         self.promote_delayed();
 
         let Some(task) = self.ready.pop_front() else {
             return Ok(None);
         };
 
-        self.inflight = Some(task.clone());
+        self.inflight.push(task.clone());
         Ok(Some(task))
     }
 
-    async fn ack(&mut self) -> Result<(), SpiderError> {
-        self.inflight = None;
+    async fn ack(&mut self, url: &str) -> Result<(), SpiderError> {
+        self.inflight.retain(|t| t.request.url != url);
         Ok(())
     }
 
-    async fn nack(&mut self) -> Result<(), SpiderError> {
-        if let Some(task) = self.inflight.take() {
+    async fn nack(&mut self, url: &str) -> Result<(), SpiderError> {
+        if let Some(pos) = self.inflight.iter().position(|t| t.request.url == url) {
+            let task = self.inflight.remove(pos);
             self.ready.push_front(task);
         }
         Ok(())
     }
 
     async fn has_pending(&self) -> Result<bool, SpiderError> {
-        Ok(!self.ready.is_empty() || !self.delayed.is_empty() || self.inflight.is_some())
+        Ok(!self.ready.is_empty() || !self.delayed.is_empty() || !self.inflight.is_empty())
     }
 }
 
@@ -107,18 +104,20 @@ mod tests {
         let second = block_on(scheduler.lease()).unwrap();
 
         assert_eq!(
-            first.map(|task| task.request.url),
-            Some("https://example.com/a".to_string())
+            first.as_ref().map(|t| t.request.url.as_str()),
+            Some("https://example.com/a")
         );
-        assert!(second.is_none());
-
-        block_on(scheduler.ack()).unwrap();
-
-        let third = block_on(scheduler.lease()).unwrap();
         assert_eq!(
-            third.map(|task| task.request.url),
-            Some("https://example.com/b".to_string())
+            second.as_ref().map(|t| t.request.url.as_str()),
+            Some("https://example.com/b")
         );
+
+        assert!(block_on(scheduler.has_pending()).unwrap());
+
+        block_on(scheduler.ack("https://example.com/a")).unwrap();
+        block_on(scheduler.ack("https://example.com/b")).unwrap();
+
+        assert!(!block_on(scheduler.has_pending()).unwrap());
     }
 
     #[test]
@@ -135,7 +134,7 @@ mod tests {
             Some("https://example.com/retry".to_string())
         );
 
-        block_on(scheduler.nack()).unwrap();
+        block_on(scheduler.nack("https://example.com/retry")).unwrap();
 
         let second = block_on(scheduler.lease()).unwrap();
         assert_eq!(

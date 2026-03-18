@@ -1,0 +1,15 @@
+---
+description: Settings and middleware architecture rules
+alwaysApply: true
+---
+
+# Settings And Middleware
+
+- Settings 是引擎级集中配置，对应 Scrapy 的 settings.py。
+- Spider 不暴露 `runtime()` 或 `middlewares()` 方法，所有运行配置通过 Settings 传入 Engine。
+- 自定义中间件支持两种注册方式：
+  1. 直接注册实例到引擎级中间件链。
+  2. 注册工厂函数，通过配置中的 key 名自动实例化。
+- 每个中间件配置固定四个字段：`enabled`、`type`、`order`、`options`。
+- 内建中间件使用短逻辑名（如 `retry_by_status`、`cookies`、`proxy`），不使用完整类路径作为 key。
+- 显式 MIDDLEWARES 配置可覆盖 runtime 自动生成的默认中间件配置。

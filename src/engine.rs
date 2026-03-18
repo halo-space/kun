@@ -7,14 +7,15 @@ use crate::engine::types::Flow;
 use crate::error::SpiderError;
 use crate::middleware::{build as build_middleware, FactoryRegistry, MiddlewareChain, MiddlewareType};
 use crate::request::RequestMode;
-use crate::response::Response;
 use crate::rules::Compiled;
 use crate::runtime::compile::{compile as compile_runtime, merge as merge_middleware};
 use crate::runtime::{merge as merge_runtime, Config as RuntimeConfig};
 use crate::scheduler::traits::Scheduler;
 use crate::settings::Settings;
 use crate::spider::{Output as SpiderOutput, Spider};
+use futures::stream::{FuturesUnordered, StreamExt};
 use std::collections::BTreeMap;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -151,189 +152,15 @@ where
         }
     }
 
-    pub async fn execute_once(&mut self) -> Result<Option<Response>, SpiderError> {
-        let Some(task) = self.scheduler.lease().await? else {
-            return Ok(None);
-        };
-        let mut context = EngineContext::new(task.request);
-
-        let flow = self.process_request(MiddlewareType::Download, &mut context).await?;
-        if self.apply_flow(flow, &context).await? {
-            return Ok(None);
-        }
-
-        let result = match context.request.mode {
-            RequestMode::Http => self.http.fetch(&context.request).await,
-            RequestMode::Browser => self.browser.fetch(&context.request).await,
-        };
-
-        match result {
-            Ok(response) => {
-                context.response = Some(response.clone());
-                let flow = self
-                    .process_response(MiddlewareType::Download, &mut context)
-                    .await?;
-                if self.apply_flow(flow, &context).await? {
-                    return Ok(None);
-                }
-                self.scheduler.ack().await?;
-                Ok(Some(response))
-            }
-            Err(error) => {
-                let flow = self
-                    .process_exception(MiddlewareType::Download, &mut context, &error)
-                    .await?;
-                if self.apply_error_flow(flow, &context).await? {
-                    return Ok(None);
-                }
-                self.scheduler.nack().await?;
-                Err(error)
-            }
-        }
-    }
-
-    pub async fn execute_spider_once<Sp>(
-        &mut self,
-        spider: &Sp,
-        compiled: Option<&Compiled>,
-    ) -> Result<Option<SpiderOutput>, SpiderError>
-    where
-        Sp: Spider,
-    {
-        let Some(task) = self.scheduler.lease().await? else {
-            return Ok(None);
-        };
-        let step_id = step_id_from_request(&task.request);
-        self.prepare_spider_middleware(spider, compiled, &step_id)?;
-        let mut context = EngineContext::new(task.request);
-
-        let flow = self.process_request(MiddlewareType::Download, &mut context).await?;
-        if self.apply_flow(flow, &context).await? {
-            return Ok(None);
-        }
-
-        let response = match context.request.mode {
-            RequestMode::Http => self.http.fetch(&context.request).await,
-            RequestMode::Browser => self.browser.fetch(&context.request).await,
-        };
-
-        match response {
-            Ok(response) => {
-                context.response = Some(response.clone());
-
-                let flow = self
-                    .process_response(MiddlewareType::Download, &mut context)
-                    .await?;
-                if self.apply_flow(flow, &context).await? {
-                    return Ok(None);
-                }
-
-                let flow = self.process_request(MiddlewareType::Spider, &mut context).await?;
-                if self.apply_flow(flow, &context).await? {
-                    return Ok(None);
-                }
-
-                let output = spider.dispatch(&response, compiled).await;
-                match output {
-                    Ok(mut output) => {
-                        let flow = self
-                            .process_response(MiddlewareType::Spider, &mut context)
-                            .await?;
-                        if self.apply_flow(flow, &context).await? {
-                            return Ok(None);
-                        }
-
-                        let spider_name = spider.name();
-
-                        // Pipeline: 依次处理每个 Item，丢弃返回 false 的
-                        let mut kept_items = Vec::with_capacity(output.items.len());
-                        for mut item in output.items.drain(..) {
-                            match self.pipeline.process(&mut item, spider_name).await {
-                                Ok(true) => kept_items.push(item),
-                                Ok(false) => {
-                                    tracing::debug!(spider = spider_name, "pipeline 丢弃 item");
-                                }
-                                Err(e) => {
-                                    tracing::warn!(spider = spider_name, error = %e, "pipeline 处理 item 出错");
-                                }
-                            }
-                        }
-                        output.items = kept_items;
-
-                        // 域名过滤 + 入队
-                        let mut enqueued = 0usize;
-                        let mut filtered = 0usize;
-                        for request in output.requests.iter().cloned() {
-                            if request.dont_filter || is_domain_allowed(&request.url, &self.allowed_domains) {
-                                self.scheduler
-                                    .enqueue(crate::scheduler::types::ScheduledTask::new(request))
-                                    .await?;
-                                enqueued += 1;
-                            } else {
-                                tracing::debug!(
-                                    url = request.url.as_str(),
-                                    "域名不在 allowed_domains 内，已过滤"
-                                );
-                                filtered += 1;
-                            }
-                        }
-
-                        if enqueued > 0 || filtered > 0 {
-                            tracing::debug!(
-                                spider = spider_name,
-                                enqueued,
-                                filtered,
-                                "跟进请求统计"
-                            );
-                        }
-
-                        self.scheduler.ack().await?;
-                        Ok(Some(output))
-                    }
-                    Err(error) => {
-                        tracing::error!(
-                            spider = spider.name(),
-                            url = context.request.url.as_str(),
-                            error = %error,
-                            "解析回调执行失败"
-                        );
-                        let flow = self
-                            .process_exception(MiddlewareType::Spider, &mut context, &error)
-                            .await?;
-                        if self.apply_error_flow(flow, &context).await? {
-                            return Ok(None);
-                        }
-                        self.scheduler.nack().await?;
-                        Err(error)
-                    }
-                }
-            }
-            Err(error) => {
-                tracing::warn!(
-                    url = context.request.url.as_str(),
-                    error = %error,
-                    "下载失败"
-                );
-                let flow = self
-                    .process_exception(MiddlewareType::Download, &mut context, &error)
-                    .await?;
-                if self.apply_error_flow(flow, &context).await? {
-                    return Ok(None);
-                }
-                self.scheduler.nack().await?;
-                Err(error)
-            }
-        }
-    }
-
     /// 启动引擎，**持续运行**直到收到 stop 信号。
+    ///
+    /// 支持并发下载：
+    /// - `settings.concurrent_requests` 控制全局并发上限（默认 16）
+    /// - `settings.concurrent_requests_per_domain` 控制每域名并发上限（默认 8）
     ///
     /// 引擎不会因为队列为空而自动退出。只有两种方式退出：
     /// 1. 调用 `engine.stop()` 或 `shutdown_handle().stop()`
     /// 2. Ctrl+C（配合 tokio::signal 调 stop）
-    ///
-    /// 队列空时进入 idle 等待，随时准备接收新任务。
-    /// 任务执行完后自动回到等待状态。
     pub async fn run<Sp: Spider>(
         &mut self,
         spider: &Sp,
@@ -356,6 +183,8 @@ where
             None => None,
         };
 
+        self.prepare_all_step_middlewares(spider, compiled.as_ref())?;
+
         let start_urls = spider.start_urls();
         tracing::info!(spider = spider_name, count = start_urls.len(), "入队起始 URL");
         for url in start_urls {
@@ -365,50 +194,97 @@ where
                 .await?;
         }
 
-        let mut outputs = Vec::new();
-        let mut round = 0usize;
+        let max_concurrent = self.settings.concurrent_requests;
+        let per_domain_limit = self.settings.concurrent_requests_per_domain;
         let idle_timeout = self.settings.idle_timeout;
 
+        tracing::info!(
+            spider = spider_name,
+            concurrent = max_concurrent,
+            per_domain = per_domain_limit,
+            "并发配置"
+        );
+
+        let global_sem = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+        let mut domain_sems: BTreeMap<String, Arc<tokio::sync::Semaphore>> = BTreeMap::new();
+
+        let default_step_mw = MiddlewareChain::default();
+
+        type TaskFuture<'a> = Pin<Box<dyn std::future::Future<Output = TaskResult> + 'a>>;
+        let mut inflight: FuturesUnordered<TaskFuture<'_>> = FuturesUnordered::new();
+        let mut outputs = Vec::new();
+        let mut round = 0usize;
+
+        let scheduler = &mut self.scheduler;
+        let http = &self.http;
+        let browser = &self.browser;
+        let pipeline = &self.pipeline;
+        let engine_mw = &self.middleware;
+        let step_mws = &self.step_middlewares;
+        let allowed_domains = &self.allowed_domains;
+        let shutdown = &self.shutdown;
+
         loop {
-            // 每轮开始前检查 stop 信号
-            if self.shutdown.load(Ordering::Relaxed) {
-                tracing::info!(spider = spider_name, "收到 stop 信号，开始优雅退出");
+            if shutdown.load(Ordering::Relaxed) {
+                tracing::info!(spider = spider_name, "收到 stop 信号，等待 {} 个进行中任务完成...", inflight.len());
+                while let Some(result) = inflight.next().await {
+                    handle_task_result(result, scheduler, allowed_domains, &mut outputs, &mut round, spider_name).await?;
+                }
                 break;
             }
 
-            match self
-                .execute_spider_once(spider, compiled.as_ref())
-                .await
-            {
-                Ok(Some(output)) => {
-                    round += 1;
-                    tracing::info!(
+            while inflight.len() < max_concurrent {
+                let Ok(global_permit) = global_sem.clone().try_acquire_owned() else {
+                    break;
+                };
+                let Some(task) = scheduler.lease().await? else {
+                    drop(global_permit);
+                    break;
+                };
+
+                let domain = extract_domain(&task.request.url)
+                    .unwrap_or("unknown")
+                    .to_string();
+                let domain_sem = domain_sems
+                    .entry(domain)
+                    .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(per_domain_limit)))
+                    .clone();
+
+                let step_id = step_id_from_request(&task.request);
+                let step_mw = step_mws.get(&step_id).unwrap_or(&default_step_mw);
+
+                inflight.push(Box::pin(execute_task(
+                    task.request,
+                    http,
+                    browser,
+                    pipeline,
+                    engine_mw,
+                    step_mw,
+                    spider,
+                    compiled.as_ref(),
+                    allowed_domains,
+                    spider_name,
+                    global_permit,
+                    domain_sem,
+                )));
+            }
+
+            if inflight.is_empty() {
+                if idle_timeout.is_zero() {
+                    tokio::task::yield_now().await;
+                } else {
+                    tracing::debug!(
                         spider = spider_name,
-                        round,
-                        items = output.items.len(),
-                        follows = output.requests.len(),
-                        "完成第 {} 轮解析",
-                        round,
+                        idle_ms = idle_timeout.as_millis(),
+                        "队列为空，等待新任务..."
                     );
-                    outputs.push(output);
-                    // 执行完任务 → 自动回到循环顶部继续下一轮
+                    tokio::time::sleep(idle_timeout).await;
                 }
-                Ok(None) => {
-                    // 当前无任务可执行 → idle 等待，不退出
-                    if idle_timeout.is_zero() {
-                        tokio::task::yield_now().await;
-                    } else {
-                        tracing::debug!(
-                            spider = spider_name,
-                            idle_ms = idle_timeout.as_millis(),
-                            "队列为空，等待新任务..."
-                        );
-                        tokio::time::sleep(idle_timeout).await;
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(spider = spider_name, error = %e, "执行出错，继续等待");
-                }
+                continue;
+            }
+
+            if let Some(result) = inflight.next().await {
+                handle_task_result(result, scheduler, allowed_domains, &mut outputs, &mut round, spider_name).await?;
             }
         }
 
@@ -430,168 +306,344 @@ where
         self.shutdown.store(true, Ordering::Relaxed);
     }
 
-    fn refresh_spider_middleware<Sp: Spider>(&mut self, spider: &Sp) -> Result<(), SpiderError> {
-        if self.active_spider.as_deref() != Some(spider.name()) {
-            self.spider_middleware = MiddlewareChain::default();
-            self.step_middlewares.clear();
-            self.active_spider = Some(spider.name().to_string());
-        }
-
-        Ok(())
-    }
-
-    fn prepare_spider_middleware<Sp: Spider>(
+    fn prepare_all_step_middlewares<Sp: Spider>(
         &mut self,
         spider: &Sp,
         compiled: Option<&Compiled>,
-        step_id: &str,
     ) -> Result<(), SpiderError> {
-        self.refresh_spider_middleware(spider)?;
+        if self.active_spider.is_some() {
+            return Ok(());
+        }
+        self.active_spider = Some(spider.name().to_string());
 
-        if !self.step_middlewares.contains_key(step_id) {
-            let base_runtime = self.settings.to_runtime_config();
-            let runtime = effective_runtime(base_runtime, compiled, step_id)?;
-            let defaults = compile_runtime(&runtime)?;
-            let step_overrides = step_middlewares(compiled, step_id);
-            let merged = merge_middleware(
-                merge_middleware(defaults, self.settings.middlewares.clone()),
-                step_overrides,
-            );
-            let middleware = build_middleware(&merged, &self.custom_factories)?;
-            self.step_middlewares.insert(step_id.to_string(), middleware);
+        let base_runtime = self.settings.to_runtime_config();
+        let defaults = compile_runtime(&base_runtime)?;
+        let merged_base = merge_middleware(defaults, self.settings.middlewares.clone());
+
+        let base_mw = build_middleware(&merged_base, &self.custom_factories)?;
+        self.step_middlewares.insert("parse".to_string(), base_mw);
+
+        if let Some(compiled) = compiled {
+            for step in &compiled.steps {
+                if self.step_middlewares.contains_key(&step.id) {
+                    continue;
+                }
+                let runtime = effective_runtime(base_runtime.clone(), Some(compiled), &step.id)?;
+                let step_defaults = compile_runtime(&runtime)?;
+                let step_overrides = step_middlewares(Some(compiled), &step.id);
+                let merged = merge_middleware(
+                    merge_middleware(step_defaults, self.settings.middlewares.clone()),
+                    step_overrides,
+                );
+                let mw = build_middleware(&merged, &self.custom_factories)?;
+                self.step_middlewares.insert(step.id.clone(), mw);
+            }
         }
 
-        self.active_step = step_id.to_string();
         Ok(())
     }
+}
 
-    async fn process_request(
-        &self,
-        kind: MiddlewareType,
-        context: &mut EngineContext,
-    ) -> Result<Flow, SpiderError> {
-        let flow = self.middleware.process_request(kind, context).await?;
-        if !matches!(flow, Flow::Continue) {
-            return Ok(flow);
-        }
-        self.active_spider_middleware().process_request(kind, context).await
-    }
-
-    async fn process_response(
-        &self,
-        kind: MiddlewareType,
-        context: &mut EngineContext,
-    ) -> Result<Flow, SpiderError> {
-        let flow = self.middleware.process_response(kind, context).await?;
-        if !matches!(flow, Flow::Continue) {
-            return Ok(flow);
-        }
-        self.active_spider_middleware()
-            .process_response(kind, context)
-            .await
-    }
-
-    async fn process_exception(
-        &self,
-        kind: MiddlewareType,
-        context: &mut EngineContext,
-        error: &SpiderError,
-    ) -> Result<Flow, SpiderError> {
-        let flow = self.middleware.process_exception(kind, context, error).await?;
-        if !matches!(flow, Flow::Continue) {
-            return Ok(flow);
-        }
-        self.active_spider_middleware()
-            .process_exception(kind, context, error)
-            .await
-    }
-
-    fn active_spider_middleware(&self) -> &MiddlewareChain {
-        self.step_middlewares
-            .get(&self.active_step)
-            .unwrap_or(&self.spider_middleware)
-    }
-
-    async fn apply_flow(
-        &mut self,
-        flow: Flow,
-        context: &EngineContext,
-    ) -> Result<bool, SpiderError> {
-        match flow {
-            Flow::Continue => Ok(false),
-            Flow::Drop(_) => {
-                self.scheduler.ack().await?;
-                Ok(true)
-            }
-            Flow::Retry { .. } => {
-                self.enqueue_retry_request(context, flow).await?;
-                self.scheduler.ack().await?;
-                Ok(true)
-            }
-        }
-    }
-
-    async fn apply_error_flow(
-        &mut self,
-        flow: Flow,
-        context: &EngineContext,
-    ) -> Result<bool, SpiderError> {
-        match flow {
-            Flow::Continue => Ok(false),
-            Flow::Drop(_) => {
-                self.scheduler.ack().await?;
-                Ok(true)
-            }
-            Flow::Retry { .. } => {
-                self.enqueue_retry_request(context, flow).await?;
-                self.scheduler.ack().await?;
-                Ok(true)
-            }
-        }
-    }
-
-    async fn enqueue_retry_request(
-        &mut self,
-        context: &EngineContext,
-        flow: Flow,
-    ) -> Result<(), SpiderError> {
-        let Flow::Retry { reason, backoff_ms } = flow else {
-            return Ok(());
-        };
-
-        let retries = context
-            .request
-            .meta
-            .get("_retry_times")
-            .and_then(crate::value::Value::as_f64)
-            .unwrap_or(0.0)
-            + 1.0;
-
-        let mut request = context.request.clone();
-        request.dont_filter = true;
-        request.meta.insert(
-            "_retry_times".to_string(),
-            crate::value::Value::Number(retries),
-        );
-        request.meta.insert(
-            "_retry_reason".to_string(),
-            crate::value::Value::String(reason),
-        );
-        if let Some(backoff_ms) = backoff_ms {
-            request.meta.insert(
-                "_retry_backoff_ms".to_string(),
-                crate::value::Value::Number(backoff_ms as f64),
+async fn handle_task_result<S: Scheduler>(
+    result: TaskResult,
+    scheduler: &mut S,
+    allowed_domains: &[String],
+    outputs: &mut Vec<SpiderOutput>,
+    round: &mut usize,
+    spider_name: &str,
+) -> Result<(), SpiderError> {
+    let url = result.url;
+    match result.outcome {
+        TaskOutcome::Success(output) => {
+            *round += 1;
+            tracing::info!(
+                spider = spider_name,
+                round = *round,
+                items = output.items.len(),
+                follows = output.follows.len(),
+                "完成第 {} 轮解析",
+                round,
             );
-        }
-
-        let task = match backoff_ms {
-            Some(backoff_ms) if backoff_ms > 0 => {
-                crate::scheduler::types::ScheduledTask::with_delay_ms(request, backoff_ms)
+            for follow in &output.follows {
+                if follow.dont_filter || is_domain_allowed(&follow.url, allowed_domains) {
+                    scheduler
+                        .enqueue(crate::scheduler::types::ScheduledTask::new(follow.clone()))
+                        .await?;
+                }
             }
-            _ => crate::scheduler::types::ScheduledTask::new(request),
-        };
+            scheduler.ack(&url).await?;
+            outputs.push(SpiderOutput {
+                items: output.items,
+                requests: output.follows,
+            });
+        }
+        TaskOutcome::Retry(retry_task) => {
+            scheduler.enqueue(retry_task).await?;
+            scheduler.ack(&url).await?;
+        }
+        TaskOutcome::Drop => {
+            scheduler.ack(&url).await?;
+        }
+        TaskOutcome::Error(e) => {
+            tracing::error!(spider = spider_name, url = url.as_str(), error = %e, "任务出错");
+            scheduler.nack(&url).await?;
+        }
+    }
+    Ok(())
+}
 
-        self.scheduler.enqueue(task).await
+struct TaskSuccess {
+    items: Vec<crate::item::Item>,
+    follows: Vec<crate::request::Request>,
+}
+
+enum TaskOutcome {
+    Success(TaskSuccess),
+    Retry(crate::scheduler::types::ScheduledTask),
+    Drop,
+    Error(SpiderError),
+}
+
+struct TaskResult {
+    url: String,
+    outcome: TaskOutcome,
+}
+
+async fn execute_task<'a, H, B, P, Sp>(
+    request: crate::request::Request,
+    http: &'a H,
+    browser: &'a B,
+    pipeline: &'a P,
+    engine_mw: &'a MiddlewareChain,
+    step_mw: &'a MiddlewareChain,
+    spider: &'a Sp,
+    compiled: Option<&'a Compiled>,
+    allowed_domains: &'a [String],
+    spider_name: &'a str,
+    _global_permit: tokio::sync::OwnedSemaphorePermit,
+    domain_sem: Arc<tokio::sync::Semaphore>,
+) -> TaskResult
+where
+    H: Downloader,
+    B: Downloader,
+    P: crate::pipeline::Pipeline,
+    Sp: Spider,
+{
+    let url = request.url.clone();
+    let _domain_permit = match domain_sem.acquire().await {
+        Ok(p) => p,
+        Err(_) => {
+            return TaskResult {
+                url,
+                outcome: TaskOutcome::Error(SpiderError::engine("domain semaphore closed")),
+            };
+        }
+    };
+
+    let outcome = execute_task_inner(
+        request, http, browser, pipeline, engine_mw, step_mw, spider, compiled, allowed_domains, spider_name,
+    )
+    .await;
+
+    TaskResult { url, outcome }
+}
+
+async fn execute_task_inner<'a, H, B, P, Sp>(
+    request: crate::request::Request,
+    http: &'a H,
+    browser: &'a B,
+    pipeline: &'a P,
+    engine_mw: &'a MiddlewareChain,
+    step_mw: &'a MiddlewareChain,
+    spider: &'a Sp,
+    compiled: Option<&'a Compiled>,
+    allowed_domains: &'a [String],
+    spider_name: &'a str,
+) -> TaskOutcome
+where
+    H: Downloader,
+    B: Downloader,
+    P: crate::pipeline::Pipeline,
+    Sp: Spider,
+{
+    let mut context = EngineContext::new(request);
+
+    // Download middleware: process_request
+    match run_middleware_request(engine_mw, step_mw, MiddlewareType::Download, &mut context).await {
+        Ok(Flow::Continue) => {}
+        Ok(flow) => return flow_to_outcome(flow, &context),
+        Err(e) => return TaskOutcome::Error(e),
+    }
+
+    // Download
+    let response = match context.request.mode {
+        RequestMode::Http => http.fetch(&context.request).await,
+        RequestMode::Browser => browser.fetch(&context.request).await,
+    };
+
+    let response = match response {
+        Ok(r) => r,
+        Err(error) => {
+            tracing::warn!(url = context.request.url.as_str(), error = %error, "下载失败");
+            match run_middleware_exception(engine_mw, step_mw, MiddlewareType::Download, &mut context, &error).await {
+                Ok(Flow::Continue) => return TaskOutcome::Error(error),
+                Ok(flow) => return flow_to_outcome(flow, &context),
+                Err(e) => return TaskOutcome::Error(e),
+            }
+        }
+    };
+
+    context.response = Some(response.clone());
+
+    // Download middleware: process_response
+    match run_middleware_response(engine_mw, step_mw, MiddlewareType::Download, &mut context).await {
+        Ok(Flow::Continue) => {}
+        Ok(flow) => return flow_to_outcome(flow, &context),
+        Err(e) => return TaskOutcome::Error(e),
+    }
+
+    // Spider middleware: process_request
+    match run_middleware_request(engine_mw, step_mw, MiddlewareType::Spider, &mut context).await {
+        Ok(Flow::Continue) => {}
+        Ok(flow) => return flow_to_outcome(flow, &context),
+        Err(e) => return TaskOutcome::Error(e),
+    }
+
+    // Dispatch: callback or DSL
+    let output = spider.dispatch(&response, compiled).await;
+
+    match output {
+        Ok(mut output) => {
+            // Spider middleware: process_response
+            match run_middleware_response(engine_mw, step_mw, MiddlewareType::Spider, &mut context).await {
+                Ok(Flow::Continue) => {}
+                Ok(flow) => return flow_to_outcome(flow, &context),
+                Err(e) => return TaskOutcome::Error(e),
+            }
+
+            // Pipeline
+            let mut kept_items = Vec::with_capacity(output.items.len());
+            for mut item in output.items.drain(..) {
+                match pipeline.process(&mut item, spider_name).await {
+                    Ok(true) => kept_items.push(item),
+                    Ok(false) => {
+                        tracing::debug!(spider = spider_name, "pipeline 丢弃 item");
+                    }
+                    Err(e) => {
+                        tracing::warn!(spider = spider_name, error = %e, "pipeline 处理 item 出错");
+                    }
+                }
+            }
+
+            // Domain filter (filter only, don't enqueue — main loop does that)
+            let mut follows = Vec::new();
+            for req in output.requests {
+                if req.dont_filter || is_domain_allowed(&req.url, allowed_domains) {
+                    follows.push(req);
+                } else {
+                    tracing::debug!(url = req.url.as_str(), "域名不在 allowed_domains 内，已过滤");
+                }
+            }
+
+            TaskOutcome::Success(TaskSuccess {
+                items: kept_items,
+                follows,
+            })
+        }
+        Err(error) => {
+            tracing::error!(
+                spider = spider_name,
+                url = context.request.url.as_str(),
+                error = %error,
+                "解析回调执行失败"
+            );
+            match run_middleware_exception(engine_mw, step_mw, MiddlewareType::Spider, &mut context, &error).await {
+                Ok(Flow::Continue) => TaskOutcome::Error(error),
+                Ok(flow) => flow_to_outcome(flow, &context),
+                Err(e) => TaskOutcome::Error(e),
+            }
+        }
+    }
+}
+
+async fn run_middleware_request(
+    engine_mw: &MiddlewareChain,
+    step_mw: &MiddlewareChain,
+    kind: MiddlewareType,
+    context: &mut EngineContext,
+) -> Result<Flow, SpiderError> {
+    let flow = engine_mw.process_request(kind, context).await?;
+    if !matches!(flow, Flow::Continue) {
+        return Ok(flow);
+    }
+    step_mw.process_request(kind, context).await
+}
+
+async fn run_middleware_response(
+    engine_mw: &MiddlewareChain,
+    step_mw: &MiddlewareChain,
+    kind: MiddlewareType,
+    context: &mut EngineContext,
+) -> Result<Flow, SpiderError> {
+    let flow = engine_mw.process_response(kind, context).await?;
+    if !matches!(flow, Flow::Continue) {
+        return Ok(flow);
+    }
+    step_mw.process_response(kind, context).await
+}
+
+async fn run_middleware_exception(
+    engine_mw: &MiddlewareChain,
+    step_mw: &MiddlewareChain,
+    kind: MiddlewareType,
+    context: &mut EngineContext,
+    error: &SpiderError,
+) -> Result<Flow, SpiderError> {
+    let flow = engine_mw.process_exception(kind, context, error).await?;
+    if !matches!(flow, Flow::Continue) {
+        return Ok(flow);
+    }
+    step_mw.process_exception(kind, context, error).await
+}
+
+fn flow_to_outcome(flow: Flow, context: &EngineContext) -> TaskOutcome {
+    match flow {
+        Flow::Continue => unreachable!(),
+        Flow::Drop(_) => TaskOutcome::Drop,
+        Flow::Retry { reason, backoff_ms } => {
+            let retries = context
+                .request
+                .meta
+                .get("_retry_times")
+                .and_then(crate::value::Value::as_f64)
+                .unwrap_or(0.0)
+                + 1.0;
+
+            let mut request = context.request.clone();
+            request.dont_filter = true;
+            request.meta.insert(
+                "_retry_times".to_string(),
+                crate::value::Value::Number(retries),
+            );
+            request.meta.insert(
+                "_retry_reason".to_string(),
+                crate::value::Value::String(reason),
+            );
+            if let Some(ms) = backoff_ms {
+                request.meta.insert(
+                    "_retry_backoff_ms".to_string(),
+                    crate::value::Value::Number(ms as f64),
+                );
+            }
+
+            let task = match backoff_ms {
+                Some(ms) if ms > 0 => {
+                    crate::scheduler::types::ScheduledTask::with_delay_ms(request, ms)
+                }
+                _ => crate::scheduler::types::ScheduledTask::new(request),
+            };
+            TaskOutcome::Retry(task)
+        }
     }
 }
 
@@ -674,6 +726,130 @@ fn step_middlewares(compiled: Option<&Compiled>, step_id: &str) -> crate::middle
 }
 
 #[cfg(test)]
+impl<S, H, B, P> Engine<S, H, B, P>
+where
+    S: Scheduler,
+    H: Downloader,
+    B: Downloader,
+    P: crate::pipeline::Pipeline,
+{
+    async fn execute_once(&mut self) -> Result<Option<crate::response::Response>, SpiderError> {
+        let Some(task) = self.scheduler.lease().await? else {
+            return Ok(None);
+        };
+        let url = task.request.url.clone();
+        let mut context = EngineContext::new(task.request);
+
+        let step_id = step_id_from_request(&context.request);
+        let default_mw = MiddlewareChain::default();
+        let step_mw = self.step_middlewares.get(&step_id).unwrap_or(&default_mw);
+
+        match run_middleware_request(&self.middleware, step_mw, MiddlewareType::Download, &mut context).await {
+            Ok(crate::engine::types::Flow::Continue) => {}
+            Ok(_) => {
+                self.scheduler.ack(&url).await?;
+                return Ok(None);
+            }
+            Err(e) => {
+                self.scheduler.nack(&url).await?;
+                return Err(e);
+            }
+        }
+
+        let response = match context.request.mode {
+            RequestMode::Http => self.http.fetch(&context.request).await,
+            RequestMode::Browser => self.browser.fetch(&context.request).await,
+        };
+
+        let response = match response {
+            Ok(r) => r,
+            Err(e) => {
+                self.scheduler.nack(&url).await?;
+                return Err(e);
+            }
+        };
+
+        context.response = Some(response.clone());
+
+        match run_middleware_response(&self.middleware, step_mw, MiddlewareType::Download, &mut context).await {
+            Ok(crate::engine::types::Flow::Continue) => {}
+            Ok(_) => {
+                self.scheduler.ack(&url).await?;
+                return Ok(None);
+            }
+            Err(e) => {
+                self.scheduler.nack(&url).await?;
+                return Err(e);
+            }
+        }
+
+        self.scheduler.ack(&url).await?;
+        Ok(Some(response))
+    }
+
+    async fn execute_spider_once<Sp: Spider>(
+        &mut self,
+        spider: &Sp,
+        compiled: Option<&Compiled>,
+    ) -> Result<Option<crate::spider::Output>, SpiderError> {
+        self.prepare_all_step_middlewares(spider, compiled)?;
+
+        let Some(task) = self.scheduler.lease().await? else {
+            return Ok(None);
+        };
+        let url = task.request.url.clone();
+
+        let step_id = step_id_from_request(&task.request);
+        let default_mw = MiddlewareChain::default();
+        let step_mw = self.step_middlewares.get(&step_id).unwrap_or(&default_mw);
+
+        let outcome = execute_task_inner(
+            task.request,
+            &self.http,
+            &self.browser,
+            &self.pipeline,
+            &self.middleware,
+            step_mw,
+            spider,
+            compiled,
+            &self.allowed_domains,
+            spider.name(),
+        )
+        .await;
+
+        match outcome {
+            TaskOutcome::Success(output) => {
+                for follow in &output.follows {
+                    if follow.dont_filter || is_domain_allowed(&follow.url, &self.allowed_domains) {
+                        self.scheduler
+                            .enqueue(crate::scheduler::types::ScheduledTask::new(follow.clone()))
+                            .await?;
+                    }
+                }
+                self.scheduler.ack(&url).await?;
+                Ok(Some(crate::spider::Output {
+                    items: output.items,
+                    requests: output.follows,
+                }))
+            }
+            TaskOutcome::Retry(retry_task) => {
+                self.scheduler.enqueue(retry_task).await?;
+                self.scheduler.ack(&url).await?;
+                Ok(None)
+            }
+            TaskOutcome::Drop => {
+                self.scheduler.ack(&url).await?;
+                Ok(None)
+            }
+            TaskOutcome::Error(e) => {
+                self.scheduler.nack(&url).await?;
+                Err(e)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::engine::context::EngineContext;
@@ -681,6 +857,7 @@ mod tests {
     use crate::middleware::traits::Middleware;
     use crate::middleware::types::MiddlewareConfig;
     use crate::request::Request;
+    use crate::response::Response;
     use crate::rules::compile::compile_rules;
     use crate::scheduler::memory::MemoryScheduler;
     use crate::scheduler::traits::Scheduler;

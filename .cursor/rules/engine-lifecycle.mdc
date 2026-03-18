@@ -1,0 +1,13 @@
+---
+description: Engine lifecycle and shutdown design rules
+alwaysApply: true
+---
+
+# Engine Lifecycle
+
+- Engine 不因队列为空而自动退出，空闲时进入等待状态，随时接收新任务。
+- 只有两种退出方式：调用 `stop()` 主动停止，或捕获 Ctrl+C 信号。
+- 不实现 `close_if_idle` 或任何"队列空即退出"的机制。
+- 任务执行完后自动回到等待状态，准备接收下一个任务。
+- 退出前执行清理流程（如 Pipeline 关闭）。
+- `ShutdownHandle` 支持跨线程传递和调用。
