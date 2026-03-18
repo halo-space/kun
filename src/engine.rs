@@ -26,12 +26,8 @@ pub struct Engine<S, H, B, P = ()> {
     pub pipeline: P,
     pub settings: Settings,
     pub middleware: MiddlewareChain,
-    pub spider_middleware: MiddlewareChain,
-    pub custom_factories: FactoryRegistry,
-    step_middlewares: BTreeMap<String, MiddlewareChain>,
-    active_spider: Option<String>,
-    active_step: String,
-    allowed_domains: Vec<String>,
+    pub plugins: FactoryRegistry,
+    prepared: bool,
     shutdown: Arc<AtomicBool>,
 }
 
@@ -49,12 +45,8 @@ where
             pipeline: (),
             settings: Settings::default(),
             middleware: MiddlewareChain::default(),
-            spider_middleware: MiddlewareChain::default(),
-            custom_factories: FactoryRegistry::new(),
-            step_middlewares: BTreeMap::new(),
-            active_spider: None,
-            active_step: "parse".to_string(),
-            allowed_domains: Vec::new(),
+            plugins: FactoryRegistry::new(),
+            prepared: false,
             shutdown: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -85,12 +77,8 @@ where
             pipeline,
             settings: self.settings,
             middleware: self.middleware,
-            spider_middleware: self.spider_middleware,
-            custom_factories: self.custom_factories,
-            step_middlewares: self.step_middlewares,
-            active_spider: self.active_spider,
-            active_step: self.active_step,
-            allowed_domains: self.allowed_domains,
+            plugins: self.plugins,
+            prepared: self.prepared,
             shutdown: self.shutdown,
         }
     }
@@ -131,7 +119,7 @@ where
         key: impl Into<String>,
         factory: impl Fn(&std::collections::BTreeMap<String, crate::value::Value>) -> Result<Box<dyn crate::middleware::Middleware>, SpiderError> + Send + Sync + 'static,
     ) -> Self {
-        self.custom_factories.register(key, factory);
+        self.plugins.register(key, factory);
         self
     }
 
@@ -157,7 +145,7 @@ where
         registry: &crate::plugins::PluginRegistry,
     ) -> Result<Self, SpiderError> {
         for manifest in registry.by_kind("middleware") {
-            if !self.custom_factories.has(&manifest.name) {
+            if !self.plugins.has(&manifest.name) {
                 return Err(SpiderError::plugin(format!(
                     "middleware plugin '{}' declared in plugins.toml (entry: {}) but no factory registered; \
                      call register_middleware(\"{}\", ...) before load_plugins()",
@@ -207,9 +195,9 @@ where
         let spider_name = spider.name();
         tracing::info!(spider = spider_name, "引擎启动");
 
-        self.allowed_domains = spider.allowed_domains();
-        if !self.allowed_domains.is_empty() {
-            tracing::info!(spider = spider_name, domains = ?self.allowed_domains, "域名过滤已启用");
+        let allowed_domains = spider.allowed_domains();
+        if !allowed_domains.is_empty() {
+            tracing::info!(spider = spider_name, domains = ?allowed_domains, "域名过滤已启用");
         }
 
         self.pipeline.open(spider_name).await?;
@@ -222,7 +210,7 @@ where
             None => None,
         };
 
-        self.prepare_all_step_middlewares(spider, compiled.as_ref())?;
+        let step_middlewares = self.build_step_middlewares(compiled.as_ref())?;
 
         let start_urls = spider.start_urls();
         tracing::info!(spider = spider_name, count = start_urls.len(), "入队起始 URL");
@@ -259,8 +247,8 @@ where
         let browser = &self.browser;
         let pipeline = &self.pipeline;
         let engine_mw = &self.middleware;
-        let step_mws = &self.step_middlewares;
-        let allowed_domains = &self.allowed_domains;
+        let step_mws = &step_middlewares;
+        let allowed_domains = &allowed_domains;
         let shutdown = &self.shutdown;
 
         loop {
@@ -345,26 +333,21 @@ where
         self.shutdown.store(true, Ordering::Relaxed);
     }
 
-    fn prepare_all_step_middlewares<Sp: Spider>(
-        &mut self,
-        spider: &Sp,
+    fn build_step_middlewares(
+        &self,
         compiled: Option<&Compiled>,
-    ) -> Result<(), SpiderError> {
-        if self.active_spider.is_some() {
-            return Ok(());
-        }
-        self.active_spider = Some(spider.name().to_string());
-
+    ) -> Result<BTreeMap<String, MiddlewareChain>, SpiderError> {
         let base_runtime = self.settings.to_runtime_config();
         let defaults = compile_runtime(&base_runtime)?;
         let merged_base = merge_middleware(defaults, self.settings.middlewares.clone());
 
-        let base_mw = build_middleware(&merged_base, &self.custom_factories)?;
-        self.step_middlewares.insert("parse".to_string(), base_mw);
+        let mut out = BTreeMap::new();
+        let base_mw = build_middleware(&merged_base, &self.plugins)?;
+        out.insert("parse".to_string(), base_mw);
 
         if let Some(compiled) = compiled {
             for step in &compiled.steps {
-                if self.step_middlewares.contains_key(&step.id) {
+                if out.contains_key(&step.id) {
                     continue;
                 }
                 let runtime = effective_runtime(base_runtime.clone(), Some(compiled), &step.id)?;
@@ -374,12 +357,12 @@ where
                     merge_middleware(step_defaults, self.settings.middlewares.clone()),
                     step_overrides,
                 );
-                let mw = build_middleware(&merged, &self.custom_factories)?;
-                self.step_middlewares.insert(step.id.clone(), mw);
+                let mw = build_middleware(&merged, &self.plugins)?;
+                out.insert(step.id.clone(), mw);
             }
         }
 
-        Ok(())
+        Ok(out)
     }
 }
 
@@ -779,9 +762,8 @@ where
         let url = task.request.url.clone();
         let mut context = EngineContext::new(task.request);
 
-        let step_id = step_id_from_request(&context.request);
         let default_mw = MiddlewareChain::default();
-        let step_mw = self.step_middlewares.get(&step_id).unwrap_or(&default_mw);
+        let step_mw = &default_mw;
 
         match run_middleware_request(&self.middleware, step_mw, MiddlewareType::Download, &mut context).await {
             Ok(crate::engine::types::Flow::Continue) => {}
@@ -830,8 +812,12 @@ where
         &mut self,
         spider: &Sp,
         compiled: Option<&Compiled>,
+        step_mws: &mut BTreeMap<String, MiddlewareChain>,
     ) -> Result<Option<crate::spider::Output>, SpiderError> {
-        self.prepare_all_step_middlewares(spider, compiled)?;
+        if !self.prepared {
+            *step_mws = self.build_step_middlewares(compiled)?;
+            self.prepared = true;
+        }
 
         let Some(task) = self.scheduler.lease().await? else {
             return Ok(None);
@@ -840,7 +826,7 @@ where
 
         let step_id = step_id_from_request(&task.request);
         let default_mw = MiddlewareChain::default();
-        let step_mw = self.step_middlewares.get(&step_id).unwrap_or(&default_mw);
+        let step_mw = step_mws.get(&step_id).unwrap_or(&default_mw);
 
         let outcome = execute_task_inner(
             task.request,
@@ -851,7 +837,7 @@ where
             step_mw,
             spider,
             compiled,
-            &self.allowed_domains,
+            &[],
             spider.name(),
         )
         .await;
@@ -859,7 +845,7 @@ where
         match outcome {
             TaskOutcome::Success(output) => {
                 for follow in &output.follows {
-                    if follow.dont_filter || is_domain_allowed(&follow.url, &self.allowed_domains) {
+                    if follow.dont_filter || is_domain_allowed(&follow.url, &[]) {
                         self.scheduler
                             .enqueue(crate::scheduler::types::ScheduledTask::new(follow.clone()))
                             .await?;
@@ -1003,7 +989,8 @@ mod tests {
         .unwrap();
 
         let mut engine = Engine::new(scheduler, HtmlHttpDownloader, StubBrowserDownloader);
-        let output = block_on(engine.execute_spider_once(&TestSpider, Some(&compiled)))
+        let mut step_mws = BTreeMap::new();
+        let output = block_on(engine.execute_spider_once(&TestSpider, Some(&compiled), &mut step_mws))
             .unwrap()
             .unwrap();
 
@@ -1052,10 +1039,11 @@ mod tests {
         .unwrap();
 
         let mut engine = Engine::new(scheduler, FlowHttpDownloader, StubBrowserDownloader);
-        let first = block_on(engine.execute_spider_once(&FlowSpider, Some(&compiled)))
+        let mut step_mws = BTreeMap::new();
+        let first = block_on(engine.execute_spider_once(&FlowSpider, Some(&compiled), &mut step_mws))
             .unwrap()
             .unwrap();
-        let second = block_on(engine.execute_spider_once(&FlowSpider, Some(&compiled)))
+        let second = block_on(engine.execute_spider_once(&FlowSpider, Some(&compiled), &mut step_mws))
             .unwrap()
             .unwrap();
 
@@ -1081,12 +1069,12 @@ mod tests {
 
         let mut engine = Engine::new(scheduler, HtmlHttpDownloader, StubBrowserDownloader)
             .with_settings(runtime_settings());
-        block_on(engine.execute_spider_once(&SimpleSpider("runtime"), None))
+        let mut step_mws = BTreeMap::new();
+        block_on(engine.execute_spider_once(&SimpleSpider("runtime"), None, &mut step_mws))
             .unwrap()
             .unwrap();
 
-        let keys = engine
-            .step_middlewares
+        let keys = step_mws
             .get("parse")
             .unwrap()
             .entries
@@ -1099,8 +1087,7 @@ mod tests {
         assert!(keys.contains(&"rate_limit"));
         assert!(keys.contains(&"dedup"));
 
-        let dedup = engine
-            .step_middlewares
+        let dedup = step_mws
             .get("parse")
             .unwrap()
             .entries
@@ -1130,9 +1117,10 @@ mod tests {
         };
         let mut engine = Engine::new(scheduler, downloader, StubBrowserDownloader)
             .with_settings(dedup_settings());
+        let mut step_mws = BTreeMap::new();
 
-        let first = block_on(engine.execute_spider_once(&SimpleSpider("dedup"), None)).unwrap();
-        let second = block_on(engine.execute_spider_once(&SimpleSpider("dedup"), None)).unwrap();
+        let first = block_on(engine.execute_spider_once(&SimpleSpider("dedup"), None, &mut step_mws)).unwrap();
+        let second = block_on(engine.execute_spider_once(&SimpleSpider("dedup"), None, &mut step_mws)).unwrap();
 
         assert!(first.is_some());
         assert!(second.is_none());
@@ -1154,9 +1142,10 @@ mod tests {
         };
         let mut engine = Engine::new(scheduler, downloader, StubBrowserDownloader)
             .with_settings(retry_settings());
+        let mut step_mws = BTreeMap::new();
 
-        let first = block_on(engine.execute_spider_once(&SimpleSpider("retry"), None)).unwrap();
-        let second = block_on(engine.execute_spider_once(&SimpleSpider("retry"), None)).unwrap();
+        let first = block_on(engine.execute_spider_once(&SimpleSpider("retry"), None, &mut step_mws)).unwrap();
+        let second = block_on(engine.execute_spider_once(&SimpleSpider("retry"), None, &mut step_mws)).unwrap();
 
         assert!(first.is_none());
         assert!(second.is_some());
@@ -1178,11 +1167,12 @@ mod tests {
         };
         let mut engine = Engine::new(scheduler, downloader, StubBrowserDownloader)
             .with_settings(retry_backoff_settings());
+        let mut step_mws = BTreeMap::new();
 
-        let first = block_on(engine.execute_spider_once(&SimpleSpider("retry_backoff"), None)).unwrap();
-        let second = block_on(engine.execute_spider_once(&SimpleSpider("retry_backoff"), None)).unwrap();
+        let first = block_on(engine.execute_spider_once(&SimpleSpider("retry_backoff"), None, &mut step_mws)).unwrap();
+        let second = block_on(engine.execute_spider_once(&SimpleSpider("retry_backoff"), None, &mut step_mws)).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(15));
-        let third = block_on(engine.execute_spider_once(&SimpleSpider("retry_backoff"), None)).unwrap();
+        let third = block_on(engine.execute_spider_once(&SimpleSpider("retry_backoff"), None, &mut step_mws)).unwrap();
 
         assert!(first.is_none());
         assert!(second.is_none());
@@ -1209,11 +1199,12 @@ mod tests {
         };
         let mut engine = Engine::new(scheduler, downloader, StubBrowserDownloader)
             .with_settings(interval_settings());
+        let mut step_mws = BTreeMap::new();
 
-        let first = block_on(engine.execute_spider_once(&SimpleSpider("interval"), None)).unwrap();
-        let second = block_on(engine.execute_spider_once(&SimpleSpider("interval"), None)).unwrap();
+        let first = block_on(engine.execute_spider_once(&SimpleSpider("interval"), None, &mut step_mws)).unwrap();
+        let second = block_on(engine.execute_spider_once(&SimpleSpider("interval"), None, &mut step_mws)).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(15));
-        let third = block_on(engine.execute_spider_once(&SimpleSpider("interval"), None)).unwrap();
+        let third = block_on(engine.execute_spider_once(&SimpleSpider("interval"), None, &mut step_mws)).unwrap();
 
         assert!(first.is_some());
         assert!(second.is_none());
@@ -1240,9 +1231,10 @@ mod tests {
         };
         let mut engine = Engine::new(scheduler, downloader, StubBrowserDownloader)
             .with_settings(rate_limit_settings());
+        let mut step_mws = BTreeMap::new();
 
-        let first = block_on(engine.execute_spider_once(&SimpleSpider("rate_limit"), None)).unwrap();
-        let second = block_on(engine.execute_spider_once(&SimpleSpider("rate_limit"), None)).unwrap();
+        let first = block_on(engine.execute_spider_once(&SimpleSpider("rate_limit"), None, &mut step_mws)).unwrap();
+        let second = block_on(engine.execute_spider_once(&SimpleSpider("rate_limit"), None, &mut step_mws)).unwrap();
 
         assert!(first.is_some());
         assert!(second.is_none());
@@ -1286,14 +1278,15 @@ mod tests {
             statuses: vec![200, 200],
         };
         let mut engine = Engine::new(scheduler, downloader, StubBrowserDownloader);
+        let mut step_mws = BTreeMap::new();
 
-        let first = block_on(engine.execute_spider_once(&FlowSpider, Some(&compiled))).unwrap();
-        let second = block_on(engine.execute_spider_once(&FlowSpider, Some(&compiled))).unwrap();
+        let first = block_on(engine.execute_spider_once(&FlowSpider, Some(&compiled), &mut step_mws)).unwrap();
+        let second = block_on(engine.execute_spider_once(&FlowSpider, Some(&compiled), &mut step_mws)).unwrap();
 
         assert!(first.is_some());
         assert!(second.is_none());
         assert_eq!(*fetches.lock().unwrap(), 1);
-        assert!(engine.step_middlewares.contains_key("detail"));
+        assert!(step_mws.contains_key("detail"));
     }
 
     #[test]
@@ -1324,10 +1317,10 @@ mod tests {
         .unwrap();
 
         let mut engine = Engine::new(scheduler, HtmlHttpDownloader, StubBrowserDownloader);
-        block_on(engine.execute_spider_once(&FlowSpider, Some(&compiled))).unwrap();
+        let mut step_mws = BTreeMap::new();
+        block_on(engine.execute_spider_once(&FlowSpider, Some(&compiled), &mut step_mws)).unwrap();
 
-        let dedup = engine
-            .step_middlewares
+        let dedup = step_mws
             .get("detail")
             .unwrap()
             .entries
