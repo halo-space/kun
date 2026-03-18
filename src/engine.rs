@@ -135,6 +135,45 @@ where
         self
     }
 
+    /// 加载插件清单，验证所有声明的中间件插件都已注册工厂。
+    ///
+    /// 调用此方法前，先用 `register_middleware()` 注册每个中间件插件的工厂函数。
+    /// `load_plugins()` 会验证 `plugins.toml` 中声明的每个 `kind = "middleware"`
+    /// 插件在引擎中都有对应的工厂，否则返回错误。
+    ///
+    /// ```ignore
+    /// let manifests = load_plugin_manifest("plugins.toml")?;
+    /// let mut registry = PluginRegistry::new();
+    /// registry.register_all(manifests)?;
+    ///
+    /// let engine = Engine::new(scheduler, http, browser)
+    ///     .register_middleware("custom_signature", |opts| {
+    ///         Ok(Box::new(CustomSignatureMiddleware::new(opts)))
+    ///     })
+    ///     .load_plugins(&registry)?;
+    /// ```
+    pub fn load_plugins(
+        self,
+        registry: &crate::plugins::PluginRegistry,
+    ) -> Result<Self, SpiderError> {
+        for manifest in registry.by_kind("middleware") {
+            if !self.custom_factories.has(&manifest.name) {
+                return Err(SpiderError::plugin(format!(
+                    "middleware plugin '{}' declared in plugins.toml (entry: {}) but no factory registered; \
+                     call register_middleware(\"{}\", ...) before load_plugins()",
+                    manifest.name, manifest.entry, manifest.name
+                )));
+            }
+            tracing::info!(
+                plugin = manifest.name.as_str(),
+                kind = "middleware",
+                entry = manifest.entry.as_str(),
+                "插件已加载"
+            );
+        }
+        Ok(self)
+    }
+
     /// 获取一个可 Clone 的停止句柄。
     ///
     /// 典型用法：

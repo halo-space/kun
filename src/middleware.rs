@@ -47,6 +47,10 @@ impl FactoryRegistry {
     ) {
         self.factories.insert(key.into(), Box::new(factory));
     }
+
+    pub fn has(&self, key: &str) -> bool {
+        self.factories.contains_key(key)
+    }
 }
 
 pub fn build(configs: &Map, custom: &FactoryRegistry) -> Result<MiddlewareChain, SpiderError> {
