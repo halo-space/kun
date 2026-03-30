@@ -1,5 +1,11 @@
 # Tasks: DSL next_url_config and type Semantics
 
+当前状态说明：
+
+- 这份文件保留了阶段式拆分，但还不是标准的 checkbox 任务清单，所以 OpenSpec 工具当前不会把它统计为可执行 tasks。
+- 其中部分能力已经在代码中落地，另一部分则仍然属于后续 DSL 对齐工作。
+- 如果重新推进这条线，建议先把本文件重写成标准 checkbox tasks，或直接并入新的 DSL 主线 change。
+
 ## Phase 1: 数据结构定义
 
 ### Task 1.1: 扩展 Step 结构
@@ -93,24 +99,31 @@
 ## Phase 4: 集成测试
 
 ### Task 4.1: 创建 period_xml_dsl_full.json
-- **文件**: `examples/period_xml_dsl_full.json`
-- **描述**: 完整 DSL 配置（无代码回调）
+- **文件**: 原计划为 `examples/period_xml_dsl_full.json`
+- **描述**: 原计划补一个完整 DSL 配置示例（无代码回调）
 - **验收**:
   - 3 个 step 全部用 DSL
   - step[0] 用 TEMPLATE 模式
   - step[1] 用 FIELD 模式
   - step[2] type=end
 
+  当前说明：
+  - 由于 `examples/` 目前只保留已落地底层能力示例，这个文件暂不继续维护。
+  - 后续如果补 DSL 示例，应基于当时的最新配置面重新设计，而不是直接恢复这份旧示例。
+
 ### Task 4.2: 创建 period_xml_dsl_full.rs
-- **文件**: `examples/period_xml_dsl_full.rs`
-- **描述**: 纯 DSL 示例（只有 parse 函数）
+- **文件**: 原计划为 `examples/period_xml_dsl_full.rs`
+- **描述**: 原计划补一个纯 DSL 示例（只有 parse 函数）
 - **验收**:
   - 只定义 parse 回调
   - 加载 DSL 配置
   - 运行成功爬取 3 级
 
+  当前说明：
+  - 该示例当前不在保留范围内。
+
 ### Task 4.3: 单元测试
-- **文件**: `src/rules/url_builder.rs`
+- **文件**: 已落在 `src/rules/run.rs` 相关测试中
 - **描述**: URL 构造函数测试
 - **验收**:
   - test_field_mode
@@ -126,12 +139,15 @@
 - **验收**:
   - 说明 type="node"/"end" 语义
   - 说明 next_url_config 用法
-  - 链接到示例
+  - 不再依赖不存在的 DSL 示例文件
 
 ### Task 5.2: 添加 DSL 配置示例
-- **文件**: `examples/README.md`
+- **文件**: 当前不在本阶段维护
 - **描述**: DSL 配置最佳实践
 - **验收**:
   - FIELD/TEMPLATE/JOIN 示例
   - meta 传递示例
   - 完整三级爬取示例
+
+  当前说明：
+  - 这部分随着 DSL 配置面一起后置，等底层能力稳定后再补。

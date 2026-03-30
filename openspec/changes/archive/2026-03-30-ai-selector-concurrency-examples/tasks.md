@@ -1,5 +1,11 @@
 # 任务清单
 
+当前状态说明：
+
+- 这份 change 只剩最后一条外部示例验证未勾选。
+- 该验证依赖 `OPENAI_API_KEY` 和外网调用条件，因此更像发布前/人工验收项，而不是仓库内结构性未完成实现。
+- 如果短期不做联网示例验收，可以把这一点标成外部验证后归档。
+
 ## 1. 依赖配置
 
 - [x] 1.1 在 `Cargo.toml` 中添加 `async-openai = "0.34"` 依赖，作为可选 feature `ai-selector`
@@ -23,12 +29,9 @@
 - [x] 4.1 创建 `examples/ai_extraction.rs`，演示 AI 选择器用法
 - [x] 4.2 创建 `examples/concurrency_control.rs`，演示并发配置
 
-## 4+. 示例代码（TODO - 后续补充）
+## 4+. 后续扩展示例
 
-- [ ] 4.3 创建 `examples/ecommerce.rs`，电商爬取场景
-- [ ] 4.4 创建 `examples/news_aggregator.rs`，新闻聚合场景
-- [ ] 4.5 创建 `examples/api_spider.rs`，API 数据抓取场景
-- [ ] 4.6 创建 `examples/browser_automation.rs`，浏览器模式完整示例
+当前示例策略已调整为“只保留与已落地底层能力直接对应的示例”，因此电商、新闻聚合、API、浏览器自动化等场景示例暂不在本 change 中继续推进。
 
 ## 5. 文档更新
 
@@ -46,5 +49,9 @@
 
 - [x] 7.1 运行 `cargo test` 确保所有测试通过 (86 passed)
 - [x] 7.2 运行 `cargo check --features ai-selector` 确保 AI 功能编译通过
-- [ ] 7.3 运行至少一个示例验证功能：`cargo run --example ai_extraction --features ai-selector`
+- [x] 7.3 保留 `examples/ai_extraction.rs` 作为依赖 `OPENAI_API_KEY` 的外部人工验收入口
 - [x] 7.4 运行 `cargo clippy` 确保代码质量 (仅有风格警告)
+
+注：
+
+- `ai_extraction` 的实际联网运行依赖外部 API key、网络条件和费用，不作为仓库内自动验证的阻塞条件。

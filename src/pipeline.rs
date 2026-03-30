@@ -1,6 +1,10 @@
 use crate::error::SpiderError;
 use crate::item::Item;
 
+pub mod memory;
+
+pub use memory::Memory;
+
 /// Item 处理管线，对应 Scrapy 的 ITEM_PIPELINES。
 ///
 /// 每个 Item 在被 parse 产出后，依次经过 Pipeline 处理。
@@ -9,6 +13,9 @@ use crate::item::Item;
 /// - 丢弃 Item（返回 `Ok(false)`）
 /// - 持久化（写数据库、文件等）
 /// - 记录日志
+///
+/// 这里的 pipeline 是唯一的 Item 处理链路。
+/// 如果需要把 Item 写入内存、文件或数据库，也应通过 pipeline 实现。
 ///
 /// 默认实现 `()` 表示空管线，不做任何处理。
 /// 多个管线可通过元组组合：`(LogPipeline, StorePipeline)`

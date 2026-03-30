@@ -48,27 +48,6 @@ impl RegexQuery {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn regex_query_uses_text_source_by_default() {
-        let query = RegexQuery::new("order id: 42", r"\d+", None);
-
-        assert_eq!(query.source.as_deref(), Some("text"));
-        assert!(query.value.trim);
-    }
-
-    #[test]
-    fn regex_query_supports_group_lookup() {
-        let query = RegexQuery::new("article_id=abc123", r"article_id=(\w+)", None);
-
-        assert_eq!(query.one().as_deref(), Some("article_id=abc123"));
-        assert_eq!(query.group(1).as_deref(), Some("abc123"));
-    }
-}
-
 fn capture(input: &str, pattern: &str) -> (Vec<String>, Vec<String>) {
     let Ok(regex) = Regex::new(pattern) else {
         return (Vec::new(), Vec::new());
@@ -90,4 +69,25 @@ fn capture(input: &str, pattern: &str) -> (Vec<String>, Vec<String>) {
         .unwrap_or_default();
 
     (matches, groups)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn regex_query_uses_text_source_by_default() {
+        let query = RegexQuery::new("order id: 42", r"\d+", None);
+
+        assert_eq!(query.source.as_deref(), Some("text"));
+        assert!(query.value.trim);
+    }
+
+    #[test]
+    fn regex_query_supports_group_lookup() {
+        let query = RegexQuery::new("article_id=abc123", r"article_id=(\w+)", None);
+
+        assert_eq!(query.one().as_deref(), Some("article_id=abc123"));
+        assert_eq!(query.group(1).as_deref(), Some("abc123"));
+    }
 }

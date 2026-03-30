@@ -16,19 +16,24 @@
 - **WHEN** 某个 inflight task 因失败被重试或延迟重排
 - **THEN** 该任务在 ready、delayed 与 inflight 之间流转时保持同一个 task identity，而不是重新退化成按 URL 跟踪
 
-### Requirement: Engine Defines Validation And Output Failure Semantics
+### Requirement: Engine Defines Validation And Item Pipeline Failure Semantics
 
-系统必须明确 validation、pipeline 与 output/sink 失败时的引擎行为语义。
+系统必须明确 validation、单一 item pipeline 以及 item 丢弃时的引擎行为语义。
 
 #### Scenario: Validation failure is handled explicitly
 
 - **WHEN** 解析结果未通过共享 validation
 - **THEN** 引擎依据明确规则决定报错、丢弃或其他可配置行为
 
-#### Scenario: Pipeline or sink failure does not rely on implicit best effort
+#### Scenario: Pipeline failure does not rely on implicit best effort
 
-- **WHEN** pipeline 或 sink 处理 item 失败
+- **WHEN** pipeline 处理 item 失败
 - **THEN** 引擎遵循明确、可测试的错误处理策略
+
+#### Scenario: Pipeline can drop items explicitly
+
+- **WHEN** pipeline 对某个 item 返回 `Ok(false)`
+- **THEN** 引擎显式丢弃该 item，而不是再依赖独立 sink 决定最终保留语义
 
 ### Requirement: HTTP Downloader Wires Shared Transport Semantics
 

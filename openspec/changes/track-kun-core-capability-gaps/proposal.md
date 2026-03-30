@@ -23,7 +23,6 @@
   - `src/download/*`
   - `src/parser/*`
   - `src/pipeline.rs`
-  - `src/item/output.rs`
   - `src/plugins/*`
   - `src/rules/*`
 - 预期带来哪些用户可见结果：

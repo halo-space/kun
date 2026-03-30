@@ -28,9 +28,9 @@ use halo_spider::settings::Settings;
 use halo_spider::spider::{Output, Spider};
 use halo_spider::value::Value;
 use halo_spider::{cb, spider_callbacks};
+use jiff::SignedDuration;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
 
 // ─── 自定义中间件 1：UserAgent 注入 ─────────────────────────
 
@@ -206,8 +206,8 @@ async fn main() {
         .init();
 
     let settings = Settings::default()
-        .with_download_delay(Duration::from_millis(500))
-        .with_idle_timeout(Duration::from_secs(3));
+        .with_download_delay(SignedDuration::from_millis(500))
+        .with_idle_timeout(SignedDuration::from_secs(3));
 
     // 方式2：通过 Settings 配置 stats 中间件
     // 只需要声明名字和 options，引擎通过工厂自动实例化
@@ -221,7 +221,7 @@ async fn main() {
         },
     );
 
-    let mut engine = Engine::new(Memory::default(), Http::default(), Browser::default())
+    let mut engine = Engine::new(Memory::default(), Http::default(), Browser)
         .with_settings(settings)
         // 方式1：直接注册中间件实例 —— UserAgent
         .add_middleware(

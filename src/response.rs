@@ -122,7 +122,7 @@ mod tests {
     use crate::parser::Kind;
     use crate::request::{RequestMode, SessionConfig};
     use crate::value::Value;
-    use std::time::Duration;
+    use jiff::SignedDuration;
 
     #[test]
     fn response_default_has_all_core_fields() {
@@ -172,7 +172,7 @@ mod tests {
             .with_body("payload")
             .with_header("authorization", "Bearer token")
             .with_cookie("sid", "cookie-1")
-            .with_timeout(Duration::from_secs(8))
+            .with_timeout(SignedDuration::from_secs(8))
             .with_proxy("http://127.0.0.1:8080")
             .with_session("session-a")
             .with_callback("parse_list")
@@ -189,7 +189,7 @@ mod tests {
             follow_request.headers.get("authorization"),
             Some(&vec!["Bearer token".to_string()])
         );
-        assert_eq!(follow_request.timeout, Some(Duration::from_secs(8)));
+        assert_eq!(follow_request.timeout, Some(SignedDuration::from_secs(8)));
         assert_eq!(
             follow_request
                 .proxy

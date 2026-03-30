@@ -1,5 +1,11 @@
 # Tasks: DSL 运行时逻辑实现
 
+当前状态说明：
+
+- 本 change 的任务已经全部完成。
+- 相关实现已经进入共享 runtime / middleware / engine 链路。
+- 结构上可以视为归档候选，而不是继续保留在 active 列表中。
+
 ## Dedup 运行时实现
 
 ### Task 1: 实现 dedup 值提取

@@ -1,5 +1,5 @@
 use crate::parser::query::{Kind, ValueQuery};
-use std::time::Duration;
+use jiff::SignedDuration;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct AiQuery {
@@ -11,7 +11,7 @@ pub struct AiQuery {
     pub base_url: Option<String>,
     pub model: String,
     pub max_retries: u32,
-    pub timeout: Duration,
+    pub timeout: SignedDuration,
 }
 
 impl Default for AiQuery {
@@ -25,7 +25,7 @@ impl Default for AiQuery {
             base_url: None,
             model: "gpt-4o-mini".to_string(),
             max_retries: 3,
-            timeout: Duration::from_secs(30),
+            timeout: SignedDuration::from_secs(30),
         }
     }
 }
@@ -51,8 +51,8 @@ impl AiQuery {
         self
     }
 
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = timeout;
+    pub fn with_timeout(mut self, timeout: SignedDuration) -> Self {
+        self.timeout = non_negative_duration(timeout);
         self
     }
 
@@ -86,10 +86,12 @@ impl AiQuery {
     async fn execute_with_retry(&self) -> Result<String, String> {
         use tokio::time::{sleep, timeout};
 
+        let timeout_duration = std::time::Duration::try_from(self.timeout)
+            .map_err(|e| format!("invalid AI timeout: {e}"))?;
         let mut attempt = 0;
         loop {
             let result = timeout(
-                self.timeout,
+                timeout_duration,
                 openai(
                     &self.api_key,
                     &self.base_url,
@@ -110,7 +112,13 @@ impl AiQuery {
                         self.max_retries + 1,
                         e
                     );
-                    sleep(Duration::from_secs(2u64.pow(attempt - 1))).await;
+                    sleep(
+                        std::time::Duration::try_from(SignedDuration::from_secs(
+                            2i64.pow(attempt - 1),
+                        ))
+                        .map_err(|e| format!("invalid AI backoff: {e}"))?,
+                    )
+                    .await;
                 }
                 Ok(Err(e)) => return Err(e),
                 Err(_) if attempt < self.max_retries => {
@@ -120,7 +128,13 @@ impl AiQuery {
                         attempt,
                         self.max_retries + 1
                     );
-                    sleep(Duration::from_secs(2u64.pow(attempt - 1))).await;
+                    sleep(
+                        std::time::Duration::try_from(SignedDuration::from_secs(
+                            2i64.pow(attempt - 1),
+                        ))
+                        .map_err(|e| format!("invalid AI backoff: {e}"))?,
+                    )
+                    .await;
                 }
                 Err(_) => return Err("Request timeout".to_string()),
             }
@@ -137,6 +151,14 @@ impl AiQuery {
 
     pub fn value(&self) -> Option<crate::value::Value> {
         self.value.value()
+    }
+}
+
+fn non_negative_duration(duration: SignedDuration) -> SignedDuration {
+    if duration.is_negative() {
+        SignedDuration::ZERO
+    } else {
+        duration
     }
 }
 
@@ -202,17 +224,17 @@ mod tests {
         let query = AiQuery::new("content", "prompt", None);
 
         assert_eq!(query.max_retries, 3);
-        assert_eq!(query.timeout, Duration::from_secs(30));
+        assert_eq!(query.timeout, SignedDuration::from_secs(30));
     }
 
     #[test]
     fn ai_query_can_configure_retry_and_timeout() {
         let query = AiQuery::new("content", "prompt", None)
             .with_max_retries(5)
-            .with_timeout(Duration::from_secs(60));
+            .with_timeout(SignedDuration::from_secs(60));
 
         assert_eq!(query.max_retries, 5);
-        assert_eq!(query.timeout, Duration::from_secs(60));
+        assert_eq!(query.timeout, SignedDuration::from_secs(60));
     }
 
     #[cfg(feature = "ai-selector")]

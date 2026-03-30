@@ -3,36 +3,30 @@
 ## 概览
 
 本次变更分为三个主要部分：
-1. **AI 选择器实现**：在 rules DSL 中支持 `selector_type: "ai"`，使用 `async-openai` 调用 OpenAI API 进行智能内容提取
+1. **AI 选择器实现**：提供 `AiQuery`，使用 `async-openai` 调用 OpenAI API 进行智能内容提取
 2. **并发控制优化**：完善现有的并发控制机制，增加连接池配置和更精细的域名级并发控制
-3. **示例扩充**：添加多个实际场景的示例代码
+3. **示例补充**：补充与已落地能力直接对应的示例代码
 
 ## 模块影响
 
 ### src/ 模块变更
 
-**新增模块：**
-- `src/selector/ai.rs`：AI 选择器实现，封装 OpenAI API 调用
-- `src/selector/mod.rs`：选择器模块入口，统一管理 CSS/XPath/Regex/AI 选择器
-
 **修改模块：**
-- `src/rules/run.rs`：在 DSL 执行时支持 AI 选择器类型
+- `src/parser/ai.rs`：AI 查询实现，封装 OpenAI API 调用与重试/超时逻辑
 - `src/settings.rs`：添加 OpenAI API key 配置和连接池配置
 - `src/engine.rs`：优化并发控制逻辑，实现按域名的并发限制
-- `src/lib.rs`：导出新增的 selector 模块
+- `src/download/http.rs`：应用连接池配置
 
 **依赖变更：**
-- `Cargo.toml`：添加 `async-openai = "0.24"` 依赖（可选 feature）
+- `Cargo.toml`：添加 `async-openai = "0.34"` 依赖（可选 feature）
 
 ### examples/ 变更
 
-新增示例：
+保留示例：
 - `examples/ai_extraction.rs`：演示 AI 选择器提取复杂内容
-- `examples/ecommerce.rs`：电商网站爬取示例
-- `examples/news_aggregator.rs`：新闻聚合示例
-- `examples/api_spider.rs`：API 数据抓取示例
-- `examples/browser_automation.rs`：浏览器模式完整示例
 - `examples/concurrency_control.rs`：并发控制配置示例
+
+当前不继续扩展示例矩阵；等 DSL 配置面和 browser 能力进一步收敛后，再按模块补新示例。
 
 ### openspec/specs/ 变更
 
@@ -75,17 +69,6 @@ ai-selector = ["dep:async-openai"]
 
 ### Plugin 或 DSL 影响
 
-**AI 选择器 DSL 用法：**
-```json
-{
-  "name": "summary",
-  "source": "html",
-  "selector_type": "ai",
-  "selector": ["Extract the main article summary in 2-3 sentences"],
-  "attribute": "text"
-}
-```
-
 **配置传递：**
 - API key 优先从环境变量 `OPENAI_API_KEY` 读取
 - 也可通过 `Settings::openai_api_key()` 显式配置
@@ -94,11 +77,12 @@ ai-selector = ["dep:async-openai"]
 ## 验证方式
 
 1. **单元测试**：
-   - `src/selector/ai.rs` 的 mock 测试
+   - `src/parser/ai.rs` 的测试
    - 并发控制逻辑的测试
 
 2. **集成测试**：
-   - 运行所有新增示例：`cargo run --example <name> --features ai-selector`
+   - 运行 `examples/ai_extraction.rs`
+   - 运行 `examples/concurrency_control.rs`
    - 验证并发限制是否生效
 
 3. **文档验证**：

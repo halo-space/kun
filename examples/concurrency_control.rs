@@ -8,6 +8,7 @@ use halo_spider::settings::Settings;
 use halo_spider::spider::{Output, Spider};
 use halo_spider::value::Value;
 use halo_spider::{cb, spider_callbacks};
+use jiff::SignedDuration;
 use std::collections::BTreeMap;
 
 struct PeriodConcurrencySpider;
@@ -33,7 +34,7 @@ impl Spider for PeriodConcurrencySpider {
                 meta.insert("front_page".to_string(), Value::String(front_page.clone()));
 
                 response
-                    .follow_with_meta(&build_edition_url(&period_date, &front_page), &meta)
+                    .follow_with_meta(build_edition_url(&period_date, &front_page), &meta)
                     .with_callback(cb!(Self::parse_edition))
             })
             .collect();
@@ -78,11 +79,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_concurrent_requests(3)
         .with_concurrent_requests_per_domain(1)
         .with_connection_pool_size(50)
-        .with_download_delay(std::time::Duration::from_millis(200));
+        .with_download_delay(SignedDuration::from_millis(200));
 
     let scheduler = Memory::default();
     let http = Http::new().with_pool_size(50);
-    let browser = Browser::default();
+    let browser = Browser;
 
     let mut engine = Engine::new(scheduler, http, browser).with_settings(settings);
 

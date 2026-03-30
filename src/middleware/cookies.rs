@@ -23,10 +23,10 @@ impl CookiesMiddleware {
     }
 
     fn apply_default_session(&self, context: &mut EngineContext) {
-        if context.request.session.is_none() {
-            if let Some(session_id) = &self.default_session {
-                context.request.session = Some(SessionConfig::new(session_id.clone()));
-            }
+        if context.request.session.is_none()
+            && let Some(session_id) = &self.default_session
+        {
+            context.request.session = Some(SessionConfig::new(session_id.clone()));
         }
     }
 

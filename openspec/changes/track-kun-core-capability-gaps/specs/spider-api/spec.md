@@ -35,6 +35,25 @@
 - **WHEN** 用户从已有 request 派生新的 follow request
 - **THEN** 新请求继承 headers、cookies 与核心请求配置，但默认重置 method 为 `GET`、清空 body、清空 callback，并且不继承 `dont_filter`
 
+### Requirement: Browser Execution Must Match Playwright Runtime Boundaries
+
+系统必须让 browser request 的配置语义与实际 downloader 实现保持一致，并把未实现能力收敛为显式失败。
+
+#### Scenario: Browser request uses Playwright-compatible engines
+
+- **WHEN** browser request 选择 `driver = playwright` 与 `chromium | firefox | webkit`
+- **THEN** downloader 使用对应的 Playwright 浏览器引擎执行请求
+
+#### Scenario: Browser feature disabled returns explicit error
+
+- **WHEN** 当前构建未启用 `browser` feature 却执行 browser request
+- **THEN** 系统返回显式 download error，而不是返回 stub response
+
+#### Scenario: Unsupported browser options fail explicitly
+
+- **WHEN** browser request 启用了尚未接线的 `stealth`、`fingerprint_profile`、`session`、非 `GET` method 或 request body
+- **THEN** 系统返回显式 download error，而不是静默忽略这些配置
+
 ## MODIFIED Requirements
 
 ### Requirement: Response 提供内建解析辅助方法

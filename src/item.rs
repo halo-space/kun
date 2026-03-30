@@ -1,5 +1,4 @@
 use crate::value::Value;
-pub mod output;
 use std::collections::BTreeMap;
 
 pub type Fields = BTreeMap<String, Value>;

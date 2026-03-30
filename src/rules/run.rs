@@ -145,7 +145,7 @@ async fn build_request_from_next_url_config(
     );
 
     // 构造 URLs
-    let urls = build_next_urls(response, &parse.next_url_config, &parsed_fields)?;
+    let urls = build_next_urls(response, &parse.next_url_config, parsed_fields)?;
     tracing::info!(urls_count = urls.len(), urls = ?urls, "构造的 URLs");
 
     // 找到下一个 step
@@ -334,17 +334,17 @@ fn select_regex(response: &Response, selector: &str, attribute: &str) -> Vec<Str
     if attribute == "text" {
         return query.all();
     }
-    if let Some(index) = attribute.strip_prefix("group:") {
-        if let Ok(index) = index.parse::<usize>() {
-            return query.group(index).into_iter().collect();
-        }
+    if let Some(index) = attribute.strip_prefix("group:")
+        && let Ok(index) = index.parse::<usize>()
+    {
+        return query.group(index).into_iter().collect();
     }
     query.all()
 }
 
 async fn select_ai(response: &Response, prompt: &str) -> Result<Vec<String>, SpiderError> {
     let mut query = response.ai(prompt);
-    query.execute().await.map_err(|e| SpiderError::parse(e))?;
+    query.execute().await.map_err(SpiderError::parse)?;
     Ok(query.all())
 }
 
@@ -405,7 +405,7 @@ fn build_next_urls(
         "TEMPLATE" => build_from_template(config, parsed_fields, response)?,
         "JOIN" => build_from_join(config, parsed_fields)?,
         "FUNCTION" => build_from_function(config, parsed_fields, response)?,
-        other => return Err(SpiderError::parse(&format!("unsupported mode: {}", other))),
+        other => return Err(SpiderError::parse(format!("unsupported mode: {}", other))),
     };
 
     normalize_urls(response, urls)
@@ -430,7 +430,7 @@ fn build_from_field(
 
     let value = parsed_fields
         .get(field_name)
-        .ok_or_else(|| SpiderError::parse(&format!("Field '{}' not found", field_name)))?;
+        .ok_or_else(|| SpiderError::parse(format!("Field '{}' not found", field_name)))?;
 
     match value {
         Value::String(s) => Ok(vec![s.clone()]),
@@ -471,10 +471,10 @@ fn build_from_template(
     // 替换 {meta.xxx}
     for (key, value) in &response.meta {
         let placeholder = format!("{{meta.{}}}", key);
-        if url.contains(&placeholder) {
-            if let Some(s) = value.as_str() {
-                url = url.replace(&placeholder, s);
-            }
+        if url.contains(&placeholder)
+            && let Some(s) = value.as_str()
+        {
+            url = url.replace(&placeholder, s);
         }
     }
 
@@ -608,10 +608,9 @@ fn evaluate_function_call(
                     parsed_fields,
                     response,
                     &format!("coalesce.args[{index}]"),
-                )? {
-                    if !value.trim().is_empty() {
-                        return Ok(value);
-                    }
+                )? && !value.trim().is_empty()
+                {
+                    return Ok(value);
                 }
             }
 
@@ -750,10 +749,10 @@ fn resolve_url(base: &str, url: &str) -> String {
         return url.to_string();
     }
 
-    if let Ok(base_url) = url::Url::parse(base) {
-        if let Ok(resolved) = base_url.join(url) {
-            return resolved.to_string();
-        }
+    if let Ok(base_url) = url::Url::parse(base)
+        && let Ok(resolved) = base_url.join(url)
+    {
+        return resolved.to_string();
     }
 
     url.to_string()

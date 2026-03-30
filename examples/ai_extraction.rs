@@ -5,7 +5,7 @@ use halo_spider::response::Response;
 use halo_spider::scheduler::Memory;
 use halo_spider::settings::Settings;
 use halo_spider::spider::{Output, Spider};
-use std::time::Duration;
+use jiff::SignedDuration;
 
 struct AiSpider;
 
@@ -22,9 +22,9 @@ impl Spider for AiSpider {
         let mut query = response
             .ai("Read this XML and return JSON with the latest period_date and front_page from the last <period> node.")
             .with_max_retries(3)
-            .with_timeout(Duration::from_secs(30));
+            .with_timeout(SignedDuration::from_secs(30));
 
-        query.execute().await.map_err(|e| SpiderError::parse(e))?;
+        query.execute().await.map_err(SpiderError::parse)?;
 
         if let Some(result) = query.one() {
             println!("AI extracted: {}", result);
@@ -44,7 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let scheduler = Memory::default();
     let http = Http::new();
-    let browser = Browser::default();
+    let browser = Browser;
 
     let mut engine = Engine::new(scheduler, http, browser).with_settings(settings);
 

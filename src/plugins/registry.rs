@@ -17,13 +17,13 @@ impl PluginRegistry {
     pub fn register(&mut self, manifest: PluginManifest) -> Result<(), SpiderError> {
         let key = (manifest.kind.clone(), manifest.name.clone());
 
-        if let Some(existing) = self.manifests.get(&key) {
-            if !manifest.r#override {
-                return Err(SpiderError::plugin(format!(
-                    "plugin conflict: ({}, {}) already registered as '{}'; set override = true to replace",
-                    key.0, key.1, existing.entry
-                )));
-            }
+        if let Some(existing) = self.manifests.get(&key)
+            && !manifest.r#override
+        {
+            return Err(SpiderError::plugin(format!(
+                "plugin conflict: ({}, {}) already registered as '{}'; set override = true to replace",
+                key.0, key.1, existing.entry
+            )));
         }
 
         self.manifests.insert(key, manifest);

@@ -86,6 +86,28 @@
 - When 该请求被执行并转换成响应
 - Then 响应保留原始 metadata 与回调路由上下文
 
+#### Scenario: browser 请求走 Playwright 兼容引擎配置
+
+- Given 一个 browser 请求声明 `driver = playwright`
+- And `engine` 为 `chromium`、`firefox` 或 `webkit`
+- When browser downloader 执行该请求
+- Then 它使用对应的 Playwright 浏览器引擎
+- And `headless`、`viewport`、`wait_for`、timeout、headers 与 proxy 等已接线配置会被应用
+
+#### Scenario: 未启用 browser feature 时显式失败
+
+- Given 一个 browser 请求
+- When 当前构建未启用 `browser` feature
+- Then 执行返回显式 download error
+- And 框架不能返回受限 stub response 冒充成功执行
+
+#### Scenario: 未实现的 browser 能力显式报错
+
+- Given 一个 browser 请求启用了 `stealth`、`fingerprint_profile`、`session`、非 `GET` method 或 request body
+- When browser downloader 尝试执行它
+- Then 执行返回显式 download error
+- And 框架不能静默忽略这些未实现配置
+
 ### Requirement: Request 建模核心请求级能力
 
 库必须在统一的 `Request` 类型上建模 timeout、proxy、session 以及 request 级 cookies/follow 继承语义，而不是把这些能力散落成互不对齐的入口。

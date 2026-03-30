@@ -20,6 +20,12 @@
 - When 请求 runtime 配置
 - Then 显式传入的 runtime config 覆盖推导出的默认值
 
+#### Scenario: Settings carries connection pool and OpenAI defaults
+
+- Given 用户未显式修改连接池或 OpenAI 相关配置
+- When 引擎与相关能力读取 Settings
+- Then 系统提供稳定的默认 `connection_pool_size`、`openai_model` 与对应环境变量入口
+
 ### Requirement: Runtime config 可编译成 middleware 所需行为
 
 库必须把 runtime 策略表示为 `schedule`、`retry` 与 `dedup` 三组 map，并且它们可以编译成 middleware 配置。
@@ -62,15 +68,27 @@
 - When 开始执行任务
 - Then 同时运行的任务数量不超过配置的全局上限
 
+#### Scenario: 同域名请求受每域名上限约束
+
+- Given 某个域名的并发请求数达到 `concurrent_requests_per_domain`
+- When 引擎继续调度同一域名的新请求
+- Then 这些请求等待该域名的并发槽位释放，而不是继续立即执行
+
+#### Scenario: 全局并发与域名并发同时生效
+
+- Given 同时配置了全局并发上限和每域名并发上限
+- When 引擎调度任务
+- Then 两个限制同时生效，并以更严格的限制为准
+
 #### Scenario: allowed domains 过滤后续请求
 
 - Given spider 返回了 `allowed_domains()`
 - When 引擎准备把域名不在白名单中的请求入队
 - Then 该请求在进入 scheduler 前被拒绝
 
-### Requirement: Engine 集成 pipeline 与输出处理
+### Requirement: Engine 通过单一 pipeline 处理 items
 
-库必须在启动时打开配置好的 pipeline，并在运行循环中处理 spider 的输出。
+库必须在启动时打开配置好的 pipeline，并在运行循环中用这条唯一的 item 管线处理 spider 的输出。
 
 #### Scenario: Pipeline 以 spider 名称打开
 
@@ -83,6 +101,18 @@
 - Given 某个回调或 DSL step 返回了输出
 - When 引擎处理该输出
 - Then items 继续进入 pipeline，requests 回到调度流程
+
+#### Scenario: Pipeline 可以显式丢弃 item
+
+- Given 某个 pipeline 对 item 返回 `Ok(false)`
+- When 引擎处理该 item
+- Then 该 item 不再进入最终输出集合
+
+#### Scenario: Pipeline 错误会显式失败当前任务
+
+- Given 某个 pipeline 在处理 item 时返回错误
+- When 引擎处理该 item
+- Then 当前任务显式失败，而不是依赖隐式 best effort
 
 ### Requirement: Scheduler 以 task identity 跟踪任务生命周期
 
@@ -103,6 +133,12 @@
 ### Requirement: HTTP Downloader Applies Shared Transport Request Semantics
 
 库必须在 HTTP downloader 中统一接线 timeout、cookie jar、proxy 与 redirect 能力，而不是分别散落为不一致的临时实现。
+
+#### Scenario: Connection pool size comes from Settings
+
+- Given 用户在 `Settings` 中显式配置了 `connection_pool_size`
+- When 引擎创建 HTTP downloader 或其底层客户端
+- Then 连接池大小使用该配置值
 
 #### Scenario: Per-request timeout aborts download explicitly
 

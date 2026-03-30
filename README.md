@@ -1,6 +1,6 @@
 # halo-spider
 
-一个受 Scrapy 启发的 Rust 异步爬虫框架，支持代码回调与 JSON DSL 混合抓取，并且从现在开始只使用 OPSX / OpenSpec 作为项目规范与变更工作流。
+一个受 Scrapy 启发的 Rust 异步爬虫框架，提供代码爬虫与 DSL 配置化两种入口，并使用 OpenSpec 管理规范与变更。
 
 ## 当前状态
 
@@ -10,13 +10,12 @@
 - 后续需求、方案、任务统一从 `openspec/changes/` 发起
 - `openspec init` 生成的协作入口位于 `.claude/commands/opsx/` 与 `.codex/skills/`
 
-旧的设计稿、分轮任务稿和 `.cursor` 规则/技能已经移除，不再作为本项目的协作入口。
-
 ## 快速开始
 
 ```toml
 [dependencies]
-halo-spider = "0.0.4"
+halo-spider = "0.0.5"
+jiff = "0.2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
 tracing-subscriber = "0.3"
 ```
@@ -30,7 +29,7 @@ use halo_spider::scheduler::Memory;
 use halo_spider::settings::Settings;
 use halo_spider::spider::{Output, Spider};
 use halo_spider::value::Value;
-use std::time::Duration;
+use jiff::SignedDuration;
 
 struct MySpider;
 
@@ -63,8 +62,8 @@ async fn main() {
     tracing_subscriber::fmt().init();
 
     let settings = Settings::default()
-        .with_download_delay(Duration::from_millis(200))
-        .with_idle_timeout(Duration::from_secs(5));
+        .with_download_delay(SignedDuration::from_millis(200))
+        .with_idle_timeout(SignedDuration::from_secs(5));
 
     let mut engine = Engine::new(
         Memory::default(),
@@ -88,6 +87,7 @@ async fn main() {
 ```bash
 # 基础能力示例（统一使用 period.xml 场景）
 cargo run --example period_xml_spider
+cargo run --example pipeline_memory
 cargo run --example custom_middleware
 cargo run --example plugins_demo
 
@@ -97,6 +97,48 @@ cargo run --example ai_extraction --features ai-selector
 # 并发控制示例
 cargo run --example concurrency_control
 ```
+
+## Pipeline 组合
+
+`pipeline` 是唯一的 item 处理链路。`with_pipeline((A, B))` 表示把两个
+pipeline 串起来执行：
+
+```rust
+use halo_spider::pipeline::{Memory as MemoryPipeline, Pipeline};
+
+#[derive(Clone, Copy)]
+struct EnrichIssue;
+
+impl Pipeline for EnrichIssue {
+    async fn process(
+        &self,
+        item: &mut halo_spider::item::Item,
+        _spider_name: &str,
+    ) -> Result<bool, halo_spider::error::SpiderError> {
+        item.insert(
+            "source",
+            halo_spider::value::Value::String("period.xml".to_string()),
+        );
+        Ok(true)
+    }
+}
+
+let stored = MemoryPipeline::default();
+
+let mut engine = Engine::new(scheduler, http, browser)
+    .with_pipeline((EnrichIssue, stored.clone()));
+```
+
+执行顺序就是：
+
+- `open()`：先 `A.open()`，再 `B.open()`
+- `process()`：先 `A.process()`，只有当 `A` 返回 `Ok(true)` 时才继续执行 `B.process()`
+- `close()`：先 `A.close()`，再 `B.close()`
+
+也就是说，`with_pipeline((A, B))` 更像 `A -> B` 这条固定链路，而不是两条独立输出通道。
+如果需要三个阶段，就继续嵌套元组：`((A, B), C)`。
+
+完整可运行示例见 `examples/pipeline_memory.rs`。
 
 ## DSL 编写流程（推荐）
 
@@ -146,12 +188,48 @@ Spider / rules
 - `meta` 是请求级上下文参数，用来携带当前请求和后续链路需要透传的数据；它的角色类似 Scrapy 的 `Request.meta`。
 - `dedup`、`schedule`、`retry` 等能力属于 `kun` 框架本身的爬虫能力，DSL 只是这些能力的配置化表达，不应实现成一套独立于代码爬虫的专用流程。
 
-**高级用法：** 如需手动控制规则编译和应用，可使用 `compile_rules()` 和 `apply_dsl()`，但这不是推荐的入门路径。
+## Browser 能力边界
+
+当前 `browser` 模式走 `playwright-rs` 这条实现线，对外仍然只是 `kun` 的一个浏览器下载能力，不额外暴露单独的 backend 概念。
+
+当前已经接线的最小能力：
+
+- `engine = chromium | firefox | webkit`
+- `headless`
+- `viewport`
+- `wait_for`
+- request timeout
+- request headers
+- request proxy
+- 页面渲染后的 HTML 抓取
+
+当前还没有实现、并且会显式报错的能力：
+
+- `stealth`
+- `fingerprint_profile`
+- request `session`
+- 非 `GET` browser request
+- request body
+
+如果当前构建没有启用 `browser` feature，browser request 会直接返回显式错误，不会再返回 stub response。
+
+启用方式：
+
+```toml
+halo-spider = { version = "0.0.5", features = ["browser"] }
+```
+
+首次使用前需要安装 Playwright 浏览器：
+
+```bash
+npx playwright@1.58.2 install chromium firefox webkit
+```
 
 **已知限制：**
 - HTML 解析暂不支持 XPath 选择器（当前 XPath 实现基于 XML 解析器，对不规范 HTML 容错性差）
 - 建议在 HTML 场景下使用 CSS 选择器替代 XPath
-- 详见 [TODO.md](TODO.md)
+- `ocr` 相关解析能力当前暂不实现
+- DSL 配置面当前后置，优先补齐和稳定代码爬虫与共享底层能力
 
 ### DSL 配置选项
 
@@ -274,7 +352,7 @@ Spider / rules
 
 ```toml
 [dependencies]
-halo-spider = { version = "0.0.4", features = ["ai-selector"] }
+halo-spider = { version = "0.0.5", features = ["ai-selector"] }
 ```
 
 ```rust
@@ -293,7 +371,7 @@ let settings = Settings::default()
 async fn parse(&self, response: &Response) -> Result<Output, SpiderError> {
     let mut query = response.ai("Extract the main article title and summary")
         .with_max_retries(3)
-        .with_timeout(Duration::from_secs(30));
+        .with_timeout(jiff::SignedDuration::from_secs(30));
     query.execute().await.map_err(|e| SpiderError::parse(e))?;
 
     if let Some(result) = query.one() {
@@ -317,7 +395,7 @@ let settings = Settings::default()
     .with_concurrent_requests(16)              // 全局最大并发数
     .with_concurrent_requests_per_domain(8)    // 每个域名最大并发数
     .with_connection_pool_size(100)            // HTTP 连接池大小
-    .with_download_delay(Duration::from_millis(200));  // 请求间延迟
+    .with_download_delay(jiff::SignedDuration::from_millis(200));  // 请求间延迟
 ```
 
 参考 `examples/concurrency_control.rs` 或 `examples/README.md` 查看当前保留示例。

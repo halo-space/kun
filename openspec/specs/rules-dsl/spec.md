@@ -106,6 +106,18 @@
 - When DSL step 完成字段提取
 - Then 引擎在产出 item 或 request 前执行共享 validation，并在失败时返回 parse error
 
+#### Scenario: AI selector uses configured OpenAI settings
+
+- Given 某条字段规则声明 `selector_type = "ai"`
+- When DSL step 运行该字段规则
+- Then 系统使用当前 Settings 中的 OpenAI 配置执行 AI 提取
+
+#### Scenario: Missing AI feature or API key fails explicitly
+
+- Given 某条字段规则声明 `selector_type = "ai"`
+- When 当前构建未启用 `ai-selector` feature，或未提供可用的 OpenAI API key
+- Then 系统返回显式错误，而不是静默跳过该字段
+
 ### Requirement: DSL 解析来源与选择器类型保持显式
 
 库必须在规则 schema 中显式保留来源类型与选择器类型。

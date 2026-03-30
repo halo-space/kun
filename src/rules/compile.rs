@@ -645,6 +645,100 @@ fn expect_object<'a>(
         .ok_or_else(|| SpiderError::rules(format!("{label} must be an object")))
 }
 
+fn parse_dedup(
+    value: Option<&Value>,
+) -> Result<Option<crate::rules::schema::DedupConfig>, SpiderError> {
+    let Some(v) = value else { return Ok(None) };
+    let obj = v
+        .as_object()
+        .ok_or_else(|| SpiderError::rules("dedup must be an object"))?;
+
+    Ok(Some(crate::rules::schema::DedupConfig {
+        enabled: obj.get("enabled").and_then(Value::as_bool).unwrap_or(true),
+        key: obj
+            .get("key")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        ttl: obj
+            .get("ttl")
+            .and_then(Value::as_f64)
+            .map(|n| n as u64)
+            .unwrap_or(86400),
+        scope: obj
+            .get("scope")
+            .and_then(Value::as_str)
+            .unwrap_or("TASK")
+            .to_string(),
+        namespace: obj
+            .get("namespace")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    }))
+}
+
+fn parse_schedule(
+    value: Option<&Value>,
+) -> Result<Option<crate::rules::schema::ScheduleConfig>, SpiderError> {
+    let Some(v) = value else { return Ok(None) };
+    let obj = v
+        .as_object()
+        .ok_or_else(|| SpiderError::rules("schedule must be an object"))?;
+
+    Ok(Some(crate::rules::schema::ScheduleConfig {
+        concurrency: obj
+            .get("concurrency")
+            .and_then(Value::as_f64)
+            .map(|n| n as u32),
+        interval: obj
+            .get("interval")
+            .and_then(Value::as_f64)
+            .map(|n| n as u64),
+    }))
+}
+
+fn parse_retry(
+    value: Option<&Value>,
+) -> Result<Option<crate::rules::schema::RetryConfig>, SpiderError> {
+    let Some(v) = value else { return Ok(None) };
+    let obj = v
+        .as_object()
+        .ok_or_else(|| SpiderError::rules("retry must be an object"))?;
+
+    Ok(Some(crate::rules::schema::RetryConfig {
+        count: obj
+            .get("count")
+            .and_then(Value::as_f64)
+            .map(|n| n as u32)
+            .unwrap_or(3),
+        http_status: obj
+            .get("http_status")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(Value::as_f64)
+                    .map(|n| n as u16)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        backoff: obj
+            .get("backoff")
+            .and_then(Value::as_array)
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(Value::as_f64)
+                    .map(|n| n as u64)
+                    .collect()
+            })
+            .unwrap_or_default(),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -957,10 +1051,7 @@ mod tests {
                 .contains_key("retry_by_status")
         );
         assert!(compiled.steps[0].middlewares.contains_key("dedup"));
-        assert_eq!(
-            compiled.steps[0].middlewares["retry_by_status"].enabled,
-            true
-        );
+        assert!(compiled.steps[0].middlewares["retry_by_status"].enabled);
         assert_eq!(compiled.steps[0].middlewares["retry_by_status"].order, 200);
         assert_eq!(
             compiled.steps[0].middlewares["retry_by_status"]
@@ -969,7 +1060,7 @@ mod tests {
                 .and_then(Value::as_f64),
             Some(5.0)
         );
-        assert_eq!(compiled.steps[0].middlewares["dedup"].enabled, false);
+        assert!(!compiled.steps[0].middlewares["dedup"].enabled);
     }
 
     #[test]
@@ -1031,98 +1122,4 @@ mod tests {
             Some(&Value::String("STEP".to_string()))
         );
     }
-}
-
-fn parse_dedup(
-    value: Option<&Value>,
-) -> Result<Option<crate::rules::schema::DedupConfig>, SpiderError> {
-    let Some(v) = value else { return Ok(None) };
-    let obj = v
-        .as_object()
-        .ok_or_else(|| SpiderError::rules("dedup must be an object"))?;
-
-    Ok(Some(crate::rules::schema::DedupConfig {
-        enabled: obj.get("enabled").and_then(Value::as_bool).unwrap_or(true),
-        key: obj
-            .get("key")
-            .and_then(Value::as_array)
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default(),
-        ttl: obj
-            .get("ttl")
-            .and_then(Value::as_f64)
-            .map(|n| n as u64)
-            .unwrap_or(86400),
-        scope: obj
-            .get("scope")
-            .and_then(Value::as_str)
-            .unwrap_or("TASK")
-            .to_string(),
-        namespace: obj
-            .get("namespace")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-    }))
-}
-
-fn parse_schedule(
-    value: Option<&Value>,
-) -> Result<Option<crate::rules::schema::ScheduleConfig>, SpiderError> {
-    let Some(v) = value else { return Ok(None) };
-    let obj = v
-        .as_object()
-        .ok_or_else(|| SpiderError::rules("schedule must be an object"))?;
-
-    Ok(Some(crate::rules::schema::ScheduleConfig {
-        concurrency: obj
-            .get("concurrency")
-            .and_then(Value::as_f64)
-            .map(|n| n as u32),
-        interval: obj
-            .get("interval")
-            .and_then(Value::as_f64)
-            .map(|n| n as u64),
-    }))
-}
-
-fn parse_retry(
-    value: Option<&Value>,
-) -> Result<Option<crate::rules::schema::RetryConfig>, SpiderError> {
-    let Some(v) = value else { return Ok(None) };
-    let obj = v
-        .as_object()
-        .ok_or_else(|| SpiderError::rules("retry must be an object"))?;
-
-    Ok(Some(crate::rules::schema::RetryConfig {
-        count: obj
-            .get("count")
-            .and_then(Value::as_f64)
-            .map(|n| n as u32)
-            .unwrap_or(3),
-        http_status: obj
-            .get("http_status")
-            .and_then(Value::as_array)
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(Value::as_f64)
-                    .map(|n| n as u16)
-                    .collect()
-            })
-            .unwrap_or_default(),
-        backoff: obj
-            .get("backoff")
-            .and_then(Value::as_array)
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(Value::as_f64)
-                    .map(|n| n as u64)
-                    .collect()
-            })
-            .unwrap_or_default(),
-    }))
 }

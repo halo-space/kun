@@ -28,9 +28,9 @@ use halo_spider::settings::Settings;
 use halo_spider::spider::{Output, Spider};
 use halo_spider::value::Value;
 use halo_spider::{cb, spider_callbacks};
+use jiff::SignedDuration;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // 插件作者实现的中间件
@@ -288,8 +288,8 @@ async fn main() {
 
     // Step 3: 最终用户在 Settings 中按名字启用中间件插件
     let settings = Settings::default()
-        .with_download_delay(Duration::from_millis(300))
-        .with_idle_timeout(Duration::from_secs(3))
+        .with_download_delay(SignedDuration::from_millis(300))
+        .with_idle_timeout(SignedDuration::from_secs(3))
         .with_middleware(
             "custom_signature",
             MiddlewareConfig {
@@ -316,7 +316,7 @@ async fn main() {
         );
 
     // Step 4: 构建引擎，注册工厂，加载插件
-    let engine = Engine::new(Memory::default(), Http::default(), Browser::default())
+    let engine = Engine::new(Memory::default(), Http::default(), Browser)
         .with_settings(settings)
         // 插件作者注册工厂函数（名称必须与 plugins.toml 中的 name 对应）
         .register_middleware("custom_signature", |options| {

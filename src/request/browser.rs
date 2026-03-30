@@ -35,14 +35,16 @@ impl TryFrom<&str> for Driver {
 pub enum Engine {
     #[default]
     Chromium,
-    GoogleChrome,
+    Firefox,
+    Webkit,
 }
 
 impl Engine {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Chromium => "chromium",
-            Self::GoogleChrome => "google_chrome",
+            Self::Firefox => "firefox",
+            Self::Webkit => "webkit",
         }
     }
 }
@@ -59,7 +61,8 @@ impl TryFrom<&str> for Engine {
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
             "chromium" => Ok(Self::Chromium),
-            "google_chrome" | "google-chrome" | "chrome" => Ok(Self::GoogleChrome),
+            "firefox" => Ok(Self::Firefox),
+            "webkit" => Ok(Self::Webkit),
             other => Err(format!("unsupported browser engine: {other}")),
         }
     }
@@ -160,11 +163,11 @@ mod tests {
     #[test]
     fn config_can_switch_browser_engine_and_profile() {
         let config = Config::default()
-            .with_engine(Engine::GoogleChrome)
+            .with_engine(Engine::Firefox)
             .with_stealth(true)
             .with_fingerprint_profile("desktop_zh_cn");
 
-        assert_eq!(config.engine, Engine::GoogleChrome);
+        assert_eq!(config.engine, Engine::Firefox);
         assert!(config.stealth);
         assert_eq!(config.fingerprint_profile.as_deref(), Some("desktop_zh_cn"));
     }

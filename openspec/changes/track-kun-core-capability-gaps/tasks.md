@@ -31,24 +31,26 @@
 
 ## 5. Browser 能力边界
 
-- [ ] 5.1 统一 browser request 配置模型与实际 downloader 实现，消除配置语义和实现语义不一致的问题。
-- [ ] 5.2 明确未启用 browser feature 时的行为边界，应为显式失败还是受限 stub。
-- [ ] 5.3 为 browser 模式补最小可验证的真实行为测试或契约测试。
-- [ ] 5.4 同步 `openspec/specs/spider-api/spec.md` 与相关文档。
+- [x] 5.1 统一 browser request 配置模型与实际 downloader 实现，消除配置语义和实现语义不一致的问题。
+- [x] 5.2 明确未启用 browser feature 时的行为边界，应为显式失败还是受限 stub。
+- [x] 5.3 为 browser 模式补最小可验证的真实行为测试或契约测试。
+- [x] 5.4 同步 `openspec/specs/spider-api/spec.md` 与相关文档。
 
 ## 6. Parser 缺口补齐
+
+当前暂缓：HTML XPath 目前没有稳定好用的底层库方案，`ocr` 也暂无可落地实现；这组任务先不纳入当前实现范围。
 
 - [ ] 6.1 补齐 HTML XPath 能力，或明确提供稳定的 HTML XPath 替代实现。
 - [ ] 6.2 为 `ocr` selector_type 补真正 parser/runtime 支持，或从 schema 中移除占位能力。
 - [ ] 6.3 规划 parse 后处理能力：多选择器兜底、normalize、类型转换、结构化校验。
 - [ ] 6.4 同步 `README.md`、`TODO.md` 与 parser 测试。
 
-## 7. Output / Pipeline / Sink 能力
+## 7. Pipeline Item 处理能力
 
-- [ ] 7.1 将当前轻量 `Pipeline` 与 `ItemOutput` 梳理成更明确的输出能力边界。
-- [ ] 7.2 定义最小 output/sink 能力：写入策略、失败策略、内存输出之外的持久化接口。
-- [ ] 7.3 明确 pipeline 错误、sink 错误与 item 丢弃的运行时语义。
-- [ ] 7.4 同步 `openspec/specs/runtime-engine/spec.md` 与输出层测试。
+- [x] 7.1 将当前轻量 `Pipeline` 收口为唯一的 item 处理/输出链路，移除独立 `ItemOutput` / `sink` 运行时概念。
+- [x] 7.2 提供最小内置 pipeline 输出能力：补齐 `pipeline::Memory`，并以 pipeline 方式承载持久化扩展点。
+- [x] 7.3 明确 pipeline 错误与 item 丢弃的运行时语义。
+- [x] 7.4 同步 `openspec/specs/runtime-engine/spec.md` 与 pipeline 输出测试。
 
 ## 8. Plugin 扩展边界
 
@@ -57,6 +59,8 @@
 - [ ] 8.3 同步 `openspec/specs/middleware-plugins/spec.md` 与插件加载校验测试。
 
 ## 9. DSL 与共享底层能力对齐
+
+当前后置：先补齐并稳定代码爬虫与共享底层能力，再回头收口 DSL 配置面与运行时映射。
 
 - [ ] 9.1 逐项梳理 DSL 字段里哪些能力已经进入共享底层，哪些仍然只是配置占位。
 - [ ] 9.2 确保 `validate`、request、cookies、proxy、output 等能力优先作为底层能力实现，再映射到 DSL。
@@ -68,3 +72,12 @@
 - [ ] 10.2 按能力子项补充单元测试或集成测试，避免只补文档不补验证。
 - [ ] 10.3 每完成一个能力分组后运行 `cargo test`。
 - [ ] 10.4 如涉及示例变化，运行 `cargo check --examples`。
+
+## 11. Engine 结构整理
+
+- [x] 11.1 收口 `engine` 中任务执行参数，把 `execute_task_with_permits` / `decide_task_execution` 的上下文整理成更稳定的结构体，而不是继续扩散参数列表。
+- [x] 11.2 评估 `TaskDecision` 的体积差异，明确是否通过 `Box` 或其它方式降低大枚举变体的拷贝/栈占用。
+- [x] 11.3 在不改变现有运行时语义的前提下，为 `engine` 结构整理补最小回归测试。
+- [x] 11.4 清理 `engine` 内部局部命名，去掉 `sem` 一类缩写，统一使用 `global_semaphore`、`domain_semaphore` 这类完整命名。
+- [x] 11.5 如果本轮仍暂时保留单文件实现，下一轮评估将任务执行相关逻辑拆到独立子模块，至少明确 `task executor` / `task decision apply` 的拆分边界。
+- [x] 11.6 统一 `engine` 内部任务执行命名语义，避免 `TaskOutcome`、`TaskResult`、`execute_task_inner()`、`flow_to_outcome()` 这类跨层级混用；明确“middleware flow”“task decision/result”“result apply/handle”各自的命名边界。

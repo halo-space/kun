@@ -1,4 +1,4 @@
-# TODO - 实现过程中发现的问题
+# 实现记录 - parse-period-xml-and-detail-pages
 
 ## 已修复的问题
 

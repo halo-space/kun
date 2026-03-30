@@ -27,7 +27,7 @@
 - `src/parser/*`
   - 后续补齐 HTML XPath、OCR、parse 后处理
 - `src/pipeline.rs`
-  - 后续补齐 output/sink 能力时会扩展
+  - 后续在单一 pipeline 模型上补齐 item 输出与持久化能力
 - `src/plugins/*`
   - 后续补齐除 middleware 外的扩展边界时会扩展
 - `src/rules/*`
@@ -40,9 +40,9 @@
 ## 关键决策
 
 - Runtime / middleware 影响：
-  - `validate`、`proxy`、`cookies`、output policy 等能力应视情况进入统一 runtime / middleware / engine 链路，而不是停留在 DSL 私有字段。
+  - `validate`、`proxy`、`cookies`、item 输出策略等能力应视情况进入统一 runtime / middleware / engine 链路，而不是停留在 DSL 私有字段。
 - 对外 API 影响：
-  - request/follow、scheduler identity、browser 边界、pipeline/output 都可能产生 API 或行为收紧，但会按小步任务推进，不一次性大改。
+  - request/follow、scheduler identity、browser 边界、pipeline item 处理语义都可能产生 API 或行为收紧，但会按小步任务推进，不一次性大改。
 - Plugin 或 DSL 影响：
   - DSL 继续只做共享能力的配置化入口。
   - plugin 体系当前以 middleware 为主，后续扩展需先明确底层能力边界，再决定是否开放新 kind。

@@ -20,6 +20,36 @@
 
 当前仓库如果只有一个进行中的变更，可以直接从该变更开始；如果后续有多个变更，先确认你要接手的是哪一个。
 
+### 当前 active changes 地图（2026-03-30）
+
+当前 `openspec/changes/` 里建议只按下面一个 active change 理解优先级。
+
+| change | 当前判断 | 建议动作 |
+|--------|----------|----------|
+| `track-kun-core-capability-gaps` | 当前主线 change | 继续作为底层能力补齐的统一入口 |
+
+可以把这些 change 粗略分成三组：
+
+```text
+继续推进
+└─ track-kun-core-capability-gaps
+```
+
+已在 2026-03-30 归档：
+
+- `ai-selector-concurrency-examples`
+- `parse-period-xml-and-detail-pages`
+- `dsl-runtime-logic-implementation`
+- `period-xml-dsl-example`
+- `dsl-step-config-enhancement`
+- `dsl-next-url-config-and-type-semantics`
+- `finalize-rules-dsl-structure`
+
+补充说明：
+
+- 如果一个 change 已完成、但相关内容已经并入主 specs 或当前代码，请优先归档，而不是继续把它挂在 active 列表里。
+- 如果多个 change 描述的是同一条能力演进链，优先保留一个“当前主线” change，其他 change 应明确标成历史阶段、被覆盖，或直接归档。
+
 ### 2. 看当前做到哪
 
 先打开：

@@ -2,6 +2,7 @@ use crate::download::traits::Downloader;
 use crate::error::SpiderError;
 use crate::request::{Headers, Request, RequestMode};
 use crate::response::Response;
+use jiff::SignedDuration;
 use reqwest::cookie::Jar;
 use reqwest::{Client, Url};
 use std::collections::BTreeMap;
@@ -182,6 +183,9 @@ impl Downloader for Http {
         }
 
         if let Some(timeout) = request.timeout {
+            let timeout = to_std_duration(timeout).map_err(|error| {
+                SpiderError::request_build(format!("invalid request timeout: {error}"))
+            })?;
             req_builder = req_builder.timeout(timeout);
         }
 
@@ -214,12 +218,12 @@ fn build_url(request: &Request) -> Result<Url, SpiderError> {
     let mut url =
         Url::parse(&request.url).map_err(|error| SpiderError::request_build(error.to_string()))?;
 
-    if let Some(http_config) = &request.http {
-        if !http_config.query.is_empty() {
-            let mut query_pairs = url.query_pairs_mut();
-            for (key, value) in &http_config.query {
-                query_pairs.append_pair(key, value);
-            }
+    if let Some(http_config) = &request.http
+        && !http_config.query.is_empty()
+    {
+        let mut query_pairs = url.query_pairs_mut();
+        for (key, value) in &http_config.query {
+            query_pairs.append_pair(key, value);
         }
     }
 
@@ -271,15 +275,19 @@ fn collect_headers(headers: &reqwest::header::HeaderMap) -> Headers {
     result
 }
 
+fn to_std_duration(duration: SignedDuration) -> Result<std::time::Duration, String> {
+    std::time::Duration::try_from(duration).map_err(|error| error.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::request::http::Config as RequestHttpConfig;
+    use jiff::SignedDuration;
     use std::io::{Read, Write};
     use std::net::{SocketAddr, TcpListener, TcpStream};
     use std::sync::{Arc, Mutex};
     use std::thread;
-    use std::time::Duration;
 
     #[test]
     fn http_downloader_rejects_browser_request() {
@@ -306,10 +314,11 @@ mod tests {
             status_line: "HTTP/1.1 200 OK".to_string(),
             headers: Vec::new(),
             body: b"slow".to_vec(),
-            delay: Some(Duration::from_millis(200)),
+            delay: Some(SignedDuration::from_millis(200)),
         });
         let downloader = Http::default();
-        let request = Request::new(server.url("/timeout")).with_timeout(Duration::from_millis(50));
+        let request =
+            Request::new(server.url("/timeout")).with_timeout(SignedDuration::from_millis(50));
 
         let result = downloader.fetch(&request).await;
 
@@ -436,7 +445,7 @@ mod tests {
         status_line: String,
         headers: Vec<(String, String)>,
         body: Vec<u8>,
-        delay: Option<Duration>,
+        delay: Option<SignedDuration>,
     }
 
     impl TestResponse {
@@ -492,7 +501,7 @@ mod tests {
             let request = read_request(&mut stream);
             let response = handler(addr, index, request);
             if let Some(delay) = response.delay {
-                thread::sleep(delay);
+                thread::sleep(to_std_duration(delay).unwrap());
             }
             write_response(&mut stream, response);
         }
@@ -500,7 +509,7 @@ mod tests {
 
     fn read_request(stream: &mut TcpStream) -> TestRequest {
         stream
-            .set_read_timeout(Some(Duration::from_secs(2)))
+            .set_read_timeout(Some(to_std_duration(SignedDuration::from_secs(2)).unwrap()))
             .unwrap();
 
         let mut buffer = [0; 4096];

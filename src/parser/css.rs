@@ -128,10 +128,10 @@ fn projection(selector: &str) -> Projection<'_> {
         return Projection::Text(base.trim());
     }
 
-    if let Some(base) = selector.strip_suffix(')') {
-        if let Some((base, attr)) = base.rsplit_once("::attr(") {
-            return Projection::Attribute(base.trim(), attr.trim().to_string());
-        }
+    if let Some(base) = selector.strip_suffix(')')
+        && let Some((base, attr)) = base.rsplit_once("::attr(")
+    {
+        return Projection::Attribute(base.trim(), attr.trim().to_string());
     }
 
     Projection::Node(selector)

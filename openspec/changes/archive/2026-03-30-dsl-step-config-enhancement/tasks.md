@@ -1,5 +1,11 @@
 # Tasks: DSL Step 配置增强
 
+当前状态说明：
+
+- 这份任务清单已经明显落后于当前代码现状。
+- `meta / dedup / schedule / retry` 中的大部分实现，已经被后续 change 和当前代码吸收。
+- 如果继续推进 DSL，对应工作应优先并入 `track-kun-core-capability-gaps` 或新的 DSL 主线 change，而不是继续逐条执行这份旧任务。
+
 ## 阶段 1：Schema 扩展
 
 ### Task 1.1: 添加配置结构体

@@ -118,10 +118,10 @@ pub trait Spider: Send + Sync {
         compiled: Option<&Compiled>,
     ) -> Result<Output, SpiderError> {
         // 优先检查 request 的 callback
-        if let Some(request) = &response.request {
-            if let Some(callback_target) = &request.callback {
-                return self.call(&callback_target.name, response).await;
-            }
+        if let Some(request) = &response.request
+            && let Some(callback_target) = &request.callback
+        {
+            return self.call(&callback_target.name, response).await;
         }
 
         let Some(step) = resolve_step(response, compiled)? else {

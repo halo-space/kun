@@ -6,6 +6,12 @@
 - 用户需要了解如何用 JSON DSL 实现同样的多级爬取场景
 - 验证 DSL 是否能完整支持 XML 解析、动态 URL 构造、回调链等功能
 
+当前说明：
+
+- 这份 proposal 保留为早期 DSL 示例探索记录。
+- 当前 `examples/` 已不再保留 DSL 示例文件，优先只展示已落地底层能力。
+- 如果未来重新引入 DSL 示例，应基于当前 README、`openspec/specs/rules-dsl/spec.md` 与真实实现重新规划。
+
 ## 范围
 
 - 会影响哪些 capability specs：
@@ -13,8 +19,8 @@
   - `parsing-and-extraction.md`：补充 XML 解析的 DSL 配置
 
 - 会影响哪些模块 / 示例：
-  - 新增 `examples/period_xml_dsl.json` DSL 配置文件
-  - 新增 `examples/period_xml_dsl.rs` 加载 DSL 的示例代码
+  - 当时计划新增 `examples/period_xml_dsl.json` DSL 配置文件
+  - 当时计划新增 `examples/period_xml_dsl.rs` 加载 DSL 的示例代码
   - 不修改核心模块
 
 - 预期带来哪些用户可见结果：

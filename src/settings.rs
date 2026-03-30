@@ -1,7 +1,7 @@
 use crate::middleware::Map as MiddlewareMap;
 use crate::runtime::Config as RuntimeConfig;
 use crate::value::Value;
-use std::time::Duration;
+use jiff::SignedDuration;
 
 /// 引擎级全局配置，对应 Scrapy 的 settings.py。
 ///
@@ -10,7 +10,7 @@ use std::time::Duration;
 ///
 /// ```rust,ignore
 /// let settings = Settings::default()
-///     .download_delay(Duration::from_millis(200))
+///     .download_delay(SignedDuration::from_millis(200))
 ///     .concurrent_requests(16)
 ///     .retry_times(3)
 ///     .retry_http_codes(vec![500, 502, 503]);
@@ -20,13 +20,13 @@ use std::time::Duration;
 /// ```
 #[derive(Debug, Clone)]
 pub struct Settings {
-    pub download_delay: Duration,
+    pub download_delay: SignedDuration,
     pub concurrent_requests: usize,
     pub concurrent_requests_per_domain: usize,
     pub retry_times: u32,
     pub retry_http_codes: Vec<u16>,
     pub dedup_enabled: bool,
-    pub idle_timeout: Duration,
+    pub idle_timeout: SignedDuration,
     pub middlewares: MiddlewareMap,
     pub runtime_override: Option<RuntimeConfig>,
     pub connection_pool_size: usize,
@@ -38,13 +38,13 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            download_delay: Duration::from_millis(0),
+            download_delay: SignedDuration::from_millis(0),
             concurrent_requests: 16,
             concurrent_requests_per_domain: 8,
             retry_times: 2,
             retry_http_codes: vec![500, 502, 503, 504, 408],
             dedup_enabled: true,
-            idle_timeout: Duration::from_secs(5),
+            idle_timeout: SignedDuration::from_secs(5),
             middlewares: MiddlewareMap::new(),
             runtime_override: None,
             connection_pool_size: 100,
@@ -57,8 +57,8 @@ impl Default for Settings {
 }
 
 impl Settings {
-    pub fn with_download_delay(mut self, delay: Duration) -> Self {
-        self.download_delay = delay;
+    pub fn with_download_delay(mut self, delay: SignedDuration) -> Self {
+        self.download_delay = non_negative_duration(delay);
         self
     }
 
@@ -87,8 +87,8 @@ impl Settings {
         self
     }
 
-    pub fn with_idle_timeout(mut self, timeout: Duration) -> Self {
-        self.idle_timeout = timeout;
+    pub fn with_idle_timeout(mut self, timeout: SignedDuration) -> Self {
+        self.idle_timeout = non_negative_duration(timeout);
         self
     }
 
@@ -137,9 +137,11 @@ impl Settings {
         }
 
         let mut schedule = std::collections::BTreeMap::new();
-        let delay_ms = self.download_delay.as_millis() as f64;
-        if delay_ms > 0.0 {
-            schedule.insert("interval_ms".to_string(), Value::Number(delay_ms));
+        if self.download_delay.is_positive() {
+            schedule.insert(
+                "interval_ms".to_string(),
+                Value::Number(self.download_delay.as_millis() as f64),
+            );
         }
 
         let mut retry = std::collections::BTreeMap::new();
@@ -162,5 +164,13 @@ impl Settings {
             retry,
             dedup,
         }
+    }
+}
+
+fn non_negative_duration(duration: SignedDuration) -> SignedDuration {
+    if duration.is_negative() {
+        SignedDuration::ZERO
+    } else {
+        duration
     }
 }

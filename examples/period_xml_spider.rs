@@ -18,8 +18,8 @@ use halo_spider::settings::Settings;
 use halo_spider::spider::{Output, Spider};
 use halo_spider::value::Value;
 use halo_spider::{cb, spider_callbacks};
+use jiff::SignedDuration;
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::Duration;
 
 struct PeriodSpider;
 
@@ -153,14 +153,14 @@ async fn main() {
         .init();
 
     let settings = Settings::default()
-        .with_download_delay(Duration::from_millis(0)) // 移除延迟，展示并发
+        .with_download_delay(SignedDuration::from_millis(0)) // 移除延迟，展示并发
         .with_concurrent_requests(16)
         .with_concurrent_requests_per_domain(8)
-        .with_idle_timeout(Duration::from_secs(10));
+        .with_idle_timeout(SignedDuration::from_secs(10));
 
     let spider = PeriodSpider;
     let mut engine =
-        Engine::new(Memory::default(), Http::default(), Browser::default()).with_settings(settings);
+        Engine::new(Memory::default(), Http::default(), Browser).with_settings(settings);
 
     match engine.run(&spider).await {
         Ok(_) => println!("\n=== 抓取完成 ==="),

@@ -72,6 +72,7 @@ mod tests {
     use super::*;
     use crate::request::Request;
     use crate::scheduler::traits::Scheduler;
+    use jiff::SignedDuration;
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::Arc;
@@ -181,7 +182,7 @@ mod tests {
         let first = block_on(scheduler.lease()).unwrap();
         assert!(first.is_none());
 
-        std::thread::sleep(std::time::Duration::from_millis(15));
+        std::thread::sleep(std::time::Duration::try_from(SignedDuration::from_millis(15)).unwrap());
 
         let second = block_on(scheduler.lease()).unwrap();
         assert_eq!(

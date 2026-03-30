@@ -4,9 +4,9 @@ pub mod http;
 use crate::value::Value;
 use browser::Config as BrowserConfig;
 use http::Config as HttpConfig;
+use jiff::SignedDuration;
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
-use std::time::Duration;
 
 pub type Metadata = BTreeMap<String, Value>;
 pub type Headers = BTreeMap<String, Vec<String>>;
@@ -90,7 +90,7 @@ pub struct Request {
     pub method: String,
     pub headers: Headers,
     pub body: Option<Vec<u8>>,
-    pub timeout: Option<Duration>,
+    pub timeout: Option<SignedDuration>,
     pub proxy: Option<ProxyConfig>,
     pub session: Option<SessionConfig>,
     pub meta: Metadata,
@@ -152,8 +152,8 @@ impl Request {
         self
     }
 
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.timeout = Some(timeout);
+    pub fn with_timeout(mut self, timeout: SignedDuration) -> Self {
+        self.timeout = Some(non_negative_duration(timeout));
         self
     }
 
@@ -287,10 +287,19 @@ impl Request {
     }
 }
 
+fn non_negative_duration(duration: SignedDuration) -> SignedDuration {
+    if duration.is_negative() {
+        SignedDuration::ZERO
+    } else {
+        duration
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::request::browser::{Driver, Engine};
+    use jiff::SignedDuration;
 
     #[test]
     fn creates_default_http_request() {
@@ -323,7 +332,7 @@ mod tests {
         let request = Request::new("https://example.com").with_browser(
             BrowserConfig::default()
                 .with_driver(Driver::Playwright)
-                .with_engine(Engine::GoogleChrome)
+                .with_engine(Engine::Firefox)
                 .with_stealth(true)
                 .with_fingerprint_profile("desktop"),
         );
@@ -332,7 +341,7 @@ mod tests {
         assert!(request.http.is_none());
         assert_eq!(
             request.browser.as_ref().map(|config| config.engine),
-            Some(Engine::GoogleChrome)
+            Some(Engine::Firefox)
         );
         assert_eq!(
             request.browser.as_ref().map(|config| config.driver),
@@ -350,11 +359,11 @@ mod tests {
     #[test]
     fn request_supports_core_timeout_proxy_and_session_config() {
         let request = Request::new("https://example.com")
-            .with_timeout(Duration::from_secs(5))
+            .with_timeout(SignedDuration::from_secs(5))
             .with_proxy("http://127.0.0.1:8080")
             .with_session("news-session");
 
-        assert_eq!(request.timeout, Some(Duration::from_secs(5)));
+        assert_eq!(request.timeout, Some(SignedDuration::from_secs(5)));
         assert_eq!(
             request.proxy,
             Some(ProxyConfig::new("http://127.0.0.1:8080"))
@@ -369,7 +378,7 @@ mod tests {
             .with_body("payload")
             .with_header("x-token", "abc")
             .with_cookie("sid", "cookie-1")
-            .with_timeout(Duration::from_secs(3))
+            .with_timeout(SignedDuration::from_secs(3))
             .with_proxy("http://proxy.internal:8080")
             .with_session("session-a")
             .with_dont_filter(true)
@@ -388,7 +397,7 @@ mod tests {
                 "cookie-1".to_string()
             )]))
         );
-        assert_eq!(child.timeout, Some(Duration::from_secs(3)));
+        assert_eq!(child.timeout, Some(SignedDuration::from_secs(3)));
         assert_eq!(
             child.proxy,
             Some(ProxyConfig::new("http://proxy.internal:8080"))

@@ -220,7 +220,7 @@ mod tests {
 
         let merged = merge(defaults, explicit);
 
-        assert_eq!(merged["rate_limit"].enabled, false);
+        assert!(!merged["rate_limit"].enabled);
         assert_eq!(merged["rate_limit"].order, 999);
     }
 }

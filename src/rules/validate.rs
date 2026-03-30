@@ -266,12 +266,12 @@ fn validate_step_validate(value: &Value, step_id: &str) -> Result<(), SpiderErro
             let rule = rule.as_object().ok_or_else(|| {
                 SpiderError::rules(format!("step {step_id} validate.rule must be an object"))
             })?;
-            if let Some(required) = rule.get("required") {
-                if required.as_bool().is_none() {
-                    return Err(SpiderError::rules(format!(
-                        "step {step_id} validate.rule.required must be a boolean"
-                    )));
-                }
+            if let Some(required) = rule.get("required")
+                && required.as_bool().is_none()
+            {
+                return Err(SpiderError::rules(format!(
+                    "step {step_id} validate.rule.required must be a boolean"
+                )));
             }
         }
     }

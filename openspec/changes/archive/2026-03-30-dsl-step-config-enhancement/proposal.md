@@ -2,7 +2,7 @@
 
 ## 概述
 
-增强 DSL Step 配置，支持 meta、dedup、schedule、retry 等核心功能，使 DSL 更接近设计文档（05-rules-dsl.md）的完整规范。
+增强 DSL Step 配置，支持 meta、dedup、schedule、retry 等核心功能，使 DSL 和现有共享底层能力保持一致。
 
 ## 动机
 
@@ -12,7 +12,7 @@
 - schedule 调度配置（concurrency/interval）
 - retry 重试配置（count/http_status/backoff）
 
-这些功能在设计文档中已定义，但尚未在代码中实现。
+这些功能原本只是 DSL 侧的配置诉求，现在需要落到共享底层能力里，再由 DSL 做映射。
 
 ## 目标
 
@@ -28,7 +28,7 @@
 ## 非目标
 
 - parse.auto（AI 自动提取）
-- output sinks 配置
+- 文件 / 数据库 / MQ 等内置 pipeline
 - proxy/cookies 高级配置
 
 这些功能留待后续实现。

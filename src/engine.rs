@@ -1,26 +1,34 @@
 pub mod context;
+mod task;
 pub mod types;
 
 use crate::download::traits::Downloader;
-use crate::engine::context::EngineContext;
-use crate::engine::types::Flow;
-use crate::error::SpiderError;
-use crate::middleware::{
-    FactoryRegistry, MiddlewareChain, MiddlewareType, build as build_middleware,
+use crate::engine::task::{
+    TaskExecutionLease, TaskExecutionResult, TaskExecutor, apply_task_execution_result,
 };
-use crate::request::RequestMode;
+use crate::error::SpiderError;
+use crate::middleware::{FactoryRegistry, MiddlewareChain, build as build_middleware};
 use crate::rules::Compiled;
 use crate::runtime::compile::{compile as compile_runtime, merge as merge_middleware};
 use crate::runtime::{Config as RuntimeConfig, merge as merge_runtime};
 use crate::scheduler::traits::Scheduler;
-use crate::scheduler::types::TaskId;
 use crate::settings::Settings;
 use crate::spider::{Output as SpiderOutput, Spider};
 use futures::stream::{FuturesUnordered, StreamExt};
+use jiff::SignedDuration;
 use std::collections::BTreeMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+#[cfg(test)]
+use crate::engine::context::EngineContext;
+#[cfg(test)]
+use crate::engine::task::{TaskDecision, run_middleware_request, run_middleware_response};
+#[cfg(test)]
+use crate::middleware::MiddlewareType;
+#[cfg(test)]
+use crate::request::RequestMode;
 
 pub struct Engine<S, H, B, P = ()> {
     pub scheduler: S,
@@ -32,6 +40,10 @@ pub struct Engine<S, H, B, P = ()> {
     pub plugins: FactoryRegistry,
     prepared: bool,
     shutdown: Arc<AtomicBool>,
+}
+
+fn to_std_duration(duration: SignedDuration) -> Result<std::time::Duration, String> {
+    std::time::Duration::try_from(duration).map_err(|error| error.to_string())
 }
 
 impl<S, H, B> Engine<S, H, B>
@@ -233,6 +245,14 @@ where
         let max_concurrent = self.settings.concurrent_requests;
         let per_domain_limit = self.settings.concurrent_requests_per_domain;
         let idle_timeout = self.settings.idle_timeout;
+        let idle_timeout_std =
+            if idle_timeout.is_zero() {
+                None
+            } else {
+                Some(to_std_duration(idle_timeout).map_err(|error| {
+                    SpiderError::engine(format!("invalid idle_timeout: {error}"))
+                })?)
+            };
 
         tracing::info!(
             spider = spider_name,
@@ -241,12 +261,12 @@ where
             "并发配置"
         );
 
-        let global_sem = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
-        let mut domain_sems: BTreeMap<String, Arc<tokio::sync::Semaphore>> = BTreeMap::new();
+        let global_semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
+        let mut domain_semaphores: BTreeMap<String, Arc<tokio::sync::Semaphore>> = BTreeMap::new();
 
         let default_step_mw = MiddlewareChain::default();
 
-        type TaskFuture<'a> = Pin<Box<dyn std::future::Future<Output = TaskResult> + 'a>>;
+        type TaskFuture<'a> = Pin<Box<dyn std::future::Future<Output = TaskExecutionResult> + 'a>>;
         let mut inflight: FuturesUnordered<TaskFuture<'_>> = FuturesUnordered::new();
         let mut outputs = Vec::new();
         let mut round = 0usize;
@@ -268,7 +288,7 @@ where
                     inflight.len()
                 );
                 while let Some(result) = inflight.next().await {
-                    handle_task_result(
+                    apply_task_execution_result(
                         result,
                         scheduler,
                         allowed_domains,
@@ -282,18 +302,18 @@ where
             }
 
             while inflight.len() < max_concurrent {
-                let Ok(global_permit) = global_sem.clone().try_acquire_owned() else {
+                let Ok(global_permit_guard) = global_semaphore.clone().try_acquire_owned() else {
                     break;
                 };
                 let Some(task) = scheduler.lease().await? else {
-                    drop(global_permit);
+                    drop(global_permit_guard);
                     break;
                 };
 
                 let domain = extract_domain(&task.request.url)
                     .unwrap_or("unknown")
                     .to_string();
-                let domain_sem = domain_sems
+                let domain_semaphore = domain_semaphores
                     .entry(domain)
                     .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(per_domain_limit)))
                     .clone();
@@ -301,39 +321,45 @@ where
                 let step_id = step_id_from_request(&task.request);
                 let step_mw = step_mws.get(&step_id).unwrap_or(&default_step_mw);
 
-                inflight.push(Box::pin(execute_task(
-                    task.id.clone(),
-                    task.request,
+                let task_executor = TaskExecutor {
                     http,
                     browser,
                     pipeline,
-                    engine_mw,
-                    step_mw,
+                    engine_middleware: engine_mw,
+                    step_middleware: step_mw,
                     spider,
-                    compiled.as_ref(),
+                    compiled: compiled.as_ref(),
                     allowed_domains,
                     spider_name,
-                    global_permit,
-                    domain_sem,
-                )));
+                };
+                let task_execution_lease = TaskExecutionLease::new(
+                    task.id.clone(),
+                    task.request,
+                    global_permit_guard,
+                    domain_semaphore,
+                );
+
+                inflight.push(Box::pin(
+                    task_executor.execute_with_permits(task_execution_lease),
+                ));
             }
 
             if inflight.is_empty() {
-                if idle_timeout.is_zero() {
-                    tokio::task::yield_now().await;
-                } else {
+                if let Some(idle_timeout_std) = idle_timeout_std {
                     tracing::debug!(
                         spider = spider_name,
                         idle_ms = idle_timeout.as_millis(),
                         "队列为空，等待新任务..."
                     );
-                    tokio::time::sleep(idle_timeout).await;
+                    tokio::time::sleep(idle_timeout_std).await;
+                } else {
+                    tokio::task::yield_now().await;
                 }
                 continue;
             }
 
             if let Some(result) = inflight.next().await {
-                handle_task_result(
+                apply_task_execution_result(
                     result,
                     scheduler,
                     allowed_domains,
@@ -393,357 +419,6 @@ where
         }
 
         Ok(out)
-    }
-}
-
-async fn handle_task_result<S: Scheduler>(
-    result: TaskResult,
-    scheduler: &mut S,
-    allowed_domains: &[String],
-    outputs: &mut Vec<SpiderOutput>,
-    round: &mut usize,
-    spider_name: &str,
-) -> Result<(), SpiderError> {
-    let task_id = result.task_id;
-    let url = result.url;
-    match result.outcome {
-        TaskOutcome::Success(output) => {
-            *round += 1;
-            tracing::info!(
-                spider = spider_name,
-                round = *round,
-                items = output.items.len(),
-                follows = output.follows.len(),
-                "完成第 {} 轮解析",
-                round,
-            );
-            for follow in &output.follows {
-                if follow.dont_filter || is_domain_allowed(&follow.url, allowed_domains) {
-                    scheduler
-                        .enqueue(crate::scheduler::types::ScheduledTask::new(follow.clone()))
-                        .await?;
-                }
-            }
-            scheduler.ack(&task_id).await?;
-            outputs.push(SpiderOutput {
-                items: output.items,
-                requests: output.follows,
-            });
-        }
-        TaskOutcome::Retry(retry_task) => {
-            scheduler.enqueue(retry_task).await?;
-            scheduler.ack(&task_id).await?;
-        }
-        TaskOutcome::Drop => {
-            scheduler.ack(&task_id).await?;
-        }
-        TaskOutcome::Error(e) => {
-            tracing::error!(spider = spider_name, url = url.as_str(), error = %e, "任务出错");
-            scheduler.nack(&task_id).await?;
-        }
-    }
-    Ok(())
-}
-
-struct TaskSuccess {
-    items: Vec<crate::item::Item>,
-    follows: Vec<crate::request::Request>,
-}
-
-enum TaskOutcome {
-    Success(TaskSuccess),
-    Retry(crate::scheduler::types::ScheduledTask),
-    Drop,
-    Error(SpiderError),
-}
-
-struct TaskResult {
-    task_id: TaskId,
-    url: String,
-    outcome: TaskOutcome,
-}
-
-async fn execute_task<'a, H, B, P, Sp>(
-    task_id: TaskId,
-    request: crate::request::Request,
-    http: &'a H,
-    browser: &'a B,
-    pipeline: &'a P,
-    engine_mw: &'a MiddlewareChain,
-    step_mw: &'a MiddlewareChain,
-    spider: &'a Sp,
-    compiled: Option<&'a Compiled>,
-    allowed_domains: &'a [String],
-    spider_name: &'a str,
-    _global_permit: tokio::sync::OwnedSemaphorePermit,
-    domain_sem: Arc<tokio::sync::Semaphore>,
-) -> TaskResult
-where
-    H: Downloader,
-    B: Downloader,
-    P: crate::pipeline::Pipeline,
-    Sp: Spider,
-{
-    let url = request.url.clone();
-    let _domain_permit = match domain_sem.acquire().await {
-        Ok(p) => p,
-        Err(_) => {
-            return TaskResult {
-                task_id,
-                url,
-                outcome: TaskOutcome::Error(SpiderError::engine("domain semaphore closed")),
-            };
-        }
-    };
-
-    let outcome = execute_task_inner(
-        task_id.clone(),
-        request,
-        http,
-        browser,
-        pipeline,
-        engine_mw,
-        step_mw,
-        spider,
-        compiled,
-        allowed_domains,
-        spider_name,
-    )
-    .await;
-
-    TaskResult {
-        task_id,
-        url,
-        outcome,
-    }
-}
-
-async fn execute_task_inner<'a, H, B, P, Sp>(
-    task_id: TaskId,
-    request: crate::request::Request,
-    http: &'a H,
-    browser: &'a B,
-    pipeline: &'a P,
-    engine_mw: &'a MiddlewareChain,
-    step_mw: &'a MiddlewareChain,
-    spider: &'a Sp,
-    compiled: Option<&'a Compiled>,
-    allowed_domains: &'a [String],
-    spider_name: &'a str,
-) -> TaskOutcome
-where
-    H: Downloader,
-    B: Downloader,
-    P: crate::pipeline::Pipeline,
-    Sp: Spider,
-{
-    let mut context = EngineContext::new(request).with_task_id(task_id);
-
-    // Download middleware: process_request
-    match run_middleware_request(engine_mw, step_mw, MiddlewareType::Download, &mut context).await {
-        Ok(Flow::Continue) => {}
-        Ok(flow) => return flow_to_outcome(flow, &context),
-        Err(e) => return TaskOutcome::Error(e),
-    }
-
-    // Download
-    let response = match context.request.mode {
-        RequestMode::Http => http.fetch(&context.request).await,
-        RequestMode::Browser => browser.fetch(&context.request).await,
-    };
-
-    let response = match response {
-        Ok(r) => r,
-        Err(error) => {
-            tracing::warn!(url = context.request.url.as_str(), error = %error, "下载失败");
-            match run_middleware_exception(
-                engine_mw,
-                step_mw,
-                MiddlewareType::Download,
-                &mut context,
-                &error,
-            )
-            .await
-            {
-                Ok(Flow::Continue) => return TaskOutcome::Error(error),
-                Ok(flow) => return flow_to_outcome(flow, &context),
-                Err(e) => return TaskOutcome::Error(e),
-            }
-        }
-    };
-
-    context.response = Some(response.clone());
-
-    // Download middleware: process_response
-    match run_middleware_response(engine_mw, step_mw, MiddlewareType::Download, &mut context).await
-    {
-        Ok(Flow::Continue) => {}
-        Ok(flow) => return flow_to_outcome(flow, &context),
-        Err(e) => return TaskOutcome::Error(e),
-    }
-
-    // Spider middleware: process_request
-    match run_middleware_request(engine_mw, step_mw, MiddlewareType::Spider, &mut context).await {
-        Ok(Flow::Continue) => {}
-        Ok(flow) => return flow_to_outcome(flow, &context),
-        Err(e) => return TaskOutcome::Error(e),
-    }
-
-    // Dispatch: callback or DSL
-    let output = spider.dispatch(&response, compiled).await;
-
-    match output {
-        Ok(mut output) => {
-            // Spider middleware: process_response
-            match run_middleware_response(engine_mw, step_mw, MiddlewareType::Spider, &mut context)
-                .await
-            {
-                Ok(Flow::Continue) => {}
-                Ok(flow) => return flow_to_outcome(flow, &context),
-                Err(e) => return TaskOutcome::Error(e),
-            }
-
-            // Pipeline
-            let mut kept_items = Vec::with_capacity(output.items.len());
-            for mut item in output.items.drain(..) {
-                match pipeline.process(&mut item, spider_name).await {
-                    Ok(true) => kept_items.push(item),
-                    Ok(false) => {
-                        tracing::debug!(spider = spider_name, "pipeline 丢弃 item");
-                    }
-                    Err(e) => {
-                        tracing::warn!(spider = spider_name, error = %e, "pipeline 处理 item 出错");
-                    }
-                }
-            }
-
-            // Domain filter (filter only, don't enqueue — main loop does that)
-            let mut follows = Vec::new();
-            for req in output.requests {
-                if req.dont_filter || is_domain_allowed(&req.url, allowed_domains) {
-                    follows.push(req);
-                } else {
-                    tracing::debug!(
-                        url = req.url.as_str(),
-                        "域名不在 allowed_domains 内，已过滤"
-                    );
-                }
-            }
-
-            TaskOutcome::Success(TaskSuccess {
-                items: kept_items,
-                follows,
-            })
-        }
-        Err(error) => {
-            tracing::error!(
-                spider = spider_name,
-                url = context.request.url.as_str(),
-                error = %error,
-                "解析回调执行失败"
-            );
-            match run_middleware_exception(
-                engine_mw,
-                step_mw,
-                MiddlewareType::Spider,
-                &mut context,
-                &error,
-            )
-            .await
-            {
-                Ok(Flow::Continue) => TaskOutcome::Error(error),
-                Ok(flow) => flow_to_outcome(flow, &context),
-                Err(e) => TaskOutcome::Error(e),
-            }
-        }
-    }
-}
-
-async fn run_middleware_request(
-    engine_mw: &MiddlewareChain,
-    step_mw: &MiddlewareChain,
-    kind: MiddlewareType,
-    context: &mut EngineContext,
-) -> Result<Flow, SpiderError> {
-    let flow = engine_mw.process_request(kind, context).await?;
-    if !matches!(flow, Flow::Continue) {
-        return Ok(flow);
-    }
-    step_mw.process_request(kind, context).await
-}
-
-async fn run_middleware_response(
-    engine_mw: &MiddlewareChain,
-    step_mw: &MiddlewareChain,
-    kind: MiddlewareType,
-    context: &mut EngineContext,
-) -> Result<Flow, SpiderError> {
-    let flow = engine_mw.process_response(kind, context).await?;
-    if !matches!(flow, Flow::Continue) {
-        return Ok(flow);
-    }
-    step_mw.process_response(kind, context).await
-}
-
-async fn run_middleware_exception(
-    engine_mw: &MiddlewareChain,
-    step_mw: &MiddlewareChain,
-    kind: MiddlewareType,
-    context: &mut EngineContext,
-    error: &SpiderError,
-) -> Result<Flow, SpiderError> {
-    let flow = engine_mw.process_exception(kind, context, error).await?;
-    if !matches!(flow, Flow::Continue) {
-        return Ok(flow);
-    }
-    step_mw.process_exception(kind, context, error).await
-}
-
-fn flow_to_outcome(flow: Flow, context: &EngineContext) -> TaskOutcome {
-    match flow {
-        Flow::Continue => unreachable!(),
-        Flow::Drop(_) => TaskOutcome::Drop,
-        Flow::Retry { reason, backoff_ms } => {
-            let retries = context
-                .request
-                .meta
-                .get("_retry_times")
-                .and_then(crate::value::Value::as_f64)
-                .unwrap_or(0.0)
-                + 1.0;
-
-            let mut request = context.request.clone();
-            request.dont_filter = true;
-            request.meta.insert(
-                "_retry_times".to_string(),
-                crate::value::Value::Number(retries),
-            );
-            request.meta.insert(
-                "_retry_reason".to_string(),
-                crate::value::Value::String(reason),
-            );
-            if let Some(ms) = backoff_ms {
-                request.meta.insert(
-                    "_retry_backoff_ms".to_string(),
-                    crate::value::Value::Number(ms as f64),
-                );
-            }
-
-            let task = match backoff_ms {
-                Some(ms) if ms > 0 => {
-                    crate::scheduler::types::ScheduledTask::with_task_id_and_delay(
-                        request,
-                        context.task_id.clone(),
-                        ms,
-                    )
-                }
-                _ => crate::scheduler::types::ScheduledTask::with_task_id(
-                    request,
-                    context.task_id.clone(),
-                ),
-            };
-            TaskOutcome::Retry(task)
-        }
     }
 }
 
@@ -920,23 +595,24 @@ where
         let default_mw = MiddlewareChain::default();
         let step_mw = step_mws.get(&step_id).unwrap_or(&default_mw);
 
-        let outcome = execute_task_inner(
-            task_id.clone(),
-            task.request,
-            &self.http,
-            &self.browser,
-            &self.pipeline,
-            &self.middleware,
-            step_mw,
+        let task_executor = TaskExecutor {
+            http: &self.http,
+            browser: &self.browser,
+            pipeline: &self.pipeline,
+            engine_middleware: &self.middleware,
+            step_middleware: step_mw,
             spider,
             compiled,
-            &[],
-            spider.name(),
-        )
-        .await;
+            allowed_domains: &[],
+            spider_name: spider.name(),
+        };
 
-        match outcome {
-            TaskOutcome::Success(output) => {
+        let decision = task_executor
+            .decide_execution(task_id.clone(), task.request)
+            .await;
+
+        match decision {
+            TaskDecision::Success(output) => {
                 for follow in &output.follows {
                     if follow.dont_filter || is_domain_allowed(&follow.url, &[]) {
                         self.scheduler
@@ -950,16 +626,16 @@ where
                     requests: output.follows,
                 }))
             }
-            TaskOutcome::Retry(retry_task) => {
-                self.scheduler.enqueue(retry_task).await?;
+            TaskDecision::Retry(retry_task) => {
+                self.scheduler.enqueue(*retry_task).await?;
                 self.scheduler.ack(&task_id).await?;
                 Ok(None)
             }
-            TaskOutcome::Drop => {
+            TaskDecision::Drop => {
                 self.scheduler.ack(&task_id).await?;
                 Ok(None)
             }
-            TaskOutcome::Error(e) => {
+            TaskDecision::Error(e) => {
                 self.scheduler.nack(&task_id).await?;
                 Err(e)
             }
@@ -974,6 +650,7 @@ mod tests {
     use crate::engine::types::Flow;
     use crate::middleware::traits::Middleware;
     use crate::middleware::types::MiddlewareConfig;
+    use crate::pipeline::Pipeline;
     use crate::request::Request;
     use crate::response::Response;
     use crate::rules::compile::compile_rules;
@@ -982,6 +659,7 @@ mod tests {
     use crate::scheduler::types::ScheduledTask;
     use crate::spider::{Output as SpiderOutput, Spider};
     use crate::value::Value;
+    use jiff::SignedDuration;
     use std::collections::BTreeMap;
     use std::future::Future;
     use std::pin::Pin;
@@ -1271,7 +949,7 @@ mod tests {
             &mut step_mws,
         ))
         .unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(15));
+        std::thread::sleep(to_std_duration(SignedDuration::from_millis(15)).unwrap());
         let third = block_on(engine.execute_spider_once(
             &SimpleSpider("retry_backoff"),
             None,
@@ -1312,7 +990,7 @@ mod tests {
         let second =
             block_on(engine.execute_spider_once(&SimpleSpider("interval"), None, &mut step_mws))
                 .unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(15));
+        std::thread::sleep(to_std_duration(SignedDuration::from_millis(15)).unwrap());
         let third =
             block_on(engine.execute_spider_once(&SimpleSpider("interval"), None, &mut step_mws))
                 .unwrap();
@@ -1612,16 +1290,68 @@ mod tests {
         assert_eq!(dedup.config.order, 999);
     }
 
+    #[test]
+    fn engine_pipeline_memory_keeps_and_stores_items() {
+        let mut scheduler = Memory::default();
+        block_on(scheduler.enqueue(ScheduledTask::new(Request::new("https://example.com/item"))))
+            .unwrap();
+
+        let pipeline = crate::pipeline::Memory::default();
+        let mut engine =
+            Engine::new(scheduler, StubHttp, StubBrowser).with_pipeline(pipeline.clone());
+        let mut step_mws = BTreeMap::new();
+
+        let output = block_on(engine.execute_spider_once(&ItemSpider, None, &mut step_mws))
+            .unwrap()
+            .unwrap();
+
+        let expected =
+            vec![crate::item::Item::new().with_field("title", Value::String("post".to_string()))];
+
+        assert_eq!(output.items, expected);
+        assert_eq!(pipeline.items(), expected);
+    }
+
+    #[test]
+    fn engine_pipeline_can_drop_items_explicitly() {
+        let mut scheduler = Memory::default();
+        block_on(scheduler.enqueue(ScheduledTask::new(Request::new("https://example.com/item"))))
+            .unwrap();
+
+        let mut engine = Engine::new(scheduler, StubHttp, StubBrowser).with_pipeline(DropPipeline);
+        let mut step_mws = BTreeMap::new();
+
+        let output = block_on(engine.execute_spider_once(&ItemSpider, None, &mut step_mws))
+            .unwrap()
+            .unwrap();
+
+        assert!(output.items.is_empty());
+    }
+
+    #[test]
+    fn engine_pipeline_error_fails_task_explicitly() {
+        let mut scheduler = Memory::default();
+        block_on(scheduler.enqueue(ScheduledTask::new(Request::new("https://example.com/item"))))
+            .unwrap();
+
+        let mut engine = Engine::new(scheduler, StubHttp, StubBrowser).with_pipeline(FailPipeline);
+        let mut step_mws = BTreeMap::new();
+
+        let error =
+            block_on(engine.execute_spider_once(&ItemSpider, None, &mut step_mws)).unwrap_err();
+
+        assert!(error.to_string().contains("pipeline failed"));
+    }
+
     #[tokio::test]
     async fn engine_run_processes_start_urls_to_completion() {
         let scheduler = Memory::default();
-        let mut engine = Engine::new(scheduler, HtmlHttp, StubBrowser).with_settings(
-            Settings::default().with_idle_timeout(std::time::Duration::from_millis(10)),
-        );
+        let mut engine = Engine::new(scheduler, HtmlHttp, StubBrowser)
+            .with_settings(Settings::default().with_idle_timeout(SignedDuration::from_millis(10)));
 
         let handle = engine.shutdown_handle();
         tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            tokio::time::sleep(to_std_duration(SignedDuration::from_millis(200)).unwrap()).await;
             handle.stop();
         });
 
@@ -1631,6 +1361,31 @@ mod tests {
         assert_eq!(
             outputs[0].items[0].get("title"),
             Some(&Value::String("Hello".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn engine_run_opens_and_closes_pipeline_with_spider_name() {
+        let scheduler = Memory::default();
+        let pipeline = LifecyclePipeline::default();
+        let mut engine = Engine::new(scheduler, HtmlHttp, StubBrowser)
+            .with_pipeline(pipeline.clone())
+            .with_settings(Settings::default().with_idle_timeout(SignedDuration::from_millis(10)));
+
+        let handle = engine.shutdown_handle();
+        tokio::spawn(async move {
+            tokio::time::sleep(to_std_duration(SignedDuration::from_millis(200)).unwrap()).await;
+            handle.stop();
+        });
+
+        engine.run(&RunSpider).await.unwrap();
+
+        assert_eq!(
+            pipeline.events(),
+            vec![
+                "open:run_spider".to_string(),
+                "close:run_spider".to_string(),
+            ]
         );
     }
 
@@ -1838,6 +1593,76 @@ mod tests {
         }
     }
 
+    struct ItemSpider;
+
+    impl Spider for ItemSpider {
+        fn name(&self) -> &str {
+            "item_spider"
+        }
+
+        async fn parse(&self, _response: &Response) -> Result<SpiderOutput, SpiderError> {
+            Ok(SpiderOutput {
+                items: vec![
+                    crate::item::Item::new().with_field("title", Value::String("post".to_string())),
+                ],
+                requests: Vec::new(),
+            })
+        }
+    }
+
+    struct DropPipeline;
+
+    impl Pipeline for DropPipeline {
+        async fn process(
+            &self,
+            _item: &mut crate::item::Item,
+            _spider_name: &str,
+        ) -> Result<bool, SpiderError> {
+            Ok(false)
+        }
+    }
+
+    struct FailPipeline;
+
+    impl Pipeline for FailPipeline {
+        async fn process(
+            &self,
+            _item: &mut crate::item::Item,
+            _spider_name: &str,
+        ) -> Result<bool, SpiderError> {
+            Err(SpiderError::engine("pipeline failed"))
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct LifecyclePipeline {
+        events: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl LifecyclePipeline {
+        fn events(&self) -> Vec<String> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    impl Pipeline for LifecyclePipeline {
+        async fn open(&self, spider_name: &str) -> Result<(), SpiderError> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("open:{spider_name}"));
+            Ok(())
+        }
+
+        async fn close(&self, spider_name: &str) -> Result<(), SpiderError> {
+            self.events
+                .lock()
+                .unwrap()
+                .push(format!("close:{spider_name}"));
+            Ok(())
+        }
+    }
+
     fn runtime_settings() -> Settings {
         Settings::default()
             .with_runtime(crate::runtime::Config {
@@ -1972,13 +1797,12 @@ mod tests {
     #[tokio::test]
     async fn engine_loads_and_runs_dsl_spider() {
         let spider = DslSpider;
-        let mut engine = Engine::new(Memory::default(), DslHttp, StubBrowser).with_settings(
-            Settings::default().with_idle_timeout(std::time::Duration::from_millis(10)),
-        );
+        let mut engine = Engine::new(Memory::default(), DslHttp, StubBrowser)
+            .with_settings(Settings::default().with_idle_timeout(SignedDuration::from_millis(10)));
 
         let handle = engine.shutdown_handle();
         tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            tokio::time::sleep(to_std_duration(SignedDuration::from_millis(200)).unwrap()).await;
             handle.stop();
         });
 

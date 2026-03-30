@@ -143,44 +143,42 @@ fn parse_items(input: &str) -> Vec<FeedItem> {
             }
             Ok(Event::Empty(ref e)) => {
                 let local = local_name(e.name().as_ref());
-                if local == "link" {
-                    if let Some(item) = current.as_mut() {
-                        if let Some(href) = attr_value(e, b"href") {
-                            item.link = Some(href);
-                            is_atom_link = true;
-                        }
-                    }
+                if local == "link"
+                    && let Some(item) = current.as_mut()
+                    && let Some(href) = attr_value(e, b"href")
+                {
+                    item.link = Some(href);
+                    is_atom_link = true;
                 }
             }
             Ok(Event::Text(ref e)) => {
-                if let Some(field) = current_field {
-                    if let Some(item) = current.as_mut() {
-                        let text = String::from_utf8_lossy(e.as_ref());
-                        let t: String = text.trim().to_string();
-                        if !t.is_empty() && !(field == "link" && is_atom_link) {
-                            assign_field(item, field, t);
-                        }
+                if let Some(field) = current_field
+                    && let Some(item) = current.as_mut()
+                {
+                    let text = String::from_utf8_lossy(e.as_ref());
+                    let t: String = text.trim().to_string();
+                    if !t.is_empty() && (field != "link" || !is_atom_link) {
+                        assign_field(item, field, t);
                     }
                 }
             }
             Ok(Event::CData(ref e)) => {
-                if let Some(field) = current_field {
-                    if let Some(item) = current.as_mut() {
-                        if let Ok(text) = std::str::from_utf8(e) {
-                            let t = text.trim().to_string();
-                            if !t.is_empty() {
-                                assign_field(item, field, t);
-                            }
-                        }
+                if let Some(field) = current_field
+                    && let Some(item) = current.as_mut()
+                    && let Ok(text) = std::str::from_utf8(e)
+                {
+                    let t = text.trim().to_string();
+                    if !t.is_empty() {
+                        assign_field(item, field, t);
                     }
                 }
             }
             Ok(Event::End(ref e)) => {
                 let local = local_name(e.name().as_ref());
-                if matches!(local.as_str(), "item" | "entry") {
-                    if let Some(item) = current.take() {
-                        items.push(item);
-                    }
+                if matches!(local.as_str(), "item" | "entry")
+                    && let Some(item) = current.take()
+                {
+                    items.push(item);
                 }
                 current_field = None;
                 is_atom_link = false;

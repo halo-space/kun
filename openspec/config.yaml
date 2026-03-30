@@ -3,11 +3,11 @@ context: |
   项目名称：halo-spider
   项目类型：Rust 库
   技术栈：Rust 2024
-  项目目标：提供一个受 Scrapy 启发的异步爬虫框架，支持代码 callback 与 JSON DSL 混合抓取。
+  项目目标：提供一个受 Scrapy 启发的异步爬虫框架，同时提供代码爬虫与 DSL 配置化入口，并让二者共享同一套底层能力。
 
   仓库结构：
   - src/：核心库实现
-  - examples/：可运行示例与样例规则
+  - examples/：可运行示例
   - openspec/specs/：能力规范的正式来源
   - openspec/changes/：变更 proposal、design、tasks 与 specs 增量
 

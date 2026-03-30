@@ -1,136 +1,42 @@
 # TODO
 
-## 1. HTML XPath 支持
+这里只保留当前仍然成立、并且会影响后续实现取舍的能力缺口。
+更细的任务拆分以 `openspec/changes/track-kun-core-capability-gaps/tasks.md` 为准。
 
-当前 XPath 选择器使用 XML 解析器（sxd_document），对 HTML 的容错性较差。
+## 1. Parser 缺口
 
-**问题**：
-- HTML 中的 XPath 选择器无法正确匹配元素
-- XML 解析器要求严格的格式，不适合解析不规范的 HTML
+- HTML XPath 仍然暂缓。当前 XPath 基于 XML 解析器，在不规范 HTML 上不稳定，HTML 场景继续建议优先使用 CSS。
+- `ocr` 相关解析能力仍未实现，当前不纳入落地范围。
+- parse 后处理还比较薄：多选择器兜底、normalize、类型转换等能力还没有统一抽象。
 
-**解决方案**：
-- 添加专门的 HTML XPath 解析库（如 lxml 的 Rust 替代品）
-- 或者在 HTML 场景下将 XPath 转换为 CSS 选择器
+## 2. Validation 缺口
 
-**临时方案**：
-- 在 HTML 解析中使用 CSS 选择器替代 XPath
+- 共享 validation 目前已经支持 `type` 与 `rule.required`。
+- `regex`、`min/max`、`enum` 等规则仍未进入共享 validation 能力。
 
----
+## 3. Request / Browser / Middleware 缺口
 
-## 2. DSL 功能完善（参考 05-rules-dsl.md）
+- 代码爬虫侧的 request 能力已经比较完整，但 DSL 到共享 request 模型的映射还没有完全收敛。
+- browser 路线当前只落了最小可用能力；`stealth`、`fingerprint_profile`、browser `session`、非 `GET` browser request、request body 仍未实现。
+- proxy / cookies 已接到真实 HTTP 下载链路，但更细的 DSL 配置面和高级策略还没有统一。
 
-### 2.1 Step 级别配置
+## 4. Pipeline 与输出能力
 
-**meta（透传字段）**：
-- [x] `meta`: 透传字段配置（BTreeMap<String, Value>）
+- 当前只有一条 `pipeline` item 处理链路，不再维护独立的 `output.sinks` 概念。
+- 内置输出能力目前只有 `pipeline::Memory`。
+- 文件、数据库、消息队列等 pipeline 仍待按模块逐步补齐。
 
-**dedup（去重配置）**：
-- [x] `enabled`: 是否启用去重（已支持解析）
-- [x] `key`: 去重键字段列表（支持 `meta.xxx`）（已支持解析）
-- [x] `ttl`: 去重 TTL（秒）（已支持解析）
-- [x] `scope`: 去重范围（TASK / STEP / CUSTOM）（已支持解析）
-- [x] `namespace`: 自定义命名空间（scope=CUSTOM 时使用）（已支持解析）
-- [x] 运行时逻辑实现
+## 5. DSL 对齐缺口
 
-**schedule（调度配置）**：
-- [x] `concurrency`: 并发数（已支持解析）
-- [x] `interval`: 请求间隔（ms）（已支持解析）
-- [x] 运行时逻辑实现
+- DSL 配置面仍然整体后置，优先跟随代码爬虫与共享底层能力收敛。
+- `step.meta`、`links[].meta`、dedup / schedule / retry、以及 step validate 已经落到底层能力。
+- `next_url_config` 已支持 `FIELD`、`TEMPLATE`、`JOIN`、`FUNCTION`，其中最小函数集为 `concat`、`replace`、`coalesce`。
+- 日期/时间表达式、更多函数、以及更完整的 request / parse 配置还没有统一设计。
 
-**retry（重试配置）**：
-- [x] `count`: 重试次数（已支持解析）
-- [x] `http_status`: 触发重试的 HTTP 状态码列表（已支持解析）
-- [x] `backoff`: 退避时间列表（ms）（已支持解析）
-- [x] 运行时逻辑实现
+## 6. API 命名与导出
 
-**request（请求配置）**：
-- [ ] `method`: HTTP 方法
-- [ ] `timeout`: 超时时间（ms）
-- [ ] `enabled_headers`: 是否启用自定义 headers
-- [ ] `headers`: 自定义请求头
-- [ ] `payload`: 请求体
-- [ ] `proxy`: 代理配置（mode/url/pool_key/rotate_on/max_failures）
-- [ ] `cookies`: Cookie 配置（mode/scope/persist/ttl_sec/isolate_per_item）
+- 评估 `item::Item` 这个公开路径是否需要继续收口成更顺手的对外导出，同时保持与 `request::Request`、`response::Response`、`settings::Settings` 的公开 API 一致性。
 
-**allow_url_pattern**：
-- [ ] URL 正则过滤列表
+## 7. Engine 结构缺口
 
-**download**：
-- [ ] 下载配置（可选）
-
-### 2.2 Parse 配置增强
-
-**parse.mode**：
-- [ ] `AUTO_THEN_RULE`: AI 自动提取 + 规则兜底
-- [ ] `RULE_ONLY`: 仅规则提取（当前实现）
-- [ ] `AUTO_ONLY`: 仅 AI 自动提取
-
-**parse.auto**（AI/OCR 自动提取）：
-- [ ] `type`: AI / OCR / OCR_AI
-- [ ] `source`: 输入来源
-- [ ] `model`: 模型名称
-- [ ] `output_format`: 输出格式
-- [ ] `prompt`: 提示词
-- [ ] `timeout`: 超时时间
-- [ ] `max_tokens`: 最大 token 数
-
-**parse.rule[].options**（多选择器兜底）：
-- [ ] 支持每个字段配置多个选择器选项
-- [ ] 按顺序尝试直到成功
-
-### 2.3 Validate 配置
-
-- [ ] `type`: 字段类型（text/number/bool/list/object）
-- [ ] `rule.required`: 是否必填
-- [ ] `rule.regex`: 正则校验
-- [ ] `rule.min/max`: 数值范围
-- [ ] `rule.enum`: 枚举值
-
-
-### 2.4 Output 配置（顶层）
-
-**output.sinks**：
-- [ ] `type`: MYSQL / FILE / MQ
-- [ ] `mode`: UPSERT / INSERT
-- [ ] `table`: 表名
-- [ ] `unique_keys`: 唯一键
-- [ ] `mapping`: 字段映射
-- [ ] `path_template`: 文件路径模板
-- [ ] `topic/key`: MQ 配置
-
-**output.policy**：
-- [ ] `on_sink_error`: FAIL_ITEM / SKIP_SINK
-
-### 2.5 Next URL Config 增强
-
-- [x] `mode`: FIELD / TEMPLATE（已实现）
-- [ ] `mode`: JOIN / FUNCTION
-- [x] `from`: 字段列表（已实现）
-- [ ] `join_delimiter`: 拼接分隔符
-- [x] `template`: URL 模板（已实现）
-- [ ] `fn`: 自定义函数名
-- [ ] `args`: 函数参数
-
-
----
-
-## 3. 优先级建议
-
-**高优先级**（核心功能）：
-1. dedup 配置支持（step 级别）
-2. parse.rule[].options 多选择器兜底
-3. validate 完整实现
-4. retry 配置
-5. meta 透传字段配置
-
-**中优先级**（增强功能）：
-1. schedule 配置（concurrency/interval）
-2. request 详细配置（method/timeout/headers/payload）
-3. allow_url_pattern URL 过滤
-4. next_url_config 的 JOIN/FUNCTION 模式
-
-**低优先级**（高级功能）：
-1. parse.auto（AI 自动提取）
-2. output sinks 配置
-3. proxy/cookies 高级配置
-4. download 配置
+- `engine` 当前主循环和任务执行逻辑已经拆分出独立子模块；如果后面继续增长，再评估是否把调度主循环、runtime 组装等职责继续细分。
