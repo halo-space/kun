@@ -1,0 +1,123 @@
+# Runtime 与 Engine 规范
+
+## 目标
+
+定义 `Settings`、运行时编译和引擎主循环的行为，让 Spider 只关注抓取逻辑，而 Engine 负责执行、并发和生命周期。
+
+### Requirement: Settings 拥有引擎级执行策略
+
+库必须把 runtime 调优能力放在 `Settings` 上，而不是放在 `Spider` trait 上。
+
+#### Scenario: Settings 推导 runtime 默认值
+
+- Given 用户在 `Settings` 上配置了 download delay、retry code、retry count 与 dedup 行为
+- When 引擎构建 runtime 配置
+- Then 这些值会被转换成归一化的 runtime config
+
+#### Scenario: 显式 runtime override 优先
+
+- Given 调用了 `Settings::with_runtime()`
+- When 请求 runtime 配置
+- Then 显式传入的 runtime config 覆盖推导出的默认值
+
+### Requirement: Runtime config 可编译成 middleware 所需行为
+
+库必须把 runtime 策略表示为 `schedule`、`retry` 与 `dedup` 三组 map，并且它们可以编译成 middleware 配置。
+
+#### Scenario: retry 配置转换成 retry middleware 输入
+
+- Given 存在 runtime retry 配置
+- When 运行 runtime 编译过程
+- Then 引擎能够为 retry 行为生成 middleware 配置
+
+#### Scenario: 显式 middleware 可以覆盖 runtime 派生默认值
+
+- Given 同时存在 runtime 派生的 middleware 与显式 middleware 配置
+- When 引擎合并两者
+- Then 相同 key 下由显式 middleware 配置优先
+
+### Requirement: Engine 是持久运行的执行器
+
+库必须让 `Engine::run()` 持续运行，直到收到显式 stop 信号。
+
+#### Scenario: scheduler 为空不会终止引擎
+
+- Given scheduler 暂时没有 ready task
+- When 引擎进入空闲状态
+- Then 引擎等待更多工作，而不是自动退出
+
+#### Scenario: Shutdown handle 停止引擎
+
+- Given 调用方持有 `shutdown_handle()`
+- When 在该 handle 上调用 `stop()`
+- Then 引擎完成进行中的工作并退出运行循环
+
+### Requirement: Engine 应用并发与域名控制
+
+库必须遵守 `Settings` 中的全局并发与按域名并发控制。
+
+#### Scenario: 全局并发上限控制任务执行
+
+- Given 引擎排队中的工作量超过 `concurrent_requests`
+- When 开始执行任务
+- Then 同时运行的任务数量不超过配置的全局上限
+
+#### Scenario: allowed domains 过滤后续请求
+
+- Given spider 返回了 `allowed_domains()`
+- When 引擎准备把域名不在白名单中的请求入队
+- Then 该请求在进入 scheduler 前被拒绝
+
+### Requirement: Engine 集成 pipeline 与输出处理
+
+库必须在启动时打开配置好的 pipeline，并在运行循环中处理 spider 的输出。
+
+#### Scenario: Pipeline 以 spider 名称打开
+
+- Given 引擎启动某个 spider
+- When 运行循环开始
+- Then pipeline 以该 spider 名称打开
+
+#### Scenario: 输出包含 items 与后续请求
+
+- Given 某个回调或 DSL step 返回了输出
+- When 引擎处理该输出
+- Then items 继续进入 pipeline，requests 回到调度流程
+
+### Requirement: Scheduler 以 task identity 跟踪任务生命周期
+
+库必须使用稳定的 task identity 跟踪 ready、delayed、inflight 与 retry 任务，而不是只依赖 URL。
+
+#### Scenario: Same URL requests can be acked independently
+
+- Given 两个请求 URL 相同，但 method、body 或 meta 不同
+- When 它们先后进入 inflight 并被 ack 或 nack
+- Then scheduler 能够独立处理这两个任务，而不会因为 URL 相同误删或误重排
+
+#### Scenario: Retry preserves the original task identity
+
+- Given 某个 inflight task 因错误被重试或延迟重排
+- When scheduler 重新接收该任务
+- Then 该任务沿用原始 task identity，而不是生成一个新的 URL 级占位标识
+
+### Requirement: HTTP Downloader Applies Shared Transport Request Semantics
+
+库必须在 HTTP downloader 中统一接线 timeout、cookie jar、proxy 与 redirect 能力，而不是分别散落为不一致的临时实现。
+
+#### Scenario: Per-request timeout aborts download explicitly
+
+- Given 某个 HTTP request 显式声明了 timeout
+- When 下载时间超过该 timeout
+- Then downloader 返回显式 download error，而不是无限等待或静默忽略 timeout
+
+#### Scenario: Session requests reuse the same cookie jar
+
+- Given 两个 HTTP request 共享同一个 session 标识
+- When 第一个响应写入 cookie，第二个请求继续访问同一站点
+- Then 第二个请求会复用同一 cookie jar，而不是丢失前一跳写入的 cookie
+
+#### Scenario: Proxy and redirect policy come from request semantics
+
+- Given 某个 HTTP request 显式声明了 proxy 或 redirect 行为
+- When downloader 执行该请求
+- Then 它使用同一套 request 语义决定代理路由与是否跟随重定向

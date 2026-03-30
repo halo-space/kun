@@ -1,0 +1,35 @@
+schema: halo-spider
+context: |
+  项目名称：halo-spider
+  项目类型：Rust 库
+  技术栈：Rust 2024
+  项目目标：提供一个受 Scrapy 启发的异步爬虫框架，支持代码 callback 与 JSON DSL 混合抓取。
+
+  仓库结构：
+  - src/：核心库实现
+  - examples/：可运行示例与样例规则
+  - openspec/specs/：能力规范的正式来源
+  - openspec/changes/：变更 proposal、design、tasks 与 specs 增量
+
+  实现约束：
+  - 对外公开模块统一从 src/lib.rs 导出
+  - Spider 负责解析逻辑与 rules 来源声明
+  - Settings 与 Engine 负责运行时、并发与 middleware 调度
+  - OpenSpec 文档应描述当前真实实现，不应写成脱离代码现状的理想设计
+rules:
+  proposal:
+    - 每个 change 都要明确关联一个或多个 openspec/specs/ 下的 capability spec。
+    - 说明这次变更影响的是公开 API、运行时行为、示例代码，还是仅文档。
+    - 写清楚非目标，避免 proposal 范围不断膨胀。
+  specs:
+    - 使用 Requirement 与 Scenario 标题结构。
+    - 优先复用 src/ 与 Cargo.toml 中已经存在的 API 命名。
+    - 当旧笔记与当前实现冲突时，以当前代码和 README 为准，不再参考已删除的旧设计稿。
+  design:
+    - 说明本次变更会影响哪些 src/ 模块，以及是否会影响 examples/。
+    - 涉及 Settings、runtime、middleware、plugin 时，明确它们之间的关系和影响。
+    - 只有在确实有迁移成本或破坏性变化时，才写迁移说明。
+  tasks:
+    - tasks 要保持颗粒度小、顺序清晰、可验证。
+    - 涉及代码实现时，要包含 spec 同步与验证步骤。
+    - 有代码改动时，末尾给出明确的验证命令。

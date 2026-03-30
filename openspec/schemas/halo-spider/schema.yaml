@@ -1,0 +1,82 @@
+name: halo-spider
+version: 1
+description: 为 halo-spider Rust 爬虫框架定制的 OpenSpec 工作流
+artifacts:
+  - id: proposal
+    generates: proposal.md
+    description: 说明 halo-spider 能力变更与协作流程的 proposal 文档
+    template: proposal.md
+    instruction: |
+      创建 proposal，说明这次变更为什么对 halo-spider 有意义。
+
+      重点写清楚：
+      - 当前要解决的用户问题或维护问题
+      - 这次变更影响的是公开 API、运行时行为、DSL 编写体验、示例，还是仅文档
+      - openspec/specs/ 下哪些 capability spec 会新增或修改
+      - 明确的非目标，避免变更范围失控
+
+      内容要具体，并且建立在当前 Rust 代码与 examples 现状之上。
+    requires: []
+
+  - id: specs
+    generates: "specs/**/*.md"
+    description: 定义本次变更需求差异的 spec 增量
+    template: spec.md
+    instruction: |
+      为每个受影响的 capability 创建一份 delta spec，路径为 specs/<capability>/spec.md。
+
+      使用 OpenSpec 规定的差异标题：
+      - ## ADDED Requirements
+      - ## MODIFIED Requirements
+      - ## REMOVED Requirements
+      - ## RENAMED Requirements
+
+      每个 requirement 都必须使用：
+      - ### Requirement: <name>
+      - 规范性的 SHALL/MUST 语义
+      - 至少一个 #### Scenario:
+
+      当旧资料与现有实现冲突时，优先以 src/ 和 examples/ 的当前行为为准。
+    requires:
+      - proposal
+
+  - id: design
+    generates: design.md
+    description: 说明 halo-spider 如何实现本次变更的技术设计文档
+    template: design.md
+    instruction: |
+      说明这次变更应该如何在这个 Rust 库中实现。
+
+      应覆盖：
+      - 会影响到哪些 src/ 下的模块
+      - 是否会影响 examples/ 或 README.md
+      - 涉及 Settings、Engine、runtime、middleware、plugin、rules DSL 时，它们之间的影响关系
+      - 关键权衡与验证策略
+
+      设计要与当前架构保持一致，不要写成脱离现状的重构提案。
+    requires:
+      - proposal
+
+  - id: tasks
+    generates: tasks.md
+    description: 可跟踪的实现任务清单
+    template: tasks.md
+    instruction: |
+      把这次变更拆成小而清晰、可验证的任务。
+
+      要求：
+      - 严格使用复选框格式：- [ ] X.Y 任务描述
+      - 按编号分组组织任务
+      - 涉及代码改动时，包含 spec 同步与验证步骤
+      - 每个任务都应足够小，适合一次专注实现完成
+    requires:
+      - specs
+      - design
+
+apply:
+  requires: [tasks]
+  tracks: tasks.md
+  instruction: |
+    开始实现前先阅读 proposal、specs、design 与 tasks。
+    按顺序处理未完成任务，边做边更新复选框；
+    如果实现过程中暴露出新的需求偏差或设计漂移，应先暂停并回写文档。

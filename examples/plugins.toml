@@ -1,0 +1,23 @@
+# halo-spider 插件清单
+#
+# 每个插件由 (kind, name) 唯一标识。
+# kind = "middleware" 的插件会被引擎自动加载为中间件工厂。
+# override = true 可以覆盖同 kind + name 的已有插件。
+
+[[plugins]]
+name = "custom_signature"
+kind = "middleware"
+entry = "plugins_demo::CustomSignatureMiddleware"
+override = false
+
+[[plugins]]
+name = "stats"
+kind = "middleware"
+entry = "plugins_demo::StatsMiddleware"
+override = false
+
+[[plugins]]
+name = "json_storage"
+kind = "storage"
+entry = "plugins_demo::JsonStoragePipeline"
+override = false
