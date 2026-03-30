@@ -55,12 +55,19 @@
 ### Requirement: Plugin manifest 来自 plugins.toml
 
 库必须从 `plugins.toml` 加载 plugin manifest，并以 `(kind, name)` 作为 key 存入 registry。
+当前 Engine 只支持 `kind = "middleware"` 的插件自动装载；其它已知 kind 仅保留命名空间，不代表运行时已具备对应装配能力。
 
 #### Scenario: middleware manifest 必须有对应的已注册工厂
 
 - Given 某个 plugin manifest 声明 `kind = "middleware"`
 - When `Engine::load_plugins()` 校验 registry
 - Then 引擎要求存在同名的 middleware 工厂
+
+#### Scenario: engine 对未支持的 plugin kind 显式失败
+
+- Given registry 中存在 `kind = "rules"`、`"provider"` 或 `"storage"` 的 manifest
+- When `Engine::load_plugins()` 校验 registry
+- Then 引擎返回显式错误，说明当前只支持 `middleware` kind 自动装载
 
 #### Scenario: 不同 plugin kind 可以复用同名
 

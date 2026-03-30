@@ -15,9 +15,3 @@ name = "stats"
 kind = "middleware"
 entry = "plugins_demo::StatsMiddleware"
 override = false
-
-[[plugins]]
-name = "json_storage"
-kind = "storage"
-entry = "plugins_demo::JsonStoragePipeline"
-override = false

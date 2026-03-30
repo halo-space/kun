@@ -9,6 +9,9 @@
 //! 3. 引擎加载清单 → PluginRegistry 验证 → 工厂自动接入
 //! 4. 最终用户只需在 Settings/MIDDLEWARES 中按名字启用
 //!
+//! 注意：当前 `Engine::load_plugins()` 只支持 `kind = "middleware"`。
+//! 其它 kind 可以作为清单命名空间存在，但不会被引擎自动加载。
+//!
 //! 运行：cargo run --example plugins_demo
 //! 按 Ctrl+C 优雅退出
 
@@ -208,6 +211,7 @@ fn demo_conflict_rules() {
     println!("  [OK] 注册 (middleware, proxy)");
 
     // 2) 不同 kind 同名 — 允许：(rules, proxy)
+    //    这里只演示 registry 命名空间规则，不代表 engine 已支持 rules kind 自动装载。
     registry
         .register(PluginManifest {
             name: "proxy".to_string(),

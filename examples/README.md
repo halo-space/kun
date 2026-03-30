@@ -5,6 +5,7 @@
 
 - `period_xml_spider.rs`：代码爬虫的多级回调、`meta` 透传、`follow` 链路
 - `pipeline_memory.rs`：单一 `pipeline.process()` 链路、自定义 pipeline 与 `pipeline::Memory`
+- `pipeline_json_lines.rs`：单一 `pipeline.process()` 链路、自定义 pipeline 与 `pipeline::JsonLines`
 - `concurrency_control.rs`：从 `period.xml` 扇出多个版面请求，观察并发与节流配置
 - `custom_middleware.rs`：引擎级中间件注册与执行顺序
 - `plugins_demo.rs`：插件清单加载、插件注册冲突规则、插件式中间件接入

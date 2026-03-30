@@ -45,7 +45,8 @@
   - request/follow、scheduler identity、browser 边界、pipeline item 处理语义都可能产生 API 或行为收紧，但会按小步任务推进，不一次性大改。
 - Plugin 或 DSL 影响：
   - DSL 继续只做共享能力的配置化入口。
-  - plugin 体系当前以 middleware 为主，后续扩展需先明确底层能力边界，再决定是否开放新 kind。
+  - plugin 体系当前只把 `middleware` 作为已支持的 engine 装配点。
+  - `rules`、`provider`、`storage` 目前只保留为 manifest 命名空间；在对应底层运行时 owner 尚未稳定前，不开放新的 engine plugin kind。
 
 ## 验证方式
 

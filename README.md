@@ -10,6 +10,22 @@
 - 后续需求、方案、任务统一从 `openspec/changes/` 发起
 - `openspec init` 生成的协作入口位于 `.claude/commands/opsx/` 与 `.codex/skills/`
 
+## 底层能力概览
+
+已完成的底层能力：
+
+- 统一 `Request` 模型已经覆盖 `timeout`、`proxy`、`session`、request cookies 与 `follow` 继承语义
+- HTTP 下载链路已经接到真实的 `cookies`、`proxy`、redirect 与 timeout 能力
+- `browser` 模式已经具备最小可用下载能力，并对未实现项显式报错
+- `pipeline` 是唯一 item 输出链路，当前内置 `pipeline::Memory` 与 `pipeline::JsonLines`
+- plugin 自动装载当前只支持 `middleware` kind，其它 kind 先保留命名空间
+
+仍待补齐的底层能力：
+
+- 共享 validation 还没有扩到更完整的规则集
+- 文件之外的数据库、消息队列等 pipeline 输出还没有内置实现
+- HTML XPath、OCR、parse 后处理等 parser 能力仍未收敛
+
 ## 快速开始
 
 ```toml
@@ -88,6 +104,7 @@ async fn main() {
 # 基础能力示例（统一使用 period.xml 场景）
 cargo run --example period_xml_spider
 cargo run --example pipeline_memory
+cargo run --example pipeline_json_lines
 cargo run --example custom_middleware
 cargo run --example plugins_demo
 
@@ -138,7 +155,7 @@ let mut engine = Engine::new(scheduler, http, browser)
 也就是说，`with_pipeline((A, B))` 更像 `A -> B` 这条固定链路，而不是两条独立输出通道。
 如果需要三个阶段，就继续嵌套元组：`((A, B), C)`。
 
-完整可运行示例见 `examples/pipeline_memory.rs`。
+完整可运行示例见 `examples/pipeline_memory.rs` 与 `examples/pipeline_json_lines.rs`。
 
 ## DSL 编写流程（推荐）
 

@@ -45,3 +45,9 @@
 
 - **WHEN** registry 中存在 engine 尚未支持的 plugin kind
 - **THEN** 系统给出显式、稳定的边界说明，而不是留下隐含能力错觉
+
+#### Scenario: Engine only auto-loads middleware plugins
+
+- **WHEN** plugin manifest 使用 `rules`、`provider` 或 `storage` kind
+- **THEN** manifest 可以进入 registry 命名空间
+- **AND** `Engine::load_plugins()` 不会把它们当成已支持的运行时扩展点

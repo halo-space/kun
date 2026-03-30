@@ -54,9 +54,11 @@
 
 ## 8. Plugin 扩展边界
 
-- [ ] 8.1 明确 plugin 体系当前支持的 kind 边界，避免 registry 泛化而 engine 只支持部分 kind。
-- [ ] 8.2 评估是否需要在 middleware 之外扩展 plugin kind，以及扩展前的底层前提条件。
-- [ ] 8.3 同步 `openspec/specs/middleware-plugins/spec.md` 与插件加载校验测试。
+当前决策：`Engine::load_plugins()` 只支持 `middleware` kind；`rules`、`provider`、`storage` 先保留命名空间，不作为已落地运行时能力对外承诺。
+
+- [x] 8.1 明确 plugin 体系当前支持的 kind 边界，避免 registry 泛化而 engine 只支持部分 kind。
+- [x] 8.2 评估是否需要在 middleware 之外扩展 plugin kind，以及扩展前的底层前提条件。
+- [x] 8.3 同步 `openspec/specs/middleware-plugins/spec.md` 与插件加载校验测试。
 
 ## 9. DSL 与共享底层能力对齐
 

@@ -8,6 +8,9 @@ use crate::engine::task::{
 };
 use crate::error::SpiderError;
 use crate::middleware::{FactoryRegistry, MiddlewareChain, build as build_middleware};
+use crate::plugins::types::{
+    PluginKind, engine_reserved_plugin_kind_names, engine_supported_plugin_kind_names,
+};
 use crate::rules::Compiled;
 use crate::runtime::compile::{compile as compile_runtime, merge as merge_middleware};
 use crate::runtime::{Config as RuntimeConfig, merge as merge_runtime};
@@ -146,8 +149,11 @@ where
     /// 加载插件清单，验证所有声明的中间件插件都已注册工厂。
     ///
     /// 调用此方法前，先用 `register_middleware()` 注册每个中间件插件的工厂函数。
-    /// `load_plugins()` 会验证 `plugins.toml` 中声明的每个 `kind = "middleware"`
-    /// 插件在引擎中都有对应的工厂，否则返回错误。
+    /// `load_plugins()` 当前只支持 `kind = "middleware"` 的插件；其余已知 kind
+    /// 仅保留命名空间，不会被引擎自动装配。
+    ///
+    /// 它会验证 `plugins.toml` 中声明的每个 middleware 插件在引擎中都有对应的工厂，
+    /// 否则返回错误。
     ///
     /// ```ignore
     /// let manifests = load_plugin_manifest("plugins.toml")?;
@@ -164,6 +170,23 @@ where
         self,
         registry: &crate::plugins::PluginRegistry,
     ) -> Result<Self, SpiderError> {
+        let mut unsupported_manifests = Vec::new();
+        for manifest in registry.all() {
+            let kind = PluginKind::try_from(manifest.kind.as_str()).map_err(SpiderError::plugin)?;
+            if !kind.is_engine_supported() {
+                unsupported_manifests.push(format!("({}, {})", manifest.kind, manifest.name));
+            }
+        }
+
+        if !unsupported_manifests.is_empty() {
+            return Err(SpiderError::plugin(format!(
+                "engine currently only supports plugin kinds [{}]; unsupported manifests: {}; reserved but not loadable yet: [{}]",
+                engine_supported_plugin_kind_names().join(", "),
+                unsupported_manifests.join(", "),
+                engine_reserved_plugin_kind_names().join(", ")
+            )));
+        }
+
         for manifest in registry.by_kind("middleware") {
             if !self.plugins.has(&manifest.name) {
                 return Err(SpiderError::plugin(format!(
@@ -651,6 +674,7 @@ mod tests {
     use crate::middleware::traits::Middleware;
     use crate::middleware::types::MiddlewareConfig;
     use crate::pipeline::Pipeline;
+    use crate::plugins::{PluginManifest, PluginRegistry};
     use crate::request::Request;
     use crate::response::Response;
     use crate::rules::compile::compile_rules;
@@ -720,6 +744,30 @@ mod tests {
             *log.lock().unwrap(),
             vec!["request".to_string(), "response".to_string()]
         );
+    }
+
+    #[test]
+    fn engine_load_plugins_rejects_unsupported_plugin_kinds_explicitly() {
+        let mut registry = PluginRegistry::new();
+        registry
+            .register(PluginManifest {
+                name: "json_storage".to_string(),
+                kind: "storage".to_string(),
+                entry: "plugins_demo::JsonStoragePipeline".to_string(),
+                r#override: false,
+            })
+            .unwrap();
+
+        let result = Engine::new(Memory::default(), StubHttp, StubBrowser).load_plugins(&registry);
+        assert!(result.is_err());
+        let error = result.err().unwrap();
+
+        assert!(
+            error
+                .to_string()
+                .contains("only supports plugin kinds [middleware]")
+        );
+        assert!(error.to_string().contains("(storage, json_storage)"));
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use crate::error::SpiderError;
 use crate::plugins::manifest::PluginManifest;
+use crate::plugins::types::PluginKind;
 use std::collections::BTreeMap;
 
 type PluginKey = (String, String);
@@ -14,7 +15,9 @@ impl PluginRegistry {
         Self::default()
     }
 
-    pub fn register(&mut self, manifest: PluginManifest) -> Result<(), SpiderError> {
+    pub fn register(&mut self, mut manifest: PluginManifest) -> Result<(), SpiderError> {
+        let kind = PluginKind::try_from(manifest.kind.as_str()).map_err(SpiderError::plugin)?;
+        manifest.kind = kind.as_str().to_string();
         let key = (manifest.kind.clone(), manifest.name.clone());
 
         if let Some(existing) = self.manifests.get(&key)
@@ -132,5 +135,15 @@ mod tests {
 
         assert_eq!(registry.by_kind("middleware").len(), 2);
         assert_eq!(registry.by_kind("rules").len(), 1);
+    }
+
+    #[test]
+    fn unknown_kind_is_rejected() {
+        let mut registry = PluginRegistry::new();
+        let error = registry
+            .register(make_manifest("scheduler", "cron", false))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("unsupported plugin kind"));
     }
 }

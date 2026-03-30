@@ -1,8 +1,10 @@
 use crate::error::SpiderError;
 use crate::item::Item;
 
+pub mod json_lines;
 pub mod memory;
 
+pub use json_lines::JsonLines;
 pub use memory::Memory;
 
 /// Item 处理管线，对应 Scrapy 的 ITEM_PIPELINES。
