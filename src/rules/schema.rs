@@ -144,6 +144,7 @@ pub struct FetchPlan {
     pub method: String,
     pub headers: crate::request::Headers,
     pub body: Option<Vec<u8>>,
+    pub cookies: BTreeMap<String, String>,
     pub http: Option<crate::request::http::Config>,
     pub browser: Option<crate::request::browser::Config>,
 }

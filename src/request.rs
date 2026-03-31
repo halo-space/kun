@@ -90,6 +90,7 @@ pub struct Request {
     pub method: String,
     pub headers: Headers,
     pub body: Option<Vec<u8>>,
+    pub cookies: BTreeMap<String, String>,
     pub timeout: Option<SignedDuration>,
     pub proxy: Option<ProxyConfig>,
     pub session: Option<SessionConfig>,
@@ -109,6 +110,7 @@ impl Request {
             method: "GET".to_string(),
             headers: Headers::new(),
             body: None,
+            cookies: BTreeMap::new(),
             timeout: None,
             proxy: None,
             session: None,
@@ -193,12 +195,12 @@ impl Request {
     }
 
     pub fn with_cookie(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.http_mut().cookies.insert(key.into(), value.into());
+        self.cookies.insert(key.into(), value.into());
         self
     }
 
     pub fn with_cookies(mut self, cookies: BTreeMap<String, String>) -> Self {
-        self.http_mut().cookies.extend(cookies);
+        self.cookies.extend(cookies);
         self
     }
 
@@ -250,6 +252,7 @@ impl Request {
             method: "GET".to_string(),
             headers: parent.headers.clone(),
             body: None,
+            cookies: parent.cookies.clone(),
             timeout: parent.timeout,
             proxy: parent.proxy.clone(),
             session: parent.session.clone(),
@@ -309,6 +312,7 @@ mod tests {
         assert_eq!(request.mode, RequestMode::Http);
         assert_eq!(request.method, "GET");
         assert!(request.body.is_none());
+        assert!(request.cookies.is_empty());
         assert!(request.timeout.is_none());
         assert!(request.proxy.is_none());
         assert!(request.session.is_none());
@@ -357,6 +361,19 @@ mod tests {
     }
 
     #[test]
+    fn request_cookies_are_shared_without_switching_browser_mode() {
+        let request = Request::browser("https://example.com").with_cookie("sid", "cookie-1");
+
+        assert_eq!(request.mode, RequestMode::Browser);
+        assert_eq!(
+            request.cookies.get("sid").map(String::as_str),
+            Some("cookie-1")
+        );
+        assert!(request.http.is_none());
+        assert!(request.browser.is_some());
+    }
+
+    #[test]
     fn request_supports_core_timeout_proxy_and_session_config() {
         let request = Request::new("https://example.com")
             .with_timeout(SignedDuration::from_secs(5))
@@ -391,11 +408,8 @@ mod tests {
         assert!(child.body.is_none());
         assert_eq!(child.headers.get("x-token"), Some(&vec!["abc".to_string()]));
         assert_eq!(
-            child.http.as_ref().map(|http| http.cookies.clone()),
-            Some(BTreeMap::from([(
-                "sid".to_string(),
-                "cookie-1".to_string()
-            )]))
+            child.cookies,
+            BTreeMap::from([("sid".to_string(), "cookie-1".to_string())])
         );
         assert_eq!(child.timeout, Some(SignedDuration::from_secs(3)));
         assert_eq!(

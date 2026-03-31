@@ -122,6 +122,20 @@
 - Then 它们复用同一个稳定的 Playwright user data dir
 - And cookies 与 local storage 等浏览器态数据可以随 session id 继续复用
 
+#### Scenario: Browser request uses shared request cookies
+
+- Given 一个 browser 请求在统一 `Request` 上声明了 cookies
+- When browser downloader 执行该请求
+- Then downloader 把这些 cookies 注入 Playwright browser context
+- And 请求不会因为设置 cookies 而退回 `Http` 模式
+
+#### Scenario: Browser session execution is serialized per session id
+
+- Given 两个 browser 请求声明了相同的 session id
+- When 引擎并发执行它们
+- Then browser downloader 至少按 session id 串行化实际浏览器执行
+- And 不同 session id 之间仍可继续并发
+
 ### Requirement: Request 建模核心请求级能力
 
 库必须在统一的 `Request` 类型上建模 timeout、proxy、session 以及 request 级 cookies/follow 继承语义，而不是把这些能力散落成互不对齐的入口。
@@ -131,6 +145,13 @@
 - Given 用户显式构造一个请求
 - When 用户设置 timeout、proxy 或 session
 - Then 这些值存储在 request 上，供后续 follow、middleware 或 downloader 复用
+
+#### Scenario: Request cookies are shared core request state
+
+- Given 用户显式构造一个 HTTP 或 browser 请求
+- When 用户设置 request cookies
+- Then cookies 存储在统一的 `Request` 上
+- And cookies 不会强制切换请求 mode
 
 #### Scenario: Follow inherits core request settings but resets payload
 

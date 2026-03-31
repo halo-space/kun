@@ -218,6 +218,7 @@ Spider / rules
 - `wait_for`
 - request method
 - request body
+- request cookies
 - request timeout
 - request headers
 - request proxy
@@ -226,7 +227,8 @@ Spider / rules
 - 页面渲染后的 HTML 抓取
 
 其中 browser `session` 当前会把同一个 session id 映射到稳定的 Playwright user data dir，
-用于复用 cookies 和 local storage 这类浏览器态数据。
+用于复用 cookies 和 local storage 这类浏览器态数据；相同 session id 的实际浏览器执行也会按 session 串行化，
+避免共享 profile 目录时出现竞态。
 
 当前 browser `Response` 会带上真实的导航 `status` 与响应头；`protocol` 继续表示
 browser 执行路径，`ip_address` 与 `certificate` 由于 Playwright 当前接口限制仍保持为空。

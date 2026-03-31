@@ -14,7 +14,7 @@
 - [x] 2.2 重新梳理 `response.follow()` 的派生语义，明确哪些 request 属性应继承、哪些可覆盖。
 - [ ] 2.3 让代码爬虫与 DSL 生成的 request 都走同一套 request 能力模型。
 - [x] 2.4 同步 `openspec/specs/spider-api/spec.md` 与 request/follow 相关测试。
-- [ ] 2.5 把 request-level cookies 从 `http` 私有配置进一步收口为真正的共享 request 能力，避免 browser request 使用 cookies 时退回 `Http` 模式。
+- [x] 2.5 把 request-level cookies 从 `http` 私有配置进一步收口为真正的共享 request 能力，避免 browser request 使用 cookies 时退回 `Http` 模式。
 
 ## 3. Scheduler 与任务身份
 
@@ -38,8 +38,8 @@
 - [x] 5.3 为 browser 模式补最小可验证的真实行为测试或契约测试。
 - [x] 5.4 同步 `openspec/specs/spider-api/spec.md` 与相关文档。
 - [x] 5.5 为 browser response 补真实的 `status`、`headers`、`protocol`、`ip_address`、`certificate` 等网络元数据，或明确并固化受限语义。
-- [ ] 5.6 让 browser downloader 接住统一 request-level cookies 语义，而不是只复用 session 持久态。
-- [ ] 5.7 为相同 browser session 的并发执行建立最小协调策略，避免共享 user data dir 时出现竞态。
+- [x] 5.6 让 browser downloader 接住统一 request-level cookies 语义，而不是只复用 session 持久态。
+- [x] 5.7 为相同 browser session 的并发执行建立最小协调策略，避免共享 user data dir 时出现竞态。
 
 ## 6. Parser 缺口补齐
 

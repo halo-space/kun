@@ -364,12 +364,7 @@ mod tests {
             follow_request.session,
             Some(SessionConfig::new("session-a"))
         );
-        assert!(
-            follow_request
-                .http
-                .as_ref()
-                .is_some_and(|http| http.cookies.get("sid") == Some(&"cookie-1".to_string()))
-        );
+        assert!(follow_request.cookies.get("sid") == Some(&"cookie-1".to_string()));
         assert!(
             follow_request
                 .http

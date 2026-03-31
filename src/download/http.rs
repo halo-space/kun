@@ -231,10 +231,7 @@ fn build_url(request: &Request) -> Result<Url, SpiderError> {
 }
 
 fn has_request_cookies(request: &Request) -> bool {
-    request
-        .http
-        .as_ref()
-        .is_some_and(|http| !http.cookies.is_empty())
+    !request.cookies.is_empty()
 }
 
 fn prime_cookie_jar(jar: Option<&Jar>, url: &Url, request: &Request) {
@@ -242,11 +239,7 @@ fn prime_cookie_jar(jar: Option<&Jar>, url: &Url, request: &Request) {
         return;
     };
 
-    let Some(http_config) = &request.http else {
-        return;
-    };
-
-    for (key, value) in &http_config.cookies {
+    for (key, value) in &request.cookies {
         jar.add_cookie_str(&format!("{key}={value}"), url);
     }
 }
@@ -382,6 +375,30 @@ mod tests {
         assert_eq!(
             seen.lock().unwrap()[0].request_line,
             "GET http://does-not-resolve.test/articles HTTP/1.1"
+        );
+    }
+
+    #[tokio::test]
+    async fn http_downloader_sends_shared_request_cookies() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen_clone = seen.clone();
+        let server = spawn_server(1, move |_, _, request| {
+            seen_clone.lock().unwrap().push(request);
+            TestResponse::ok("cookies")
+        });
+        let downloader = Http::default();
+        let request = Request::new(server.url("/cookies")).with_cookie("sid", "abc");
+
+        let response = downloader.fetch(&request).await.unwrap();
+
+        assert_eq!(response.text, "cookies");
+        assert_eq!(
+            seen.lock().unwrap()[0]
+                .headers
+                .get("cookie")
+                .and_then(|values| values.first())
+                .map(String::as_str),
+            Some("sid=abc")
         );
     }
 

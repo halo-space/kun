@@ -18,11 +18,11 @@
 ## 3. Request / Browser / Middleware 缺口
 
 - 代码爬虫侧的 request 能力已经比较完整，但 DSL 到共享 request 模型的映射还没有完全收敛。
-- browser 路线当前已经接住统一 `Request` 上的 `method`、`body` 与最小 `session` 复用能力；`stealth`、`fingerprint_profile` 仍未实现。
-- request-level cookies 现在仍然挂在 `http` config 上；`Request::with_cookie()` 会把请求切回 `Http` 模式，browser 还不能消费同一套 cookies 语义。
+- browser 路线当前已经接住统一 `Request` 上的 `method`、`body`、cookies 与最小 `session` 复用能力；`stealth`、`fingerprint_profile` 仍未实现。
 - browser `Response` 现在已经接住真实的导航 `status` 与响应头；`protocol` 继续表示 browser 执行语义，`ip_address` / `certificate` 仍受 Playwright 当前接口限制而保持为空。
 - `Response.text` 现在已经统一从 `Response.body` 解码，并支持 BOM / `Content-Type charset` / 文档声明；但还没有做统计型 `apparent encoding` 猜测。
-- browser `session` 当前已经通过稳定的 Playwright user data dir 落了最小复用能力；同一 session id 的并发协调还没有专门处理。
+- browser `session` 当前已经通过稳定的 Playwright user data dir 落了最小复用能力，并对相同 session id 做了最小串行协调；但还没有更细粒度的 browser context / page 复用策略。
+- 统一 request cookies 目前只建模扁平的 key/value；domain、path、expires、same-site 这类更细粒度 cookie 属性还没有进入公开 `Request` API。
 - proxy / cookies 已接到真实 HTTP 下载链路，但更细的 DSL 配置面和高级策略还没有统一。
 
 ## 4. Scheduler / Frontier 缺口

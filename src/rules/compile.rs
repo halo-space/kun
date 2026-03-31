@@ -200,6 +200,7 @@ fn compile_fetch(fetch: FetchConfig) -> Result<FetchPlan, SpiderError> {
         .to_string();
     let headers = parse_headers(fetch.request.get("headers"))?;
     let body = parse_body(fetch.request.get("body"))?;
+    let cookies = parse_request_cookies(&fetch.request)?;
     let http = if mode == RequestMode::Http {
         Some(parse_http_config(&fetch.request)?)
     } else {
@@ -216,6 +217,7 @@ fn compile_fetch(fetch: FetchConfig) -> Result<FetchPlan, SpiderError> {
         method,
         headers,
         body,
+        cookies,
         http,
         browser,
     })
@@ -413,20 +415,29 @@ fn parse_http_config(value: &BTreeMap<String, Value>) -> Result<HttpConfig, Spid
         }
     }
 
-    if let Some(cookies) = value.get("cookies") {
-        for (key, value) in expect_object(cookies, "fetch.request.cookies")? {
-            let value = value.as_str().ok_or_else(|| {
-                SpiderError::rules(format!("cookie value for {key} must be string"))
-            })?;
-            config = config.with_cookie(key.clone(), value.to_string());
-        }
-    }
-
     if let Some(allow_redirects) = value.get("allow_redirects").and_then(Value::as_bool) {
         config = config.with_redirects(allow_redirects);
     }
 
     Ok(config)
+}
+
+fn parse_request_cookies(
+    value: &BTreeMap<String, Value>,
+) -> Result<BTreeMap<String, String>, SpiderError> {
+    let Some(cookies) = value.get("cookies") else {
+        return Ok(BTreeMap::new());
+    };
+
+    let mut parsed = BTreeMap::new();
+    for (key, value) in expect_object(cookies, "fetch.request.cookies")? {
+        let value = value
+            .as_str()
+            .ok_or_else(|| SpiderError::rules(format!("cookie value for {key} must be string")))?;
+        parsed.insert(key.clone(), value.to_string());
+    }
+
+    Ok(parsed)
 }
 
 fn parse_browser_config(value: &BTreeMap<String, Value>) -> Result<BrowserConfig, SpiderError> {

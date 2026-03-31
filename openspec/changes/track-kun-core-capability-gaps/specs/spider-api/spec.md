@@ -66,6 +66,18 @@
 - **THEN** downloader 复用同一个稳定的 Playwright user data dir
 - **AND** cookies 与 local storage 等浏览器态数据可以随 session 继续复用
 
+#### Scenario: Browser request consumes shared request cookies
+
+- **WHEN** browser request 在统一 `Request` 上声明了 cookies
+- **THEN** downloader 把这些 cookies 注入 Playwright browser context
+- **AND** 请求不会因为设置 cookies 而退回 `Http` 模式
+
+#### Scenario: Browser session execution is coordinated per session id
+
+- **WHEN** 多个 browser request 使用相同的 session id 并发执行
+- **THEN** downloader 至少按 session id 串行化实际浏览器执行
+- **AND** 避免共享 user data dir 时出现竞态
+
 ## MODIFIED Requirements
 
 ### Requirement: Response 提供内建解析辅助方法

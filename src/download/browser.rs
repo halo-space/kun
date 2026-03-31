@@ -9,16 +9,23 @@ use crate::response::Response;
 use jiff::SignedDuration;
 #[cfg(feature = "browser")]
 use playwright_rs::protocol::{
-    BrowserContextOptions, ContinueOptions, GotoOptions, Playwright, ProxySettings, Viewport,
+    BrowserContextOptions, ContinueOptions, Cookie, GotoOptions, Playwright, ProxySettings,
+    Viewport,
 };
 #[cfg(feature = "browser")]
 use serde_json::json;
 #[cfg(any(feature = "browser", test))]
+use std::collections::BTreeMap;
+#[cfg(any(feature = "browser", test))]
 use std::path::PathBuf;
-#[cfg(feature = "browser")]
+#[cfg(any(feature = "browser", test))]
 use std::sync::Arc;
 #[cfg(feature = "browser")]
 use std::sync::atomic::{AtomicBool, Ordering};
+#[cfg(any(feature = "browser", test))]
+use std::sync::{Mutex, OnceLock};
+#[cfg(any(feature = "browser", test))]
+use url::Url;
 
 #[derive(Default)]
 pub struct Browser;
@@ -232,6 +239,7 @@ async fn fetch_with_playwright_inner(
     request: &Request,
     config: &BrowserConfig,
 ) -> Result<BrowserFetchResult, SpiderError> {
+    let _session_execution_guard = acquire_browser_session_execution_guard(request).await;
     let playwright = Playwright::launch().await.map_err(map_playwright_error)?;
     let options = build_context_options(config, request, request.timeout)?;
     let navigation_request_override = BrowserNavigationRequestOverride::for_request(request);
@@ -261,6 +269,8 @@ async fn fetch_with_playwright_inner(
     .map_err(map_playwright_error)?;
 
     let result = async {
+        apply_request_cookies_to_context(&context, request).await?;
+
         if let Some(navigation_request_override) = navigation_request_override.clone() {
             let navigation_override_applied = Arc::new(AtomicBool::new(false));
             let navigation_override_state = Arc::clone(&navigation_override_applied);
@@ -367,6 +377,53 @@ fn build_context_options(
     Ok(builder.build())
 }
 
+#[cfg(any(feature = "browser", test))]
+fn build_browser_request_cookies(
+    request: &Request,
+) -> Result<Vec<BrowserRequestCookie>, SpiderError> {
+    if request.cookies.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let url =
+        Url::parse(&request.url).map_err(|error| SpiderError::request_build(error.to_string()))?;
+    let host = url.host_str().ok_or_else(|| {
+        SpiderError::request_build("browser request cookies require a URL host".to_string())
+    })?;
+    let secure = url.scheme().eq_ignore_ascii_case("https");
+
+    Ok(request
+        .cookies
+        .iter()
+        .map(|(name, value)| BrowserRequestCookie {
+            name: name.clone(),
+            value: value.clone(),
+            domain: host.to_string(),
+            path: "/".to_string(),
+            expires: -1.0,
+            http_only: false,
+            secure,
+            same_site: None,
+        })
+        .collect())
+}
+
+#[cfg(feature = "browser")]
+async fn apply_request_cookies_to_context(
+    context: &playwright_rs::protocol::BrowserContext,
+    request: &Request,
+) -> Result<(), SpiderError> {
+    let cookies = build_browser_request_cookies(request)?;
+    if cookies.is_empty() {
+        return Ok(());
+    }
+
+    context
+        .add_cookies(&cookies)
+        .await
+        .map_err(map_playwright_error)
+}
+
 #[cfg(feature = "browser")]
 async fn wait_for_selector(
     frame: &playwright_rs::protocol::Frame,
@@ -404,6 +461,54 @@ async fn wait_for_selector(
 #[cfg(feature = "browser")]
 fn map_playwright_error(error: impl std::fmt::Display) -> SpiderError {
     SpiderError::download(format!("playwright error: {error}"))
+}
+
+#[cfg(feature = "browser")]
+type BrowserRequestCookie = Cookie;
+
+#[cfg(all(test, not(feature = "browser")))]
+#[derive(Debug, Clone, PartialEq)]
+struct BrowserRequestCookie {
+    name: String,
+    value: String,
+    domain: String,
+    path: String,
+    expires: f64,
+    http_only: bool,
+    secure: bool,
+    same_site: Option<String>,
+}
+
+#[cfg(any(feature = "browser", test))]
+fn browser_session_execution_lock(session_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static SESSION_LOCKS: OnceLock<Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>> =
+        OnceLock::new();
+
+    let locks = SESSION_LOCKS.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let mut locks = locks.lock().expect("browser session lock map poisoned");
+
+    locks
+        .entry(session_id.to_string())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+#[cfg(feature = "browser")]
+struct BrowserSessionExecutionGuard {
+    _guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+#[cfg(feature = "browser")]
+async fn acquire_browser_session_execution_guard(
+    request: &Request,
+) -> Option<BrowserSessionExecutionGuard> {
+    let Some(session) = &request.session else {
+        return None;
+    };
+
+    let lock = browser_session_execution_lock(&session.id);
+    let guard = lock.lock_owned().await;
+    Some(BrowserSessionExecutionGuard { _guard: guard })
 }
 
 #[cfg(feature = "browser")]
@@ -708,6 +813,30 @@ mod tests {
         assert_eq!(response.protocol.as_deref(), Some("browser"));
         assert!(response.ip_address.is_none());
         assert!(response.certificate.is_none());
+    }
+
+    #[test]
+    fn build_browser_request_cookies_uses_request_url_host() {
+        let request = Request::browser("https://example.com/detail").with_cookie("sid", "abc");
+
+        let cookies = build_browser_request_cookies(&request).expect("cookies should build");
+
+        assert_eq!(cookies.len(), 1);
+        assert_eq!(cookies[0].name, "sid");
+        assert_eq!(cookies[0].value, "abc");
+        assert_eq!(cookies[0].domain, "example.com");
+        assert_eq!(cookies[0].path, "/");
+        assert!(cookies[0].secure);
+    }
+
+    #[test]
+    fn browser_session_execution_lock_is_stable_per_session_id() {
+        let first = browser_session_execution_lock("shared-browser");
+        let second = browser_session_execution_lock("shared-browser");
+        let other = browser_session_execution_lock("other-browser");
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert!(!Arc::ptr_eq(&first, &other));
     }
 
     #[test]

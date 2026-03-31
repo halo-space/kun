@@ -3,7 +3,7 @@ use crate::engine::types::Flow;
 use crate::error::SpiderError;
 use crate::future::BoxFuture;
 use crate::middleware::traits::Middleware;
-use crate::request::{Headers, RequestMode, SessionConfig};
+use crate::request::{Headers, SessionConfig};
 use crate::value::Value;
 use std::collections::BTreeMap;
 
@@ -36,7 +36,7 @@ impl CookiesMiddleware {
             return;
         }
 
-        let cookies = &mut context.request.http_mut().cookies;
+        let cookies = &mut context.request.cookies;
         for header in cookie_headers {
             merge_cookie_header(cookies, &header);
         }
@@ -49,10 +49,6 @@ impl Middleware for CookiesMiddleware {
         context: &'a mut EngineContext,
     ) -> BoxFuture<'a, Result<Flow, SpiderError>> {
         Box::pin(async move {
-            if context.request.mode != RequestMode::Http {
-                return Ok(Flow::Continue);
-            }
-
             self.apply_default_session(context);
             self.normalize_cookie_headers(context);
             Ok(Flow::Continue)
@@ -123,21 +119,11 @@ mod tests {
         assert_eq!(context.request.session, Some(SessionConfig::new("shared")));
         assert!(context.request.headers.is_empty());
         assert_eq!(
-            context
-                .request
-                .http
-                .as_ref()
-                .and_then(|http| http.cookies.get("sid"))
-                .map(String::as_str),
+            context.request.cookies.get("sid").map(String::as_str),
             Some("abc")
         );
         assert_eq!(
-            context
-                .request
-                .http
-                .as_ref()
-                .and_then(|http| http.cookies.get("theme"))
-                .map(String::as_str),
+            context.request.cookies.get("theme").map(String::as_str),
             Some("dark")
         );
     }
@@ -155,6 +141,28 @@ mod tests {
         block_on(middleware.process_request(&mut context)).unwrap();
 
         assert_eq!(context.request.session, Some(SessionConfig::new("custom")));
+    }
+
+    #[test]
+    fn cookies_middleware_normalizes_browser_request_cookie_header_without_switching_mode() {
+        let middleware = CookiesMiddleware::default();
+        let mut context = EngineContext::new(
+            Request::browser("https://example.com").with_header("Cookie", "sid=abc; theme=light"),
+        );
+
+        let flow = block_on(middleware.process_request(&mut context)).unwrap();
+
+        assert_eq!(flow, Flow::Continue);
+        assert_eq!(context.request.mode, crate::request::RequestMode::Browser);
+        assert!(context.request.headers.is_empty());
+        assert_eq!(
+            context.request.cookies.get("sid").map(String::as_str),
+            Some("abc")
+        );
+        assert_eq!(
+            context.request.cookies.get("theme").map(String::as_str),
+            Some("light")
+        );
     }
 
     fn block_on<F: Future>(future: F) -> F::Output {
