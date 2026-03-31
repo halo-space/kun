@@ -17,7 +17,8 @@
 ## 3. Request / Browser / Middleware 缺口
 
 - 代码爬虫侧的 request 能力已经比较完整，但 DSL 到共享 request 模型的映射还没有完全收敛。
-- browser 路线当前只落了最小可用能力；`stealth`、`fingerprint_profile`、browser `session`、非 `GET` browser request、request body 仍未实现。
+- browser 路线当前已经接住统一 `Request` 上的 `method`、`body` 与最小 `session` 复用能力；`stealth`、`fingerprint_profile` 仍未实现。
+- browser `session` 当前已经通过稳定的 Playwright user data dir 落了最小复用能力；同一 session id 的并发协调还没有专门处理。
 - proxy / cookies 已接到真实 HTTP 下载链路，但更细的 DSL 配置面和高级策略还没有统一。
 
 ## 4. Pipeline 与输出能力

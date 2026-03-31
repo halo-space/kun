@@ -4,7 +4,7 @@
 
 ### Requirement: Scheduler Uses Stable Task Identity
 
-系统必须使用稳定的 task identity 跟踪 ready、delayed 与 inflight 任务，而不是仅用 URL 作为 ack/nack 标识。
+系统 MUST 使用稳定的 task identity 跟踪 ready、delayed 与 inflight 任务，而不是仅用 URL 作为 ack/nack 标识。
 
 #### Scenario: Same URL with different request context can coexist
 
@@ -18,7 +18,7 @@
 
 ### Requirement: Engine Defines Validation And Item Pipeline Failure Semantics
 
-系统必须明确 validation、单一 item pipeline 以及 item 丢弃时的引擎行为语义。
+系统 MUST 明确 validation、单一 item pipeline 以及 item 丢弃时的引擎行为语义。
 
 #### Scenario: Validation failure is handled explicitly
 
@@ -37,7 +37,7 @@
 
 ### Requirement: HTTP Downloader Wires Shared Transport Semantics
 
-系统必须在 HTTP downloader 中把 timeout、cookie jar、proxy 与 redirect 统一接到共享 request 语义上。
+系统 MUST 在 HTTP downloader 中把 timeout、cookie jar、proxy 与 redirect 统一接到共享 request 语义上。
 
 #### Scenario: Session requests share cookie jar state
 

@@ -4,7 +4,7 @@
 
 ### Requirement: Built-in Network Middleware Must Have Concrete Behavior
 
-系统必须让内建 `cookies` 与 `proxy` middleware 具备真实、可验证的运行时行为，而不是仅保留注册入口。
+系统 MUST 让内建 `cookies` 与 `proxy` middleware 具备真实、可验证的运行时行为，而不是仅保留注册入口。
 
 #### Scenario: Cookies middleware applies request/session behavior
 
@@ -30,7 +30,7 @@
 
 ### Requirement: Engine 支持内建与自定义 middleware
 
-库必须允许 middleware 既可以直接以实例形式提供，也可以以注册工厂形式提供；对于内建 middleware，公开名称必须对应真实实现而不是空壳占位。
+库 MUST 允许 middleware 既可以直接以实例形式提供，也可以以注册工厂形式提供；对于内建 middleware，公开名称必须对应真实实现而不是空壳占位。
 
 #### Scenario: Built-in middleware keys map to concrete behavior
 
@@ -39,7 +39,7 @@
 
 ### Requirement: Plugin manifest 来自 plugins.toml
 
-库必须从 `plugins.toml` 加载 plugin manifest，并明确 engine 当前真正支持的 plugin kind 边界。
+库 MUST 从 `plugins.toml` 加载 plugin manifest，并明确 engine 当前真正支持的 plugin kind 边界。
 
 #### Scenario: Unsupported plugin kind is explicit
 

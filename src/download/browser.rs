@@ -7,10 +7,16 @@ use crate::response::Response;
 use jiff::SignedDuration;
 #[cfg(feature = "browser")]
 use playwright_rs::protocol::{
-    BrowserContextOptions, GotoOptions, Playwright, ProxySettings, Viewport,
+    BrowserContextOptions, ContinueOptions, GotoOptions, Playwright, ProxySettings, Viewport,
 };
 #[cfg(feature = "browser")]
 use serde_json::json;
+#[cfg(any(feature = "browser", test))]
+use std::path::PathBuf;
+#[cfg(feature = "browser")]
+use std::sync::Arc;
+#[cfg(feature = "browser")]
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Default)]
 pub struct Browser;
@@ -88,21 +94,9 @@ fn browser_feature_disabled_error() -> SpiderError {
 }
 
 fn validate_browser_request_contract(
-    request: &Request,
+    _request: &Request,
     config: &BrowserConfig,
 ) -> Result<(), SpiderError> {
-    if request.method != "GET" {
-        return Err(SpiderError::download(
-            "browser request only supports GET navigation on the Playwright route",
-        ));
-    }
-
-    if request.body.is_some() {
-        return Err(SpiderError::download(
-            "browser request body is not implemented yet on the Playwright route",
-        ));
-    }
-
     if config.stealth {
         return Err(SpiderError::download(
             "browser stealth is not implemented yet on the Playwright route",
@@ -115,13 +109,45 @@ fn validate_browser_request_contract(
         ));
     }
 
-    if request.session.is_some() {
-        return Err(SpiderError::download(
-            "browser session is not implemented yet on the Playwright route",
-        ));
+    Ok(())
+}
+
+#[cfg(any(feature = "browser", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BrowserNavigationRequestOverride {
+    url: String,
+    method: String,
+    body: Option<Vec<u8>>,
+}
+
+#[cfg(any(feature = "browser", test))]
+impl BrowserNavigationRequestOverride {
+    fn for_request(request: &Request) -> Option<Self> {
+        if request.method.eq_ignore_ascii_case("GET") && request.body.is_none() {
+            return None;
+        }
+
+        Some(Self {
+            url: request.url.clone(),
+            method: request.method.clone(),
+            body: request.body.clone(),
+        })
     }
 
-    Ok(())
+    fn matches(&self, url: &str, is_navigation_request: bool) -> bool {
+        is_navigation_request && url == self.url
+    }
+
+    #[cfg(feature = "browser")]
+    fn to_continue_options(&self) -> ContinueOptions {
+        let mut builder = ContinueOptions::builder().method(self.method.clone());
+
+        if let Some(body) = &self.body {
+            builder = builder.post_data_bytes(body.clone());
+        }
+
+        builder.build()
+    }
 }
 
 #[cfg(feature = "browser")]
@@ -131,7 +157,8 @@ async fn fetch_with_playwright_inner(
 ) -> Result<(String, String), SpiderError> {
     let playwright = Playwright::launch().await.map_err(map_playwright_error)?;
     let options = build_context_options(config, request, request.timeout)?;
-    let user_data_dir = TemporaryUserDataDir::new();
+    let navigation_request_override = BrowserNavigationRequestOverride::for_request(request);
+    let user_data_dir = BrowserUserDataDir::for_request(request)?;
     let user_data_path = user_data_dir.path();
 
     let context = match config.engine {
@@ -157,6 +184,35 @@ async fn fetch_with_playwright_inner(
     .map_err(map_playwright_error)?;
 
     let result = async {
+        if let Some(navigation_request_override) = navigation_request_override.clone() {
+            let navigation_override_applied = Arc::new(AtomicBool::new(false));
+            let navigation_override_state = Arc::clone(&navigation_override_applied);
+
+            context
+                .route("**", move |route| {
+                    let navigation_request_override = navigation_request_override.clone();
+                    let navigation_override_state = Arc::clone(&navigation_override_state);
+
+                    async move {
+                        let intercepted_request = route.request();
+
+                        if navigation_request_override.matches(
+                            intercepted_request.url(),
+                            intercepted_request.is_navigation_request(),
+                        ) && !navigation_override_state.swap(true, Ordering::SeqCst)
+                        {
+                            return route
+                                .continue_(Some(navigation_request_override.to_continue_options()))
+                                .await;
+                        }
+
+                        route.continue_(None).await
+                    }
+                })
+                .await
+                .map_err(map_playwright_error)?;
+        }
+
         let page = context.new_page().await.map_err(map_playwright_error)?;
         let goto = request
             .timeout
@@ -269,6 +325,57 @@ fn map_playwright_error(error: impl std::fmt::Display) -> SpiderError {
 }
 
 #[cfg(feature = "browser")]
+enum BrowserUserDataDir {
+    Temporary(TemporaryUserDataDir),
+    Persistent(PathBuf),
+}
+
+#[cfg(feature = "browser")]
+impl BrowserUserDataDir {
+    fn for_request(request: &Request) -> Result<Self, SpiderError> {
+        let Some(session) = &request.session else {
+            return Ok(Self::Temporary(TemporaryUserDataDir::new()));
+        };
+
+        let path = browser_session_user_data_dir(&session.id);
+        std::fs::create_dir_all(&path).map_err(|error| {
+            SpiderError::download(format!(
+                "failed to create browser session user data dir: {error}"
+            ))
+        })?;
+
+        Ok(Self::Persistent(path))
+    }
+
+    fn path(&self) -> String {
+        match self {
+            Self::Temporary(dir) => dir.path(),
+            Self::Persistent(path) => path.to_string_lossy().into_owned(),
+        }
+    }
+}
+
+#[cfg(any(feature = "browser", test))]
+fn browser_session_user_data_dir(session_id: &str) -> PathBuf {
+    std::env::temp_dir()
+        .join("halo-spider-playwright-sessions")
+        .join(hex_encode(session_id.as_bytes()))
+}
+
+#[cfg(any(feature = "browser", test))]
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+
+    output
+}
+
+#[cfg(feature = "browser")]
 struct TemporaryUserDataDir {
     path: std::path::PathBuf,
 }
@@ -364,23 +471,104 @@ mod tests {
     }
 
     #[test]
-    fn browser_request_contract_rejects_non_get_request() {
+    fn browser_request_contract_allows_non_get_request() {
         let request = Request::browser("https://example.com").with_method("POST");
 
-        let error = validate_browser_request_contract(
+        let result = validate_browser_request_contract(
             &request,
             request
                 .browser
                 .as_ref()
                 .expect("browser config should exist"),
-        )
-        .unwrap_err();
+        );
 
-        assert_eq!(
-            error,
-            SpiderError::download(
-                "browser request only supports GET navigation on the Playwright route",
-            )
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn browser_request_contract_allows_request_body() {
+        let request = Request::browser("https://example.com").with_body("payload");
+
+        let result = validate_browser_request_contract(
+            &request,
+            request
+                .browser
+                .as_ref()
+                .expect("browser config should exist"),
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn browser_request_contract_allows_session() {
+        let request = Request::browser("https://example.com").with_session("shared-browser");
+
+        let result = validate_browser_request_contract(
+            &request,
+            request
+                .browser
+                .as_ref()
+                .expect("browser config should exist"),
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn browser_navigation_request_override_is_absent_for_default_get_without_body() {
+        let request = Request::browser("https://example.com");
+
+        let override_request = BrowserNavigationRequestOverride::for_request(&request);
+
+        assert_eq!(override_request, None);
+    }
+
+    #[test]
+    fn browser_navigation_request_override_captures_method_and_body() {
+        let request = Request::browser("https://example.com")
+            .with_method("POST")
+            .with_body("payload");
+
+        let override_request = BrowserNavigationRequestOverride::for_request(&request)
+            .expect("navigation override should exist");
+
+        assert_eq!(override_request.url, "https://example.com");
+        assert_eq!(override_request.method, "POST");
+        assert_eq!(override_request.body, Some(b"payload".to_vec()));
+        assert!(override_request.matches("https://example.com", true));
+        assert!(!override_request.matches("https://example.com/other", true));
+        assert!(!override_request.matches("https://example.com", false));
+    }
+
+    #[cfg(feature = "browser")]
+    #[test]
+    fn browser_navigation_request_override_builds_continue_options() {
+        let override_request = BrowserNavigationRequestOverride {
+            url: "https://example.com".to_string(),
+            method: "POST".to_string(),
+            body: Some(b"payload".to_vec()),
+        };
+
+        let continue_options = override_request.to_continue_options();
+
+        assert_eq!(continue_options.method.as_deref(), Some("POST"));
+        assert_eq!(continue_options.post_data_bytes, Some(b"payload".to_vec()));
+        assert_eq!(continue_options.post_data, None);
+    }
+
+    #[test]
+    fn browser_session_user_data_dir_is_stable_per_session_id() {
+        let first = browser_session_user_data_dir("shared-browser");
+        let second = browser_session_user_data_dir("shared-browser");
+        let other = browser_session_user_data_dir("other-browser");
+
+        assert_eq!(first, second);
+        assert_ne!(first, other);
+        assert!(
+            first
+                .to_string_lossy()
+                .contains("halo-spider-playwright-sessions")
         );
     }
 

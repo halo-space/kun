@@ -4,7 +4,7 @@
 
 ### Requirement: DSL 围绕可执行 step 组织
 
-库必须将 DSL 中声明的运行时能力编译到共享底层链路，而不是在 rules 运行时内部发明独立能力实现。
+库 MUST 将 DSL 中声明的运行时能力编译到共享底层链路，而不是在 rules 运行时内部发明独立能力实现。
 
 #### Scenario: Validation compiles to shared core capability
 
@@ -23,7 +23,7 @@
 
 ### Requirement: Parse plan 支持 fields 与 links
 
-库必须保证 `parse.fields`、`parse.links` 以及 `next_url_config` 只负责描述抓取与路由意图，而不是承载一套与代码模式脱节的私有运行时。
+库 MUST 保证 `parse.fields`、`parse.links` 以及 `next_url_config` 只负责描述抓取与路由意图，而不是承载一套与代码模式脱节的私有运行时。
 
 #### Scenario: DSL runtime does not fork core execution semantics
 

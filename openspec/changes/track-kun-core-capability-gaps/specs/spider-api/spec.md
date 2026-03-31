@@ -4,7 +4,7 @@
 
 ### Requirement: Shared Validation Capability
 
-系统必须把字段或 item 的运行时校验能力实现为代码爬虫与 DSL 共享的底层能力，而不是仅作为 rules 配置字段存在。
+系统 MUST 把字段或 item 的运行时校验能力实现为代码爬虫与 DSL 共享的底层能力，而不是仅作为 rules 配置字段存在。
 
 #### Scenario: Code spider uses shared validation capability
 
@@ -23,7 +23,7 @@
 
 ### Requirement: Follow Request Derivation Must Preserve Shared Request Semantics
 
-系统必须让 `response.follow()` 与显式构造 `Request` 使用同一套请求能力模型。
+系统 MUST 让 `response.follow()` 与显式构造 `Request` 使用同一套请求能力模型。
 
 #### Scenario: Follow request inherits core request properties
 
@@ -37,7 +37,7 @@
 
 ### Requirement: Browser Execution Must Match Playwright Runtime Boundaries
 
-系统必须让 browser request 的配置语义与实际 downloader 实现保持一致，并把未实现能力收敛为显式失败。
+系统 MUST 让 browser request 的配置语义与实际 downloader 实现保持一致，并把未实现能力收敛为显式失败。
 
 #### Scenario: Browser request uses Playwright-compatible engines
 
@@ -49,16 +49,28 @@
 - **WHEN** 当前构建未启用 `browser` feature 却执行 browser request
 - **THEN** 系统返回显式 download error，而不是返回 stub response
 
+#### Scenario: Browser request forwards method and body through the initial navigation request
+
+- **WHEN** browser request 设置了非 `GET` method 或 request body
+- **THEN** downloader 在首个目标主文档请求上把这些值覆写到 Playwright 导航请求
+- **AND** 后续仍返回渲染后的最终页面 HTML 响应
+
 #### Scenario: Unsupported browser options fail explicitly
 
-- **WHEN** browser request 启用了尚未接线的 `stealth`、`fingerprint_profile`、`session`、非 `GET` method 或 request body
+- **WHEN** browser request 启用了尚未接线的 `stealth` 或 `fingerprint_profile`
 - **THEN** 系统返回显式 download error，而不是静默忽略这些配置
+
+#### Scenario: Browser session can reuse persisted profile state
+
+- **WHEN** 多个 browser request 使用相同的 session id
+- **THEN** downloader 复用同一个稳定的 Playwright user data dir
+- **AND** cookies 与 local storage 等浏览器态数据可以随 session 继续复用
 
 ## MODIFIED Requirements
 
 ### Requirement: Response 提供内建解析辅助方法
 
-库必须在 `Response` 上提供 CSS、XPath、JSON、XML、Regex、AI 与 Feed 的解析辅助方法，并明确这些能力在 HTML、XML 与扩展场景下的真实边界。
+库 MUST 在 `Response` 上提供 CSS、XPath、JSON、XML、Regex、AI 与 Feed 的解析辅助方法，并明确这些能力在 HTML、XML 与扩展场景下的真实边界。
 
 #### Scenario: HTML XPath behavior is explicit and testable
 

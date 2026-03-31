@@ -16,7 +16,7 @@
 
 - 统一 `Request` 模型已经覆盖 `timeout`、`proxy`、`session`、request cookies 与 `follow` 继承语义
 - HTTP 下载链路已经接到真实的 `cookies`、`proxy`、redirect 与 timeout 能力
-- `browser` 模式已经具备最小可用下载能力，并对未实现项显式报错
+- `browser` 模式已经具备最小可用下载能力，并已支持最小的 browser session 复用能力，以及统一 `Request` 上的 `method` / `body`
 - `pipeline` 是唯一 item 输出链路，当前内置 `pipeline::Memory` 与 `pipeline::JsonLines`
 - plugin 自动装载当前只支持 `middleware` kind，其它 kind 先保留命名空间
 
@@ -215,18 +215,21 @@ Spider / rules
 - `headless`
 - `viewport`
 - `wait_for`
+- request method
+- request body
 - request timeout
 - request headers
 - request proxy
+- request session
 - 页面渲染后的 HTML 抓取
+
+其中 browser `session` 当前会把同一个 session id 映射到稳定的 Playwright user data dir，
+用于复用 cookies 和 local storage 这类浏览器态数据。
 
 当前还没有实现、并且会显式报错的能力：
 
 - `stealth`
 - `fingerprint_profile`
-- request `session`
-- 非 `GET` browser request
-- request body
 
 如果当前构建没有启用 `browser` feature，browser request 会直接返回显式错误，不会再返回 stub response。
 

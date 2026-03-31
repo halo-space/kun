@@ -94,6 +94,13 @@
 - Then 它使用对应的 Playwright 浏览器引擎
 - And `headless`、`viewport`、`wait_for`、timeout、headers 与 proxy 等已接线配置会被应用
 
+#### Scenario: browser 请求沿用统一 Request 的 method 与 body
+
+- Given 一个 browser 请求设置了非 `GET` method 或 request body
+- When browser downloader 执行该请求
+- Then downloader 会把这些值覆写到首个目标主文档导航请求
+- And 最终仍返回渲染后的页面响应
+
 #### Scenario: 未启用 browser feature 时显式失败
 
 - Given 一个 browser 请求
@@ -103,10 +110,17 @@
 
 #### Scenario: 未实现的 browser 能力显式报错
 
-- Given 一个 browser 请求启用了 `stealth`、`fingerprint_profile`、`session`、非 `GET` method 或 request body
+- Given 一个 browser 请求启用了 `stealth` 或 `fingerprint_profile`
 - When browser downloader 尝试执行它
 - Then 执行返回显式 download error
 - And 框架不能静默忽略这些未实现配置
+
+#### Scenario: Browser session reuses persisted profile state
+
+- Given 两个 browser 请求声明了相同的 session id
+- When browser downloader 执行这些请求
+- Then 它们复用同一个稳定的 Playwright user data dir
+- And cookies 与 local storage 等浏览器态数据可以随 session id 继续复用
 
 ### Requirement: Request 建模核心请求级能力
 
