@@ -203,6 +203,7 @@ Spider / rules
 
 - `Request` 是统一的执行单元，DSL 生成的请求和代码里手写的请求没有本质区别。
 - `meta` 是请求级上下文参数，用来携带当前请求和后续链路需要透传的数据；它的角色类似 Scrapy 的 `Request.meta`。
+- `Response.body` 保留原始响应字节，`Response.text` 是从 `body` 派生出的解码文本；当前优先使用 BOM、`Content-Type charset` 与文档内编码声明，再回退 UTF-8 lossy。
 - `dedup`、`schedule`、`retry` 等能力属于 `kun` 框架本身的爬虫能力，DSL 只是这些能力的配置化表达，不应实现成一套独立于代码爬虫的专用流程。
 
 ## Browser 能力边界
@@ -221,10 +222,14 @@ Spider / rules
 - request headers
 - request proxy
 - request session
+- browser response status / headers
 - 页面渲染后的 HTML 抓取
 
 其中 browser `session` 当前会把同一个 session id 映射到稳定的 Playwright user data dir，
 用于复用 cookies 和 local storage 这类浏览器态数据。
+
+当前 browser `Response` 会带上真实的导航 `status` 与响应头；`protocol` 继续表示
+browser 执行路径，`ip_address` 与 `certificate` 由于 Playwright 当前接口限制仍保持为空。
 
 当前还没有实现、并且会显式报错的能力：
 

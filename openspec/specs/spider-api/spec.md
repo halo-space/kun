@@ -156,6 +156,34 @@
 - When 提供后续的 metadata patch
 - Then 生成的请求保留原有 metadata，并覆盖 patch 中声明的值
 
+#### Scenario: Browser response uses real navigation status and headers
+
+- Given 一个 browser 请求导航到了能返回主文档响应的页面
+- When browser downloader 构造 `Response`
+- Then `Response.status` 与 `Response.headers` 反映 Playwright 导航响应
+- And `Response.flags` 包含 `browser`
+
+#### Scenario: Browser response keeps unavailable network metadata explicit
+
+- Given Playwright 当前没有暴露浏览器导航响应的 `ip_address` 或证书详情
+- When browser downloader 构造 `Response`
+- Then `Response.ip_address` 与 `Response.certificate` 保持为空
+- And `Response.protocol` 继续表示 browser 执行语义，而不是伪造 HTTP 版本值
+
+#### Scenario: Response text is decoded from response body
+
+- Given downloader 返回原始响应字节并构造 `Response`
+- When 框架生成 `Response.text`
+- Then `Response.body` 保留原始字节
+- And `Response.text` 由 `Response.body` 解码得到，而不是来自独立来源
+
+#### Scenario: Response text respects declared charset before UTF-8 fallback
+
+- Given 响应头或文档声明了 `charset`
+- When 框架从 `Response.body` 派生 `Response.text`
+- Then 它优先使用声明编码进行解码
+- And 如果没有可用编码声明，则回退为 UTF-8 lossy 解码
+
 ### Requirement: Response 提供内建解析辅助方法
 
 库必须在 `Response` 上提供 CSS、XPath、JSON、XML、Regex、AI 与 Feed 的解析辅助方法。

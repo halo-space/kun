@@ -1,5 +1,7 @@
 use crate::download::traits::Downloader;
 use crate::error::SpiderError;
+#[cfg(any(feature = "browser", test))]
+use crate::request::Headers;
 use crate::request::browser::Config as BrowserConfig;
 use crate::request::{Request, RequestMode};
 use crate::response::Response;
@@ -62,7 +64,7 @@ async fn fetch_with_playwright(
 ) -> Result<Response, SpiderError> {
     let future = fetch_with_playwright_inner(request, config);
 
-    let (final_url, content) = if let Some(timeout) = request.timeout {
+    let result = if let Some(timeout) = request.timeout {
         let timeout = to_std_duration(timeout).map_err(|error| {
             SpiderError::download(format!("invalid browser request timeout: {error}"))
         })?;
@@ -76,16 +78,7 @@ async fn fetch_with_playwright(
         future.await?
     };
 
-    let mut response = Response::from_request(
-        request.clone(),
-        200,
-        Default::default(),
-        content.into_bytes(),
-    );
-    response.url = final_url;
-    response.protocol = Some("browser".to_string());
-    response.flags.push("browser".to_string());
-    Ok(response)
+    Ok(build_browser_response(request, result))
 }
 
 #[cfg(not(feature = "browser"))]
@@ -150,11 +143,95 @@ impl BrowserNavigationRequestOverride {
     }
 }
 
+#[cfg(any(feature = "browser", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BrowserResponseMetadata {
+    status: u16,
+    headers: Headers,
+    protocol: Option<String>,
+}
+
+#[cfg(any(feature = "browser", test))]
+impl Default for BrowserResponseMetadata {
+    fn default() -> Self {
+        Self {
+            // Some browser navigations, such as `about:blank` or `data:` URLs, do not produce
+            // a network response. Use 0 to indicate "no navigation response available" rather
+            // than fabricating a successful HTTP status.
+            status: 0,
+            headers: Headers::new(),
+            protocol: Some("browser".to_string()),
+        }
+    }
+}
+
+#[cfg(any(feature = "browser", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BrowserFetchResult {
+    final_url: String,
+    content: String,
+    metadata: BrowserResponseMetadata,
+}
+
+#[cfg(any(feature = "browser", test))]
+fn build_browser_response(request: &Request, result: BrowserFetchResult) -> Response {
+    let mut response = Response::from_request(
+        request.clone(),
+        result.metadata.status,
+        result.metadata.headers,
+        result.content.into_bytes(),
+    );
+    response.url = result.final_url;
+    response.protocol = result.metadata.protocol;
+    response.flags.push("browser".to_string());
+    response
+}
+
+#[cfg(any(feature = "browser", test))]
+fn collect_browser_response_headers(
+    entries: impl IntoIterator<Item = (String, String)>,
+) -> Headers {
+    let mut headers = Headers::new();
+
+    for (name, value) in entries {
+        headers.entry(name).or_default().push(value);
+    }
+
+    headers
+}
+
+#[cfg(feature = "browser")]
+async fn browser_response_metadata(
+    navigation_response: Option<&playwright_rs::protocol::page::Response>,
+) -> Result<BrowserResponseMetadata, SpiderError> {
+    let Some(navigation_response) = navigation_response else {
+        return Ok(BrowserResponseMetadata::default());
+    };
+
+    let header_entries = navigation_response
+        .headers_array()
+        .await
+        .map_err(map_playwright_error)?;
+
+    Ok(BrowserResponseMetadata {
+        status: navigation_response.status(),
+        headers: collect_browser_response_headers(
+            header_entries
+                .into_iter()
+                .map(|entry| (entry.name, entry.value)),
+        ),
+        // `Response.protocol` in browser mode continues to describe the browser execution path.
+        // Playwright's current navigation response API does not expose an HTTP version value that
+        // would align with the HTTP downloader's `HTTP/1.1` style protocol string.
+        protocol: Some("browser".to_string()),
+    })
+}
+
 #[cfg(feature = "browser")]
 async fn fetch_with_playwright_inner(
     request: &Request,
     config: &BrowserConfig,
-) -> Result<(String, String), SpiderError> {
+) -> Result<BrowserFetchResult, SpiderError> {
     let playwright = Playwright::launch().await.map_err(map_playwright_error)?;
     let options = build_context_options(config, request, request.timeout)?;
     let navigation_request_override = BrowserNavigationRequestOverride::for_request(request);
@@ -224,7 +301,7 @@ async fn fetch_with_playwright_inner(
                     })
             })
             .transpose()?;
-        let _ = page
+        let navigation_response = page
             .goto(&request.url, goto)
             .await
             .map_err(map_playwright_error)?;
@@ -236,8 +313,13 @@ async fn fetch_with_playwright_inner(
 
         let final_url = page.url();
         let content = page.content().await.map_err(map_playwright_error)?;
+        let metadata = browser_response_metadata(navigation_response.as_ref()).await?;
 
-        Ok::<(String, String), SpiderError>((final_url, content))
+        Ok::<BrowserFetchResult, SpiderError>(BrowserFetchResult {
+            final_url,
+            content,
+            metadata,
+        })
     }
     .await;
 
@@ -555,6 +637,77 @@ mod tests {
         assert_eq!(continue_options.method.as_deref(), Some("POST"));
         assert_eq!(continue_options.post_data_bytes, Some(b"payload".to_vec()));
         assert_eq!(continue_options.post_data, None);
+    }
+
+    #[test]
+    fn collect_browser_response_headers_preserves_duplicate_header_entries() {
+        let headers = collect_browser_response_headers([
+            ("set-cookie".to_string(), "sid=1".to_string()),
+            ("set-cookie".to_string(), "lang=zh".to_string()),
+            ("content-type".to_string(), "text/html".to_string()),
+        ]);
+
+        assert_eq!(
+            headers.get("set-cookie"),
+            Some(&vec!["sid=1".to_string(), "lang=zh".to_string()])
+        );
+        assert_eq!(
+            headers.get("content-type"),
+            Some(&vec!["text/html".to_string()])
+        );
+    }
+
+    #[test]
+    fn build_browser_response_uses_real_navigation_metadata() {
+        let request = Request::browser("https://example.com/list");
+        let result = BrowserFetchResult {
+            final_url: "https://example.com/detail".to_string(),
+            content: "<html>detail</html>".to_string(),
+            metadata: BrowserResponseMetadata {
+                status: 302,
+                headers: collect_browser_response_headers([
+                    (
+                        "location".to_string(),
+                        "https://example.com/detail".to_string(),
+                    ),
+                    ("content-type".to_string(), "text/html".to_string()),
+                ]),
+                protocol: Some("browser".to_string()),
+            },
+        };
+
+        let response = build_browser_response(&request, result);
+
+        assert_eq!(response.url, "https://example.com/detail");
+        assert_eq!(response.status, 302);
+        assert_eq!(
+            response.headers.get("location"),
+            Some(&vec!["https://example.com/detail".to_string()])
+        );
+        assert_eq!(response.text, "<html>detail</html>");
+        assert_eq!(response.protocol.as_deref(), Some("browser"));
+        assert_eq!(response.flags, vec!["browser".to_string()]);
+        assert!(response.ip_address.is_none());
+        assert!(response.certificate.is_none());
+    }
+
+    #[test]
+    fn build_browser_response_keeps_limited_metadata_when_no_navigation_response_exists() {
+        let request = Request::browser("about:blank");
+        let result = BrowserFetchResult {
+            final_url: "about:blank".to_string(),
+            content: "<html></html>".to_string(),
+            metadata: BrowserResponseMetadata::default(),
+        };
+
+        let response = build_browser_response(&request, result);
+
+        assert_eq!(response.url, "about:blank");
+        assert_eq!(response.status, 0);
+        assert!(response.headers.is_empty());
+        assert_eq!(response.protocol.as_deref(), Some("browser"));
+        assert!(response.ip_address.is_none());
+        assert!(response.certificate.is_none());
     }
 
     #[test]

@@ -72,6 +72,30 @@
 
 库 MUST 在 `Response` 上提供 CSS、XPath、JSON、XML、Regex、AI 与 Feed 的解析辅助方法，并明确这些能力在 HTML、XML 与扩展场景下的真实边界。
 
+#### Scenario: Browser response uses real navigation status and headers
+
+- **WHEN** browser downloader 导航到了能返回主文档响应的页面
+- **THEN** 构造出的 `Response.status` 与 `Response.headers` 反映 Playwright 导航响应
+- **AND** `Response.flags` 保留 `browser`
+
+#### Scenario: Browser response keeps unavailable network metadata explicit
+
+- **WHEN** Playwright 当前没有暴露浏览器导航响应的 `ip_address` 或证书详情
+- **THEN** 构造出的 `Response.ip_address` 与 `Response.certificate` 保持为空
+- **AND** `Response.protocol` 继续表示 browser 执行语义，而不是伪造 HTTP 版本值
+
+#### Scenario: Response text is decoded from response body
+
+- **WHEN** downloader 返回原始响应字节并构造 `Response`
+- **THEN** `Response.body` 保留原始字节
+- **AND** `Response.text` 由 `Response.body` 解码得到，而不是维护独立来源
+
+#### Scenario: Response text respects declared charset before UTF-8 fallback
+
+- **WHEN** 响应头或文档声明了 `charset`
+- **THEN** `Response.text` 优先按声明编码解码 `Response.body`
+- **AND** 当没有可用编码声明时，系统回退为 UTF-8 lossy 解码
+
 #### Scenario: HTML XPath behavior is explicit and testable
 
 - **WHEN** 用户在 HTML 响应上使用 XPath

@@ -4,8 +4,128 @@ pub mod follow;
 use crate::parser::{AiQuery, CssQuery, FeedQuery, JsonQuery, RegexQuery, XPathQuery, XmlQuery};
 use crate::request::{Headers, Metadata, Request};
 use certificate::CertificateInfo;
+use encoding_rs::{Encoding, UTF_8};
 use follow::build_follow_request;
+use regex::Regex as PatternRegex;
 use std::net::IpAddr;
+use std::sync::OnceLock;
+
+const DOCUMENT_ENCODING_SNIFF_LIMIT: usize = 4096;
+
+fn decode_response_text(headers: &Headers, body: &[u8]) -> String {
+    if body.is_empty() {
+        return String::new();
+    }
+
+    let (encoding, bom_len) = response_text_encoding(headers, body);
+    let (text, _, _) = encoding.decode(&body[bom_len..]);
+    text.into_owned()
+}
+
+fn response_text_encoding(headers: &Headers, body: &[u8]) -> (&'static Encoding, usize) {
+    if let Some((encoding, bom_len)) = Encoding::for_bom(body) {
+        return (encoding, bom_len);
+    }
+
+    let declared_charset = charset_from_headers(headers).or_else(|| charset_from_document(body));
+
+    if let Some(charset) = declared_charset
+        && let Some(encoding) = Encoding::for_label(charset.as_bytes())
+    {
+        return (encoding, 0);
+    }
+
+    (UTF_8, 0)
+}
+
+fn charset_from_headers(headers: &Headers) -> Option<String> {
+    for (name, values) in headers {
+        if !name.eq_ignore_ascii_case("content-type") {
+            continue;
+        }
+
+        for value in values.iter().rev() {
+            if let Some(charset) = extract_charset_parameter(value) {
+                return Some(charset);
+            }
+        }
+    }
+
+    None
+}
+
+fn extract_charset_parameter(value: &str) -> Option<String> {
+    for parameter in value.split(';').skip(1) {
+        let (name, raw_value) = parameter.split_once('=')?;
+        if !name.trim().eq_ignore_ascii_case("charset") {
+            continue;
+        }
+
+        let charset = raw_value.trim().trim_matches('"').trim_matches('\'').trim();
+        if charset.is_empty() {
+            return None;
+        }
+
+        return Some(charset.to_string());
+    }
+
+    None
+}
+
+fn charset_from_document(body: &[u8]) -> Option<String> {
+    let prefix = document_encoding_prefix(body);
+
+    capture_charset(xml_encoding_regex(), &prefix)
+        .or_else(|| capture_charset(html_meta_charset_regex(), &prefix))
+        .or_else(|| capture_charset(html_meta_content_type_regex(), &prefix))
+}
+
+fn document_encoding_prefix(body: &[u8]) -> String {
+    body.iter()
+        .take(DOCUMENT_ENCODING_SNIFF_LIMIT)
+        .map(|byte| {
+            if byte.is_ascii() {
+                byte.to_ascii_lowercase() as char
+            } else {
+                ' '
+            }
+        })
+        .collect()
+}
+
+fn capture_charset(regex: &PatternRegex, input: &str) -> Option<String> {
+    regex
+        .captures(input)
+        .and_then(|captures| captures.get(1))
+        .map(|value| value.as_str().to_string())
+}
+
+fn xml_encoding_regex() -> &'static PatternRegex {
+    static XML_ENCODING_REGEX: OnceLock<PatternRegex> = OnceLock::new();
+
+    XML_ENCODING_REGEX.get_or_init(|| {
+        PatternRegex::new(r#"<\?xml[^>]+encoding\s*=\s*["']\s*([a-z0-9._-]+)"#)
+            .expect("xml encoding regex should compile")
+    })
+}
+
+fn html_meta_charset_regex() -> &'static PatternRegex {
+    static HTML_META_CHARSET_REGEX: OnceLock<PatternRegex> = OnceLock::new();
+
+    HTML_META_CHARSET_REGEX.get_or_init(|| {
+        PatternRegex::new(r#"<meta[^>]+charset\s*=\s*["']?\s*([a-z0-9._-]+)"#)
+            .expect("html meta charset regex should compile")
+    })
+}
+
+fn html_meta_content_type_regex() -> &'static PatternRegex {
+    static HTML_META_CONTENT_TYPE_REGEX: OnceLock<PatternRegex> = OnceLock::new();
+
+    HTML_META_CONTENT_TYPE_REGEX.get_or_init(|| {
+        PatternRegex::new(r#"<meta[^>]+content\s*=\s*["'][^"']*charset\s*=\s*([a-z0-9._-]+)"#)
+            .expect("html meta content-type regex should compile")
+    })
+}
 
 #[derive(Debug, Clone)]
 pub struct Response {
@@ -24,7 +144,7 @@ pub struct Response {
 
 impl Response {
     pub fn new(url: impl Into<String>, status: u16, headers: Headers, body: Vec<u8>) -> Self {
-        let text = String::from_utf8_lossy(&body).into_owned();
+        let text = decode_response_text(&headers, &body);
 
         Self {
             url: url.into(),
@@ -39,7 +159,7 @@ impl Response {
     pub fn from_request(request: Request, status: u16, headers: Headers, body: Vec<u8>) -> Self {
         let url = request.url.clone();
         let meta = request.meta.clone();
-        let text = String::from_utf8_lossy(&body).into_owned();
+        let text = decode_response_text(&headers, &body);
 
         Self {
             url,
@@ -122,7 +242,14 @@ mod tests {
     use crate::parser::Kind;
     use crate::request::{RequestMode, SessionConfig};
     use crate::value::Value;
+    use encoding_rs::Encoding;
     use jiff::SignedDuration;
+
+    fn encode_text(label: &str, text: &str) -> Vec<u8> {
+        let encoding = Encoding::for_label(label.as_bytes()).expect("encoding should exist");
+        let (bytes, _, _) = encoding.encode(text);
+        bytes.into_owned()
+    }
 
     #[test]
     fn response_default_has_all_core_fields() {
@@ -151,6 +278,42 @@ mod tests {
             response.request.as_deref().map(|request| request.mode),
             Some(RequestMode::Browser)
         );
+    }
+
+    #[test]
+    fn response_text_is_decoded_from_content_type_charset() {
+        let body = encode_text("gbk", "你好，kun");
+        let mut headers = Headers::new();
+        headers.insert(
+            "Content-Type".to_string(),
+            vec!["text/html; charset=gbk".to_string()],
+        );
+
+        let response = Response::new("https://example.com", 200, headers, body.clone());
+
+        assert_eq!(response.body, body);
+        assert_eq!(response.text, "你好，kun");
+    }
+
+    #[test]
+    fn response_text_uses_document_declared_charset_when_header_is_missing() {
+        let html = r#"<html><head><meta charset="gbk"></head><body>中文页面</body></html>"#;
+        let body = encode_text("gbk", html);
+
+        let response = Response::new("https://example.com", 200, Headers::new(), body.clone());
+
+        assert_eq!(response.body, body);
+        assert_eq!(response.text, html);
+    }
+
+    #[test]
+    fn response_text_strips_utf8_bom_when_decoding_body() {
+        let body = vec![0xef, 0xbb, 0xbf, b'h', b'e', b'l', b'l', b'o'];
+
+        let response = Response::new("https://example.com", 200, Headers::new(), body.clone());
+
+        assert_eq!(response.body, body);
+        assert_eq!(response.text, "hello");
     }
 
     #[test]

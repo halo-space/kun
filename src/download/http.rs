@@ -283,6 +283,7 @@ fn to_std_duration(duration: SignedDuration) -> Result<std::time::Duration, Stri
 mod tests {
     use super::*;
     use crate::request::http::Config as RequestHttpConfig;
+    use encoding_rs::Encoding;
     use jiff::SignedDuration;
     use std::io::{Read, Write};
     use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -414,6 +415,28 @@ mod tests {
         assert_eq!(seen.lock().unwrap().len(), 2);
     }
 
+    #[tokio::test]
+    async fn http_downloader_decodes_response_text_from_body_using_charset() {
+        let body = encode_text("gbk", "新华测试");
+        let body_for_server = body.clone();
+        let server = spawn_server(1, move |_, _, _| TestResponse {
+            status_line: "HTTP/1.1 200 OK".to_string(),
+            headers: vec![(
+                "Content-Type".to_string(),
+                "text/html; charset=gbk".to_string(),
+            )],
+            body: body_for_server.clone(),
+            delay: None,
+        });
+        let downloader = Http::default();
+        let request = Request::new(server.url("/encoding"));
+
+        let response = downloader.fetch(&request).await.unwrap();
+
+        assert_eq!(response.body, body);
+        assert_eq!(response.text, "新华测试");
+    }
+
     fn futures_block_on<F: std::future::Future>(future: F) -> F::Output {
         use std::pin::Pin;
         use std::task::{Context, Poll, Wake, Waker};
@@ -490,6 +513,12 @@ mod tests {
             addr,
             handle: Some(handle),
         }
+    }
+
+    fn encode_text(label: &str, text: &str) -> Vec<u8> {
+        let encoding = Encoding::for_label(label.as_bytes()).expect("encoding should exist");
+        let (bytes, _, _) = encoding.encode(text);
+        bytes.into_owned()
     }
 
     fn serve<F>(listener: TcpListener, addr: SocketAddr, expected_requests: usize, mut handler: F)

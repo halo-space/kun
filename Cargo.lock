@@ -839,6 +839,7 @@ name = "halo-spider"
 version = "0.0.5"
 dependencies = [
  "async-openai",
+ "encoding_rs",
  "futures",
  "jiff",
  "playwright-rs",

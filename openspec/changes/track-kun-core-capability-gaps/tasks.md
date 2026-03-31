@@ -14,6 +14,7 @@
 - [x] 2.2 重新梳理 `response.follow()` 的派生语义，明确哪些 request 属性应继承、哪些可覆盖。
 - [ ] 2.3 让代码爬虫与 DSL 生成的 request 都走同一套 request 能力模型。
 - [x] 2.4 同步 `openspec/specs/spider-api/spec.md` 与 request/follow 相关测试。
+- [ ] 2.5 把 request-level cookies 从 `http` 私有配置进一步收口为真正的共享 request 能力，避免 browser request 使用 cookies 时退回 `Http` 模式。
 
 ## 3. Scheduler 与任务身份
 
@@ -21,6 +22,7 @@
 - [x] 3.2 明确 retry、delayed task、inflight task 在 task identity 下的行为。
 - [x] 3.3 校验 scheduler 在“同 URL 不同 meta/body/method”场景下的正确性。
 - [x] 3.4 同步 `openspec/specs/runtime-engine/spec.md` 与 scheduler 测试。
+- [ ] 3.5 明确当前 scheduler 的 memory-only 边界，并规划 durable scheduler/frontier 的最小接口或实现方向。
 
 ## 4. Cookies / Proxy / HTTP 真实能力
 
@@ -35,6 +37,9 @@
 - [x] 5.2 明确未启用 browser feature 时的行为边界，应为显式失败还是受限 stub。
 - [x] 5.3 为 browser 模式补最小可验证的真实行为测试或契约测试。
 - [x] 5.4 同步 `openspec/specs/spider-api/spec.md` 与相关文档。
+- [x] 5.5 为 browser response 补真实的 `status`、`headers`、`protocol`、`ip_address`、`certificate` 等网络元数据，或明确并固化受限语义。
+- [ ] 5.6 让 browser downloader 接住统一 request-level cookies 语义，而不是只复用 session 持久态。
+- [ ] 5.7 为相同 browser session 的并发执行建立最小协调策略，避免共享 user data dir 时出现竞态。
 
 ## 6. Parser 缺口补齐
 
@@ -83,3 +88,9 @@
 - [x] 11.4 清理 `engine` 内部局部命名，去掉 `sem` 一类缩写，统一使用 `global_semaphore`、`domain_semaphore` 这类完整命名。
 - [x] 11.5 如果本轮仍暂时保留单文件实现，下一轮评估将任务执行相关逻辑拆到独立子模块，至少明确 `task executor` / `task decision apply` 的拆分边界。
 - [x] 11.6 统一 `engine` 内部任务执行命名语义，避免 `TaskOutcome`、`TaskResult`、`execute_task_inner()`、`flow_to_outcome()` 这类跨层级混用；明确“middleware flow”“task decision/result”“result apply/handle”各自的命名边界。
+
+## 12. Response Body / Text 语义
+
+- [x] 12.1 明确 `Response.body` 保存原始字节，`Response.text` 是从 `body` 解码得到的字符串视图，而不是单独维护另一份来源。
+- [x] 12.2 为 `Response` 构造路径补统一的文本解码逻辑，优先使用 BOM、`Content-Type charset` 与文档声明，再回退 UTF-8 lossy。
+- [x] 12.3 为 HTTP 下载链路补编码回归测试，并同步 `openspec/specs/spider-api/spec.md`、`README.md`、`TODO.md`。
