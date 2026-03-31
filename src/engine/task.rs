@@ -1,72 +1,69 @@
 use crate::download::traits::Downloader;
 use crate::engine::context::EngineContext;
-use crate::engine::types::Flow;
+use crate::engine::flow::Flow;
 use crate::error::SpiderError;
-use crate::middleware::{MiddlewareChain, MiddlewareType};
+use crate::middleware::{Chain, Stage};
 use crate::request::{Request, RequestMode};
 use crate::rules::Compiled;
-use crate::scheduler::traits::Scheduler;
-use crate::scheduler::types::{ScheduledTask, TaskId};
+use crate::scheduler::{Scheduler, Task, TaskId};
 use crate::spider::{Output as SpiderOutput, Spider};
 use std::sync::Arc;
 
-pub(super) async fn apply_task_execution_result<S: Scheduler>(
-    result: TaskExecutionResult,
+pub(super) async fn apply_task_run<S: Scheduler>(
+    run: TaskRun,
     scheduler: &mut S,
     allowed_domains: &[String],
     outputs: &mut Vec<SpiderOutput>,
     round: &mut usize,
     spider_name: &str,
 ) -> Result<(), SpiderError> {
-    let task_id = result.task_id;
-    let url = result.url;
-    match result.decision {
-        TaskDecision::Success(output) => {
+    let task_id = run.task_id;
+    let url = run.url;
+    match run.outcome {
+        TaskOutcome::Success(output) => {
             *round += 1;
             tracing::info!(
                 spider = spider_name,
                 round = *round,
                 items = output.items.len(),
                 follows = output.follows.len(),
-                "完成第 {} 轮解析",
+                "completed parse round {}",
                 round,
             );
             for follow in &output.follows {
                 if follow.dont_filter || super::is_domain_allowed(&follow.url, allowed_domains) {
-                    scheduler
-                        .enqueue(ScheduledTask::new(follow.clone()))
-                        .await?;
+                    scheduler.enqueue(Task::new(follow.clone())).await?;
                 }
             }
-            scheduler.ack(&task_id).await?;
+            scheduler.complete(&task_id).await?;
             outputs.push(SpiderOutput {
                 items: output.items,
                 requests: output.follows,
             });
         }
-        TaskDecision::Retry(retry_task) => {
+        TaskOutcome::Retry(retry_task) => {
             scheduler.enqueue(*retry_task).await?;
-            scheduler.ack(&task_id).await?;
+            scheduler.complete(&task_id).await?;
         }
-        TaskDecision::Drop => {
-            scheduler.ack(&task_id).await?;
+        TaskOutcome::Drop => {
+            scheduler.complete(&task_id).await?;
         }
-        TaskDecision::Error(error) => {
-            tracing::error!(spider = spider_name, url = url.as_str(), error = %error, "任务出错");
-            scheduler.nack(&task_id).await?;
+        TaskOutcome::Error(error) => {
+            tracing::error!(spider = spider_name, url = url.as_str(), error = %error, "task failed");
+            scheduler.requeue(&task_id).await?;
         }
     }
     Ok(())
 }
 
-pub(super) struct TaskExecutionLease {
+pub(super) struct TaskRunReservation {
     task_id: TaskId,
     request: Request,
-    _global_permit_guard: tokio::sync::OwnedSemaphorePermit,
+    global_permit_guard: tokio::sync::OwnedSemaphorePermit,
     domain_semaphore: Arc<tokio::sync::Semaphore>,
 }
 
-impl TaskExecutionLease {
+impl TaskRunReservation {
     pub(super) fn new(
         task_id: TaskId,
         request: Request,
@@ -76,7 +73,7 @@ impl TaskExecutionLease {
         Self {
             task_id,
             request,
-            _global_permit_guard: global_permit_guard,
+            global_permit_guard,
             domain_semaphore,
         }
     }
@@ -87,8 +84,8 @@ pub(super) struct TaskExecutor<'a, H, B, P, Sp> {
     pub(super) http: &'a H,
     pub(super) browser: &'a B,
     pub(super) pipeline: &'a P,
-    pub(super) engine_middleware: &'a MiddlewareChain,
-    pub(super) step_middleware: &'a MiddlewareChain,
+    pub(super) engine_chain: &'a Chain,
+    pub(super) step_chain: &'a Chain,
     pub(super) spider: &'a Sp,
     pub(super) compiled: Option<&'a Compiled>,
     pub(super) allowed_domains: &'a [String],
@@ -102,52 +99,49 @@ where
     P: crate::pipeline::Pipeline,
     Sp: Spider,
 {
-    pub(super) async fn execute_with_permits(
-        self,
-        lease: TaskExecutionLease,
-    ) -> TaskExecutionResult {
-        let TaskExecutionLease {
+    pub(super) async fn run_with_reservation(self, reservation: TaskRunReservation) -> TaskRun {
+        let TaskRunReservation {
             task_id,
             request,
-            _global_permit_guard,
+            global_permit_guard: _global_permit_guard,
             domain_semaphore,
-        } = lease;
+        } = reservation;
 
         let url = request.url.clone();
         let _domain_permit_guard = match domain_semaphore.acquire().await {
             Ok(permit) => permit,
             Err(_) => {
-                return TaskExecutionResult {
+                return TaskRun {
                     task_id,
                     url,
-                    decision: TaskDecision::Error(SpiderError::engine("domain semaphore closed")),
+                    outcome: TaskOutcome::Error(SpiderError::engine("domain semaphore closed")),
                 };
             }
         };
 
-        let decision = self.decide_execution(task_id.clone(), request).await;
+        let outcome = self.run(task_id.clone(), request).await;
 
-        TaskExecutionResult {
+        TaskRun {
             task_id,
             url,
-            decision,
+            outcome,
         }
     }
 
-    pub(super) async fn decide_execution(self, task_id: TaskId, request: Request) -> TaskDecision {
+    pub(super) async fn run(self, task_id: TaskId, request: Request) -> TaskOutcome {
         let mut context = EngineContext::new(request).with_task_id(task_id);
 
         match run_middleware_request(
-            self.engine_middleware,
-            self.step_middleware,
-            MiddlewareType::Download,
+            self.engine_chain,
+            self.step_chain,
+            Stage::Download,
             &mut context,
         )
         .await
         {
             Ok(Flow::Continue) => {}
-            Ok(flow) => return map_flow_to_task_decision(flow, &context),
-            Err(error) => return TaskDecision::Error(error),
+            Ok(flow) => return map_flow_to_task_outcome(flow, &context),
+            Err(error) => return TaskOutcome::Error(error),
         }
 
         let response = match context.request.mode {
@@ -158,19 +152,19 @@ where
         let response = match response {
             Ok(response) => response,
             Err(error) => {
-                tracing::warn!(url = context.request.url.as_str(), error = %error, "下载失败");
+                tracing::warn!(url = context.request.url.as_str(), error = %error, "download failed");
                 match run_middleware_exception(
-                    self.engine_middleware,
-                    self.step_middleware,
-                    MiddlewareType::Download,
+                    self.engine_chain,
+                    self.step_chain,
+                    Stage::Download,
                     &mut context,
                     &error,
                 )
                 .await
                 {
-                    Ok(Flow::Continue) => return TaskDecision::Error(error),
-                    Ok(flow) => return map_flow_to_task_decision(flow, &context),
-                    Err(middleware_error) => return TaskDecision::Error(middleware_error),
+                    Ok(Flow::Continue) => return TaskOutcome::Error(error),
+                    Ok(flow) => return map_flow_to_task_outcome(flow, &context),
+                    Err(middleware_error) => return TaskOutcome::Error(middleware_error),
                 }
             }
         };
@@ -178,29 +172,29 @@ where
         context.response = Some(response.clone());
 
         match run_middleware_response(
-            self.engine_middleware,
-            self.step_middleware,
-            MiddlewareType::Download,
+            self.engine_chain,
+            self.step_chain,
+            Stage::Download,
             &mut context,
         )
         .await
         {
             Ok(Flow::Continue) => {}
-            Ok(flow) => return map_flow_to_task_decision(flow, &context),
-            Err(error) => return TaskDecision::Error(error),
+            Ok(flow) => return map_flow_to_task_outcome(flow, &context),
+            Err(error) => return TaskOutcome::Error(error),
         }
 
         match run_middleware_request(
-            self.engine_middleware,
-            self.step_middleware,
-            MiddlewareType::Spider,
+            self.engine_chain,
+            self.step_chain,
+            Stage::Spider,
             &mut context,
         )
         .await
         {
             Ok(Flow::Continue) => {}
-            Ok(flow) => return map_flow_to_task_decision(flow, &context),
-            Err(error) => return TaskDecision::Error(error),
+            Ok(flow) => return map_flow_to_task_outcome(flow, &context),
+            Err(error) => return TaskOutcome::Error(error),
         }
 
         let output = self.spider.dispatch(&response, self.compiled).await;
@@ -208,16 +202,16 @@ where
         match output {
             Ok(mut output) => {
                 match run_middleware_response(
-                    self.engine_middleware,
-                    self.step_middleware,
-                    MiddlewareType::Spider,
+                    self.engine_chain,
+                    self.step_chain,
+                    Stage::Spider,
                     &mut context,
                 )
                 .await
                 {
                     Ok(Flow::Continue) => {}
-                    Ok(flow) => return map_flow_to_task_decision(flow, &context),
-                    Err(error) => return TaskDecision::Error(error),
+                    Ok(flow) => return map_flow_to_task_outcome(flow, &context),
+                    Err(error) => return TaskOutcome::Error(error),
                 }
 
                 let mut kept_items = Vec::with_capacity(output.items.len());
@@ -225,15 +219,15 @@ where
                     match self.pipeline.process(&mut item, self.spider_name).await {
                         Ok(true) => kept_items.push(item),
                         Ok(false) => {
-                            tracing::debug!(spider = self.spider_name, "pipeline 丢弃 item");
+                            tracing::debug!(spider = self.spider_name, "pipeline dropped item");
                         }
                         Err(error) => {
                             tracing::warn!(
                                 spider = self.spider_name,
                                 error = %error,
-                                "pipeline 处理 item 出错"
+                                "pipeline failed while processing item"
                             );
-                            return TaskDecision::Error(error);
+                            return TaskOutcome::Error(error);
                         }
                     }
                 }
@@ -247,12 +241,12 @@ where
                     } else {
                         tracing::debug!(
                             url = request.url.as_str(),
-                            "域名不在 allowed_domains 内，已过滤"
+                            "request filtered out because domain is not in allowed_domains"
                         );
                     }
                 }
 
-                TaskDecision::Success(TaskSuccess {
+                TaskOutcome::Success(TaskOutput {
                     items: kept_items,
                     follows,
                 })
@@ -262,20 +256,20 @@ where
                     spider = self.spider_name,
                     url = context.request.url.as_str(),
                     error = %error,
-                    "解析回调执行失败"
+                    "spider callback failed"
                 );
                 match run_middleware_exception(
-                    self.engine_middleware,
-                    self.step_middleware,
-                    MiddlewareType::Spider,
+                    self.engine_chain,
+                    self.step_chain,
+                    Stage::Spider,
                     &mut context,
                     &error,
                 )
                 .await
                 {
-                    Ok(Flow::Continue) => TaskDecision::Error(error),
-                    Ok(flow) => map_flow_to_task_decision(flow, &context),
-                    Err(middleware_error) => TaskDecision::Error(middleware_error),
+                    Ok(Flow::Continue) => TaskOutcome::Error(error),
+                    Ok(flow) => map_flow_to_task_outcome(flow, &context),
+                    Err(middleware_error) => TaskOutcome::Error(middleware_error),
                 }
             }
         }
@@ -283,53 +277,51 @@ where
 }
 
 pub(super) async fn run_middleware_request(
-    engine_middleware: &MiddlewareChain,
-    step_middleware: &MiddlewareChain,
-    kind: MiddlewareType,
+    engine_chain: &Chain,
+    step_chain: &Chain,
+    stage: Stage,
     context: &mut EngineContext,
 ) -> Result<Flow, SpiderError> {
-    let flow = engine_middleware.process_request(kind, context).await?;
+    let flow = engine_chain.process_request(stage, context).await?;
     if !matches!(flow, Flow::Continue) {
         return Ok(flow);
     }
-    step_middleware.process_request(kind, context).await
+    step_chain.process_request(stage, context).await
 }
 
 pub(super) async fn run_middleware_response(
-    engine_middleware: &MiddlewareChain,
-    step_middleware: &MiddlewareChain,
-    kind: MiddlewareType,
+    engine_chain: &Chain,
+    step_chain: &Chain,
+    stage: Stage,
     context: &mut EngineContext,
 ) -> Result<Flow, SpiderError> {
-    let flow = engine_middleware.process_response(kind, context).await?;
+    let flow = engine_chain.process_response(stage, context).await?;
     if !matches!(flow, Flow::Continue) {
         return Ok(flow);
     }
-    step_middleware.process_response(kind, context).await
+    step_chain.process_response(stage, context).await
 }
 
 async fn run_middleware_exception(
-    engine_middleware: &MiddlewareChain,
-    step_middleware: &MiddlewareChain,
-    kind: MiddlewareType,
+    engine_chain: &Chain,
+    step_chain: &Chain,
+    stage: Stage,
     context: &mut EngineContext,
     error: &SpiderError,
 ) -> Result<Flow, SpiderError> {
-    let flow = engine_middleware
-        .process_exception(kind, context, error)
+    let flow = engine_chain
+        .process_exception(stage, context, error)
         .await?;
     if !matches!(flow, Flow::Continue) {
         return Ok(flow);
     }
-    step_middleware
-        .process_exception(kind, context, error)
-        .await
+    step_chain.process_exception(stage, context, error).await
 }
 
-fn map_flow_to_task_decision(flow: Flow, context: &EngineContext) -> TaskDecision {
+fn map_flow_to_task_outcome(flow: Flow, context: &EngineContext) -> TaskOutcome {
     match flow {
         Flow::Continue => unreachable!(),
-        Flow::Drop(_) => TaskDecision::Drop,
+        Flow::Drop(_) => TaskOutcome::Drop,
         Flow::Retry { reason, backoff_ms } => {
             let retries = context
                 .request
@@ -357,30 +349,28 @@ fn map_flow_to_task_decision(flow: Flow, context: &EngineContext) -> TaskDecisio
             }
 
             let task = match backoff_ms {
-                Some(ms) if ms > 0 => {
-                    ScheduledTask::with_task_id_and_delay(request, context.task_id.clone(), ms)
-                }
-                _ => ScheduledTask::with_task_id(request, context.task_id.clone()),
+                Some(ms) if ms > 0 => Task::with_id_and_delay(request, context.task_id.clone(), ms),
+                _ => Task::with_id(request, context.task_id.clone()),
             };
-            TaskDecision::Retry(Box::new(task))
+            TaskOutcome::Retry(Box::new(task))
         }
     }
 }
 
-pub(super) struct TaskExecutionResult {
+pub(super) struct TaskRun {
     task_id: TaskId,
     url: String,
-    decision: TaskDecision,
+    outcome: TaskOutcome,
 }
 
-pub(super) enum TaskDecision {
-    Success(TaskSuccess),
-    Retry(Box<ScheduledTask>),
+pub(super) enum TaskOutcome {
+    Success(TaskOutput),
+    Retry(Box<Task>),
     Drop,
     Error(SpiderError),
 }
 
-pub(super) struct TaskSuccess {
+pub(super) struct TaskOutput {
     pub(super) items: Vec<crate::item::Item>,
     pub(super) follows: Vec<Request>,
 }

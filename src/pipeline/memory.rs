@@ -3,16 +3,16 @@ use crate::item::Item;
 use crate::pipeline::Pipeline;
 use std::sync::{Arc, Mutex};
 
-/// 将处理过的 Item 保存在内存中的内置 pipeline。
+/// Built-in pipeline that keeps processed items in memory.
 ///
-/// 这个类型主要用于测试、调试或最小化示例。
+/// This type is mainly useful for tests, debugging, and minimal examples.
 #[derive(Debug, Clone, Default)]
 pub struct Memory {
     items: Arc<Mutex<Vec<Item>>>,
 }
 
 impl Memory {
-    /// 返回当前已经写入内存的所有 Item 快照。
+    /// Return a snapshot of all items currently stored in memory.
     pub fn items(&self) -> Vec<Item> {
         self.items.lock().expect("pipeline memory poisoned").clone()
     }

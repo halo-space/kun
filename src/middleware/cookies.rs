@@ -1,5 +1,5 @@
 use crate::engine::context::EngineContext;
-use crate::engine::types::Flow;
+use crate::engine::flow::Flow;
 use crate::error::SpiderError;
 use crate::future::BoxFuture;
 use crate::middleware::traits::Middleware;
@@ -8,11 +8,11 @@ use crate::value::Value;
 use std::collections::BTreeMap;
 
 #[derive(Default)]
-pub struct CookiesMiddleware {
+pub struct Cookies {
     default_session: Option<String>,
 }
 
-impl CookiesMiddleware {
+impl Cookies {
     pub fn new(options: &BTreeMap<String, Value>) -> Self {
         Self {
             default_session: options
@@ -43,7 +43,7 @@ impl CookiesMiddleware {
     }
 }
 
-impl Middleware for CookiesMiddleware {
+impl Middleware for Cookies {
     fn process_request<'a>(
         &'a self,
         context: &'a mut EngineContext,
@@ -102,7 +102,7 @@ mod tests {
 
     #[test]
     fn cookies_middleware_assigns_default_session_and_normalizes_cookie_header() {
-        let middleware = CookiesMiddleware::new(
+        let middleware = Cookies::new(
             &[("session".to_string(), Value::String("shared".to_string()))]
                 .into_iter()
                 .collect(),
@@ -130,7 +130,7 @@ mod tests {
 
     #[test]
     fn cookies_middleware_keeps_explicit_session() {
-        let middleware = CookiesMiddleware::new(
+        let middleware = Cookies::new(
             &[("session".to_string(), Value::String("shared".to_string()))]
                 .into_iter()
                 .collect(),
@@ -145,7 +145,7 @@ mod tests {
 
     #[test]
     fn cookies_middleware_normalizes_browser_request_cookie_header_without_switching_mode() {
-        let middleware = CookiesMiddleware::default();
+        let middleware = Cookies::default();
         let mut context = EngineContext::new(
             Request::browser("https://example.com").with_header("Cookie", "sid=abc; theme=light"),
         );

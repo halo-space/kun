@@ -1,5 +1,5 @@
 use crate::engine::context::EngineContext;
-use crate::engine::types::Flow;
+use crate::engine::flow::Flow;
 use crate::error::SpiderError;
 use crate::future::BoxFuture;
 use crate::middleware::traits::Middleware;
@@ -8,14 +8,14 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::Mutex;
 
 #[derive(Default)]
-pub struct DedupMiddleware {
+pub struct Dedup {
     keys: Vec<String>,
     scope: String,
     namespace: Option<String>,
     seen: Mutex<HashSet<String>>,
 }
 
-impl DedupMiddleware {
+impl Dedup {
     pub fn new(options: &BTreeMap<String, Value>) -> Self {
         Self {
             keys: parse_keys(options),
@@ -72,7 +72,7 @@ impl DedupMiddleware {
     }
 }
 
-impl Middleware for DedupMiddleware {
+impl Middleware for Dedup {
     fn process_request<'a>(
         &'a self,
         context: &'a mut EngineContext,
@@ -132,7 +132,7 @@ mod tests {
 
     #[test]
     fn dedup_supports_multi_key_scope_from_request_meta() {
-        let middleware = DedupMiddleware::new(
+        let middleware = Dedup::new(
             &[
                 (
                     "key".to_string(),

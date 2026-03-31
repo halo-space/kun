@@ -1,5 +1,5 @@
 use crate::engine::context::EngineContext;
-use crate::engine::types::Flow;
+use crate::engine::flow::Flow;
 use crate::error::SpiderError;
 use crate::future::BoxFuture;
 use crate::middleware::traits::Middleware;
@@ -9,12 +9,12 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Default)]
-pub struct IntervalGateMiddleware {
+pub struct IntervalGate {
     interval_ms: u64,
     next_allowed_ms: Mutex<u64>,
 }
 
-impl IntervalGateMiddleware {
+impl IntervalGate {
     pub fn new(options: &BTreeMap<String, Value>) -> Self {
         Self {
             interval_ms: options
@@ -26,7 +26,7 @@ impl IntervalGateMiddleware {
     }
 }
 
-impl Middleware for IntervalGateMiddleware {
+impl Middleware for IntervalGate {
     fn process_request<'a>(
         &'a self,
         _context: &'a mut EngineContext,

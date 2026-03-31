@@ -1,7 +1,8 @@
 use crate::request::Request;
 use crate::response::Response;
-use crate::scheduler::types::TaskId;
+use crate::scheduler::TaskId;
 
+/// Shared request/response context passed through engine middleware hooks.
 #[derive(Debug, Clone)]
 pub struct EngineContext {
     pub task_id: TaskId,
@@ -10,6 +11,7 @@ pub struct EngineContext {
 }
 
 impl EngineContext {
+    /// Creates a new middleware context for a request.
     pub fn new(request: Request) -> Self {
         Self {
             task_id: TaskId::new(),
@@ -18,13 +20,9 @@ impl EngineContext {
         }
     }
 
+    /// Replaces the task identity carried by this context.
     pub fn with_task_id(mut self, task_id: TaskId) -> Self {
         self.task_id = task_id;
-        self
-    }
-
-    pub fn with_response(mut self, response: Response) -> Self {
-        self.response = Some(response);
         self
     }
 }

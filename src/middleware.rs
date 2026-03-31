@@ -1,5 +1,6 @@
 pub mod chain;
 pub mod concurrency_gate;
+pub mod config;
 pub mod cookies;
 pub mod dedup;
 pub mod interval_gate;
@@ -8,25 +9,24 @@ pub mod rate_limit;
 pub mod retry_by_error;
 pub mod retry_by_status;
 pub mod traits;
-pub mod types;
 
 use crate::error::SpiderError;
 use crate::value::Value;
 use std::collections::BTreeMap;
 
-pub use chain::{MiddlewareChain, MiddlewareEntry};
-pub use concurrency_gate::ConcurrencyGateMiddleware;
-pub use cookies::CookiesMiddleware;
-pub use dedup::DedupMiddleware;
-pub use interval_gate::IntervalGateMiddleware;
-pub use proxy::ProxyMiddleware;
-pub use rate_limit::RateLimitMiddleware;
-pub use retry_by_error::RetryByErrorMiddleware;
-pub use retry_by_status::RetryByStatusMiddleware;
+pub use chain::{Chain, Entry};
+pub use concurrency_gate::ConcurrencyGate;
+pub use config::{Config, Stage};
+pub use cookies::Cookies;
+pub use dedup::Dedup;
+pub use interval_gate::IntervalGate;
+pub use proxy::Proxy;
+pub use rate_limit::RateLimit;
+pub use retry_by_error::RetryByError;
+pub use retry_by_status::RetryByStatus;
 pub use traits::Middleware;
-pub use types::{MiddlewareConfig, MiddlewareType};
 
-pub type Map = BTreeMap<String, MiddlewareConfig>;
+pub type Map = BTreeMap<String, Config>;
 
 /// Factory function: takes options from middleware config, returns a middleware instance.
 pub type Factory =
@@ -34,11 +34,11 @@ pub type Factory =
 
 /// Registry of custom middleware factories keyed by middleware name.
 #[derive(Default)]
-pub struct FactoryRegistry {
+pub struct Registry {
     factories: BTreeMap<String, Factory>,
 }
 
-impl FactoryRegistry {
+impl Registry {
     pub fn new() -> Self {
         Self::default()
     }
@@ -59,8 +59,8 @@ impl FactoryRegistry {
     }
 }
 
-pub fn build(configs: &Map, custom: &FactoryRegistry) -> Result<MiddlewareChain, SpiderError> {
-    let mut chain = MiddlewareChain::default();
+pub fn build(configs: &Map, custom: &Registry) -> Result<Chain, SpiderError> {
+    let mut chain = Chain::default();
 
     for (key, config) in configs {
         chain.push(
@@ -76,19 +76,19 @@ pub fn build(configs: &Map, custom: &FactoryRegistry) -> Result<MiddlewareChain,
 fn instantiate(
     key: &str,
     configs: &Map,
-    custom: &FactoryRegistry,
+    custom: &Registry,
 ) -> Result<Box<dyn Middleware>, SpiderError> {
     let options = &configs[key].options;
 
     let middleware: Box<dyn Middleware> = match key {
-        "retry_by_status" => Box::new(RetryByStatusMiddleware::new(options)),
-        "retry_by_error" => Box::new(RetryByErrorMiddleware::new(options)),
-        "dedup" => Box::new(DedupMiddleware::new(options)),
-        "concurrency_gate" => Box::new(ConcurrencyGateMiddleware::new(options)),
-        "interval_gate" => Box::new(IntervalGateMiddleware::new(options)),
-        "rate_limit" => Box::new(RateLimitMiddleware::new(options)),
-        "cookies" => Box::new(CookiesMiddleware::new(options)),
-        "proxy" => Box::new(ProxyMiddleware::new(options)),
+        "retry_by_status" => Box::new(RetryByStatus::new(options)),
+        "retry_by_error" => Box::new(RetryByError::new(options)),
+        "dedup" => Box::new(Dedup::new(options)),
+        "concurrency_gate" => Box::new(ConcurrencyGate::new(options)),
+        "interval_gate" => Box::new(IntervalGate::new(options)),
+        "rate_limit" => Box::new(RateLimit::new(options)),
+        "cookies" => Box::new(Cookies::new(options)),
+        "proxy" => Box::new(Proxy::new(options)),
         other => {
             if let Some(factory) = custom.factories.get(other) {
                 factory(options)?

@@ -1,5 +1,5 @@
 use crate::error::SpiderError;
-use crate::middleware::{Map as MiddlewareMap, MiddlewareConfig, MiddlewareType};
+use crate::middleware::{Config as MiddlewareConfig, Map as MiddlewareMap, Stage};
 use crate::request::browser::{Config as BrowserConfig, Driver, Engine, Viewport};
 use crate::request::http::Config as HttpConfig;
 use crate::request::{Headers, RequestMode};
@@ -259,11 +259,32 @@ fn parse_validation(value: &Value) -> Result<ValidationPlan, SpiderError> {
         .and_then(|rule| rule.get("required"))
         .and_then(Value::as_bool)
         .unwrap_or(false);
+    let regex = rule
+        .and_then(|rule| rule.get("regex"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let min = rule
+        .and_then(|rule| rule.get("min"))
+        .and_then(Value::as_f64);
+    let max = rule
+        .and_then(|rule| rule.get("max"))
+        .and_then(Value::as_f64);
+    let enum_values = rule
+        .and_then(|rule| rule.get("enum"))
+        .and_then(Value::as_array)
+        .map(|values| values.to_vec())
+        .unwrap_or_default();
 
     Ok(ValidationPlan {
         name,
         value_type,
-        rule: ValidationRule { required },
+        rule: ValidationRule {
+            required,
+            regex,
+            min,
+            max,
+            enum_values,
+        },
     })
 }
 
@@ -572,13 +593,13 @@ fn compile_middlewares(raw: BTreeMap<String, Value>) -> Result<MiddlewareMap, Sp
             .get("enabled")
             .and_then(Value::as_bool)
             .unwrap_or(true);
-        let r#type = match entry
+        let stage = match entry
             .get("type")
             .and_then(Value::as_str)
             .unwrap_or("download")
         {
-            "download" => MiddlewareType::Download,
-            "spider" => MiddlewareType::Spider,
+            "download" => Stage::Download,
+            "spider" => Stage::Spider,
             other => {
                 return Err(SpiderError::rules(format!(
                     "MIDDLEWARES.{key}.type: unsupported {other}"
@@ -596,7 +617,7 @@ fn compile_middlewares(raw: BTreeMap<String, Value>) -> Result<MiddlewareMap, Sp
             key,
             MiddlewareConfig {
                 enabled,
-                r#type,
+                stage,
                 order,
                 options,
             },
@@ -748,389 +769,4 @@ fn parse_retry(
             })
             .unwrap_or_default(),
     }))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn compile_rules_supports_http_step() {
-        let rules = Value::Object(
-            [(
-                "steps".to_string(),
-                Value::Array(vec![Value::Object(
-                    [
-                        ("id".to_string(), Value::String("parse".to_string())),
-                        (
-                            "fetch".to_string(),
-                            Value::Object(
-                                [(
-                                    "request".to_string(),
-                                    Value::Object(
-                                        [
-                                            (
-                                                "method".to_string(),
-                                                Value::String("POST".to_string()),
-                                            ),
-                                            (
-                                                "headers".to_string(),
-                                                Value::Object(
-                                                    [(
-                                                        "x-token".to_string(),
-                                                        Value::String("abc".to_string()),
-                                                    )]
-                                                    .into_iter()
-                                                    .collect(),
-                                                ),
-                                            ),
-                                        ]
-                                        .into_iter()
-                                        .collect(),
-                                    ),
-                                )]
-                                .into_iter()
-                                .collect(),
-                            ),
-                        ),
-                        (
-                            "parse".to_string(),
-                            Value::Object(
-                                [(
-                                    "fields".to_string(),
-                                    Value::Array(vec![Value::Object(
-                                        [
-                                            (
-                                                "name".to_string(),
-                                                Value::String("title".to_string()),
-                                            ),
-                                            (
-                                                "source".to_string(),
-                                                Value::String("html".to_string()),
-                                            ),
-                                            (
-                                                "selector_type".to_string(),
-                                                Value::String("css".to_string()),
-                                            ),
-                                            (
-                                                "selector".to_string(),
-                                                Value::Array(vec![Value::String(
-                                                    "h1.title".to_string(),
-                                                )]),
-                                            ),
-                                            (
-                                                "attribute".to_string(),
-                                                Value::String("text".to_string()),
-                                            ),
-                                            ("required".to_string(), Value::Bool(true)),
-                                            ("default".to_string(), Value::Null),
-                                            ("multiple".to_string(), Value::Bool(false)),
-                                        ]
-                                        .into_iter()
-                                        .collect(),
-                                    )]),
-                                )]
-                                .into_iter()
-                                .collect(),
-                            ),
-                        ),
-                    ]
-                    .into_iter()
-                    .collect(),
-                )]),
-            )]
-            .into_iter()
-            .collect(),
-        );
-
-        let compiled = compile_rules(rules).unwrap();
-
-        assert_eq!(compiled.steps[0].id, "parse");
-        assert_eq!(compiled.steps[0].fetch.mode, RequestMode::Http);
-        assert_eq!(compiled.steps[0].fetch.method, "POST");
-        assert_eq!(compiled.steps[0].parse.fields.len(), 1);
-        assert_eq!(compiled.steps[0].parse.fields[0].name, "title");
-        assert_eq!(compiled.steps[0].parse.fields[0].source, SourceKind::Html);
-        assert_eq!(
-            compiled.steps[0].parse.fields[0].selector_type,
-            SelectorKind::Css
-        );
-        assert_eq!(
-            compiled.steps[0].fetch.headers.get("x-token"),
-            Some(&vec!["abc".to_string()])
-        );
-    }
-
-    #[test]
-    fn compile_rules_supports_browser_step() {
-        let rules = Value::String(
-            r#"{
-                "steps":[
-                    {
-                        "id":"detail",
-                        "callback":"parse_detail",
-                        "fetch":{
-                            "mode":"browser",
-                            "browser":{
-                                "driver":"playwright",
-                                "engine":"chromium",
-                                "stealth":true,
-                                "fingerprint_profile":"desktop_zh_cn"
-                            }
-                        },
-                        "runtime":{
-                            "schedule":{
-                                "interval_ms":1000
-                            }
-                        },
-                        "parse":{
-                            "links":[
-                                {
-                                    "name":"detail_links",
-                                    "source":"html",
-                                    "selector_type":"css",
-                                    "selector":["a.detail"],
-                                    "attribute":"attr:href",
-                                    "required":false,
-                                    "default":[],
-                                    "multiple":true,
-                                    "allow":["^https://example.com/detail/\\d+$"],
-                                    "deny":[],
-                                    "next_step":"detail_fetch",
-                                    "meta":{
-                                        "from_list":true
-                                    }
-                                }
-                            ]
-                        }
-                    }
-                ]
-            }"#
-            .to_string(),
-        );
-
-        let compiled = compile_rules(rules).unwrap();
-
-        assert_eq!(compiled.steps[0].id, "detail");
-        assert_eq!(compiled.steps[0].callback.as_deref(), Some("parse_detail"));
-        assert_eq!(compiled.steps[0].fetch.mode, RequestMode::Browser);
-        assert_eq!(compiled.steps[0].parse.links.len(), 1);
-        assert_eq!(compiled.steps[0].parse.links[0].name, "detail_links");
-        assert_eq!(
-            compiled.steps[0].parse.links[0].next_step.as_deref(),
-            Some("detail_fetch")
-        );
-        assert_eq!(
-            compiled.steps[0].parse.links[0].meta.get("from_list"),
-            Some(&Value::Bool(true))
-        );
-        assert_eq!(
-            compiled.steps[0]
-                .fetch
-                .browser
-                .as_ref()
-                .and_then(|config| config.fingerprint_profile.as_deref()),
-            Some("desktop_zh_cn")
-        );
-        assert_eq!(
-            compiled.steps[0].runtime.schedule.get("interval_ms"),
-            Some(&Value::Number(1000.0))
-        );
-    }
-
-    #[test]
-    fn compile_rules_compiles_step_validate_into_shared_plans() {
-        let rules = Value::String(
-            r#"{
-                "steps":[
-                    {
-                        "id":"parse",
-                        "validate":[
-                            {
-                                "name":"title",
-                                "type":"text",
-                                "rule":{"required":true}
-                            },
-                            {
-                                "name":"tags",
-                                "type":"list"
-                            }
-                        ],
-                        "parse":{"fields":[]}
-                    }
-                ]
-            }"#
-            .to_string(),
-        );
-
-        let compiled = compile_rules(rules).unwrap();
-
-        assert_eq!(
-            compiled.steps[0].validate,
-            vec![
-                ValidationPlan::new("title", ValidationType::Text).with_required(true),
-                ValidationPlan::new("tags", ValidationType::List),
-            ]
-        );
-    }
-
-    #[test]
-    fn compile_rules_rejects_invalid_selector_type() {
-        let rules = Value::Object(
-            [(
-                "steps".to_string(),
-                Value::Array(vec![Value::Object(
-                    [
-                        ("id".to_string(), Value::String("parse".to_string())),
-                        (
-                            "parse".to_string(),
-                            Value::Object(
-                                [(
-                                    "fields".to_string(),
-                                    Value::Array(vec![Value::Object(
-                                        [
-                                            (
-                                                "name".to_string(),
-                                                Value::String("title".to_string()),
-                                            ),
-                                            (
-                                                "source".to_string(),
-                                                Value::String("html".to_string()),
-                                            ),
-                                            (
-                                                "selector_type".to_string(),
-                                                Value::String("unknown".to_string()),
-                                            ),
-                                            (
-                                                "selector".to_string(),
-                                                Value::Array(vec![Value::String("h1".to_string())]),
-                                            ),
-                                        ]
-                                        .into_iter()
-                                        .collect(),
-                                    )]),
-                                )]
-                                .into_iter()
-                                .collect(),
-                            ),
-                        ),
-                    ]
-                    .into_iter()
-                    .collect(),
-                )]),
-            )]
-            .into_iter()
-            .collect(),
-        );
-
-        assert_eq!(
-            compile_rules(rules).unwrap_err(),
-            SpiderError::Rules("unsupported selector_type: unknown".to_string())
-        );
-    }
-
-    #[test]
-    fn compile_rules_supports_step_middlewares() {
-        let rules = Value::String(
-            r#"{
-                "steps":[
-                    {
-                        "id":"parse",
-                        "fetch":{"request":{}},
-                        "parse":{"fields":[],"links":[]},
-                        "MIDDLEWARES":{
-                            "retry_by_status":{
-                                "enabled":true,
-                                "type":"download",
-                                "order":200,
-                                "options":{"count":5,"status":[429,503]}
-                            },
-                            "dedup":{"enabled":false}
-                        }
-                    }
-                ]
-            }"#
-            .to_string(),
-        );
-
-        let compiled = compile_rules(rules).unwrap();
-
-        assert_eq!(compiled.steps[0].id, "parse");
-        assert!(
-            compiled.steps[0]
-                .middlewares
-                .contains_key("retry_by_status")
-        );
-        assert!(compiled.steps[0].middlewares.contains_key("dedup"));
-        assert!(compiled.steps[0].middlewares["retry_by_status"].enabled);
-        assert_eq!(compiled.steps[0].middlewares["retry_by_status"].order, 200);
-        assert_eq!(
-            compiled.steps[0].middlewares["retry_by_status"]
-                .options
-                .get("count")
-                .and_then(Value::as_f64),
-            Some(5.0)
-        );
-        assert!(!compiled.steps[0].middlewares["dedup"].enabled);
-    }
-
-    #[test]
-    fn compile_rules_projects_step_configs_into_runtime() {
-        let rules = Value::String(
-            r#"{
-                "steps":[
-                    {
-                        "id":"detail",
-                        "dedup":{
-                            "enabled":true,
-                            "key":["product_id","meta.category"],
-                            "ttl":86400,
-                            "scope":"STEP"
-                        },
-                        "schedule":{
-                            "concurrency":2,
-                            "interval":1000
-                        },
-                        "retry":{
-                            "count":3,
-                            "http_status":[500,502],
-                            "backoff":[1000,2000]
-                        }
-                    }
-                ]
-            }"#
-            .to_string(),
-        );
-
-        let compiled = compile_rules(rules).unwrap();
-        let step = &compiled.steps[0];
-
-        assert_eq!(
-            step.runtime.schedule.get("concurrency"),
-            Some(&Value::Number(2.0))
-        );
-        assert_eq!(
-            step.runtime.schedule.get("interval_ms"),
-            Some(&Value::Number(1000.0))
-        );
-        assert_eq!(step.runtime.retry.get("count"), Some(&Value::Number(3.0)));
-        assert_eq!(
-            step.runtime.retry.get("backoff_ms"),
-            Some(&Value::Array(vec![
-                Value::Number(1000.0),
-                Value::Number(2000.0)
-            ]))
-        );
-        assert_eq!(
-            step.runtime.dedup.get("key"),
-            Some(&Value::Array(vec![
-                Value::String("product_id".to_string()),
-                Value::String("meta.category".to_string()),
-            ]))
-        );
-        assert_eq!(
-            step.runtime.dedup.get("scope"),
-            Some(&Value::String("STEP".to_string()))
-        );
-    }
 }

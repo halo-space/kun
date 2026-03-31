@@ -130,6 +130,20 @@
 - When scheduler 重新接收该任务
 - Then 该任务沿用原始 task identity，而不是生成一个新的 URL 级占位标识
 
+#### Scenario: Memory scheduler exposes its scheduler state as ready delayed inflight state
+
+- Given 当前使用的是 `scheduler::Memory`
+- When 调用方导出 scheduler state 快照
+- Then 快照显式包含 `ready`、`delayed` 与 `inflight` 三组任务状态
+- And 这三个状态就是当前代码里的 scheduler state 对应物
+
+#### Scenario: Durable scheduler state implementations restore from a shared state snapshot
+
+- Given 调用方需要把 scheduler 状态持久化到磁盘、SQLite、Redis 或其它存储
+- When 它实现 durable scheduler state/store 能力
+- Then 它基于共享的 `scheduler::state::Snapshot` 边界读写状态
+- And 当前库不把 `scheduler::Memory` 误承诺为 crash-safe durable scheduler
+
 ### Requirement: HTTP Downloader Applies Shared Transport Request Semantics
 
 库必须在 HTTP downloader 中统一接线 timeout、cookie jar、proxy 与 redirect 能力，而不是分别散落为不一致的临时实现。

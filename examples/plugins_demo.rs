@@ -1,29 +1,32 @@
-//! 插件系统完整示例
+//! Plugin system example focused on the current middleware path.
 //!
-//! 演示 plugins.toml 声明式加载、(kind, name) 唯一标识、override 冲突规则，
-//! 以及如何将插件自动接入引擎。
+//! This example shows:
+//! - declarative loading from `plugins.toml`
+//! - `(kind, name)` identity and override rules in `PluginRegistry`
+//! - how middleware plugins are connected into the engine
 //!
-//! 流程：
-//! 1. 插件作者实现中间件 + 工厂函数
-//! 2. plugins.toml 声明插件（name, kind, entry, override）
-//! 3. 引擎加载清单 → PluginRegistry 验证 → 工厂自动接入
-//! 4. 最终用户只需在 Settings/MIDDLEWARES 中按名字启用
+//! Flow:
+//! 1. A plugin author implements middleware plus a factory function
+//! 2. `plugins.toml` declares the plugin (`name`, `kind`, `entry`, `override`)
+//! 3. The engine loads manifests, `PluginRegistry` validates identity rules,
+//!    and registered factories are matched by name
+//! 4. End users enable middleware by key in `Settings`
 //!
-//! 注意：当前 `Engine::load_plugins()` 只支持 `kind = "middleware"`。
-//! 其它 kind 可以作为清单命名空间存在，但不会被引擎自动加载。
+//! Note: `Engine::load_plugins()` currently supports only `kind = "middleware"`.
+//! Other kinds still exist as manifest namespaces, but they are not auto-loaded
+//! into the engine runtime.
 //!
-//! 运行：cargo run --example plugins_demo
-//! 按 Ctrl+C 优雅退出
+//! Run with: `cargo run --example plugins_demo`
 
 use halo_spider::download::{Browser, Http};
 use halo_spider::engine::Engine;
 use halo_spider::engine::context::EngineContext;
-use halo_spider::engine::types::Flow;
+use halo_spider::engine::flow::Flow;
 use halo_spider::error::SpiderError;
 use halo_spider::future::BoxFuture;
 use halo_spider::item::Item;
 use halo_spider::middleware::traits::Middleware;
-use halo_spider::middleware::types::{MiddlewareConfig, MiddlewareType};
+use halo_spider::middleware::{Config, Stage};
 use halo_spider::plugins::{PluginManifest, PluginRegistry, load_plugin_manifest};
 use halo_spider::response::Response;
 use halo_spider::scheduler::Memory;
@@ -35,12 +38,10 @@ use jiff::SignedDuration;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 插件作者实现的中间件
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Plugin middleware implementations used by the example.
 
-/// 自定义签名中间件：为每个请求添加 X-Signature header。
-/// 对应 plugins.toml 中的 (middleware, custom_signature)。
+/// Custom signature middleware that adds an `X-Signature` header to requests.
+/// Corresponds to `(middleware, custom_signature)` in `plugins.toml`.
 struct CustomSignatureMiddleware {
     secret: String,
 }
@@ -80,15 +81,15 @@ impl Middleware for CustomSignatureMiddleware {
             tracing::info!(
                 url = context.request.url.as_str(),
                 signature = sig.as_str(),
-                "[CustomSignature] 已签名"
+                "[CustomSignature] signed request"
             );
             Ok(Flow::Continue)
         })
     }
 }
 
-/// 统计中间件：记录请求/响应计数。
-/// 对应 plugins.toml 中的 (middleware, stats)。
+/// Stats middleware that counts requests and responses.
+/// Corresponds to `(middleware, stats)` in `plugins.toml`.
 struct StatsMiddleware {
     request_count: AtomicUsize,
     response_count: AtomicUsize,
@@ -117,7 +118,11 @@ impl Middleware for StatsMiddleware {
     ) -> BoxFuture<'a, Result<Flow, SpiderError>> {
         Box::pin(async move {
             let n = self.request_count.fetch_add(1, Ordering::Relaxed) + 1;
-            tracing::info!(label = self.label.as_str(), count = n, "[Stats] 请求 #{n}");
+            tracing::info!(
+                label = self.label.as_str(),
+                count = n,
+                "[Stats] request #{n}"
+            );
             Ok(Flow::Continue)
         })
     }
@@ -128,15 +133,17 @@ impl Middleware for StatsMiddleware {
     ) -> BoxFuture<'a, Result<Flow, SpiderError>> {
         Box::pin(async move {
             let n = self.response_count.fetch_add(1, Ordering::Relaxed) + 1;
-            tracing::info!(label = self.label.as_str(), count = n, "[Stats] 响应 #{n}");
+            tracing::info!(
+                label = self.label.as_str(),
+                count = n,
+                "[Stats] response #{n}"
+            );
             Ok(Flow::Continue)
         })
     }
 }
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// Spider
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Spider used by the example.
 
 struct PeriodSpider;
 
@@ -190,12 +197,10 @@ impl PeriodSpider {
     }
 }
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 演示 (kind, name) 冲突和 override 规则
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Demonstrate how `(kind, name)` identity works inside `PluginRegistry`.
 
-fn demo_conflict_rules() {
-    println!("── 演示 (kind, name) 唯一标识规则 ──\n");
+fn demo_plugin_key_conflicts() {
+    println!("-- Demonstrating (kind, name) identity rules --\n");
 
     let mut registry = PluginRegistry::new();
 
@@ -204,14 +209,15 @@ fn demo_conflict_rules() {
         .register(PluginManifest {
             name: "proxy".to_string(),
             kind: "middleware".to_string(),
-            entry: "builtin::ProxyMiddleware".to_string(),
+            entry: "builtin::Proxy".to_string(),
             r#override: false,
         })
         .unwrap();
-    println!("  [OK] 注册 (middleware, proxy)");
+    println!("  [OK] registered (middleware, proxy)");
 
-    // 2) 不同 kind 同名 — 允许：(rules, proxy)
-    //    这里只演示 registry 命名空间规则，不代表 engine 已支持 rules kind 自动装载。
+    // 2) Same name under a different kind is allowed: `(rules, proxy)`.
+    //    This demonstrates registry namespacing only. It does not mean the
+    //    engine can auto-load `rules` plugins today.
     registry
         .register(PluginManifest {
             name: "proxy".to_string(),
@@ -220,45 +226,43 @@ fn demo_conflict_rules() {
             r#override: false,
         })
         .unwrap();
-    println!("  [OK] 注册 (rules, proxy) — 不同 kind 同名，允许共存");
+    println!("  [OK] registered (rules, proxy) -- same name, different kind");
 
-    // 3) 同 kind 同 name 无 override — 冲突
+    // 3) Same kind plus same name without override causes a conflict.
     let err = registry
         .register(PluginManifest {
             name: "proxy".to_string(),
             kind: "middleware".to_string(),
-            entry: "another::ProxyMiddleware".to_string(),
+            entry: "another::Proxy".to_string(),
             r#override: false,
         })
         .unwrap_err();
-    println!("  [ERR] 再次注册 (middleware, proxy) override=false → {err}");
+    println!("  [ERR] duplicate (middleware, proxy) with override=false -> {err}");
 
-    // 4) 同 kind 同 name 有 override — 覆盖成功
+    // 4) Same kind plus same name with override replaces the previous entry.
     registry
         .register(PluginManifest {
             name: "proxy".to_string(),
             kind: "middleware".to_string(),
-            entry: "another::ProxyMiddleware".to_string(),
+            entry: "another::Proxy".to_string(),
             r#override: true,
         })
         .unwrap();
     let updated = registry.get("middleware", "proxy").unwrap();
     println!(
-        "  [OK] 注册 (middleware, proxy) override=true → 已替换为 '{}'",
+        "  [OK] registered (middleware, proxy) with override=true -> replaced by '{}'",
         updated.entry
     );
 
     println!(
-        "\n  注册表共 {} 个插件：middleware={}, rules={}\n",
+        "\n  registry now holds {} manifests: middleware={}, rules={}\n",
         registry.manifests.len(),
         registry.by_kind("middleware").len(),
         registry.by_kind("rules").len(),
     );
 }
 
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-// 主入口
-// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Main entry.
 
 #[tokio::main]
 async fn main() {
@@ -267,17 +271,20 @@ async fn main() {
         .with_level(true)
         .init();
 
-    // ── Part 1: 演示冲突规则 ──
-    demo_conflict_rules();
+    // Part 1: demonstrate registry identity and override rules.
+    demo_plugin_key_conflicts();
 
-    // ── Part 2: 从 plugins.toml 加载并运行 ──
-    println!("── 从 plugins.toml 加载插件并运行引擎 ──\n");
+    // Part 2: load from plugins.toml and run the engine.
+    println!("-- Loading plugins.toml and running the engine --\n");
 
-    // Step 1: 加载 plugins.toml 清单
+    // Step 1: load plugin manifests from plugins.toml
     let manifest_path = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/plugins.toml");
-    let manifests = load_plugin_manifest(manifest_path).expect("无法加载 plugins.toml");
+    let manifests = load_plugin_manifest(manifest_path).expect("failed to load plugins.toml");
 
-    println!("  从 plugins.toml 读取到 {} 个插件声明：", manifests.len());
+    println!(
+        "  loaded {} plugin manifests from plugins.toml:",
+        manifests.len()
+    );
     for m in &manifests {
         println!(
             "    - ({}, {}) entry={} override={}",
@@ -286,19 +293,21 @@ async fn main() {
     }
     println!();
 
-    // Step 2: 注册到 PluginRegistry（验证 (kind, name) 唯一性）
+    // Step 2: register manifests into PluginRegistry
     let mut registry = PluginRegistry::new();
-    registry.register_all(manifests).expect("插件注册冲突");
+    registry
+        .register_all(manifests)
+        .expect("plugin manifest conflict");
 
-    // Step 3: 最终用户在 Settings 中按名字启用中间件插件
+    // Step 3: enable middleware by key in Settings
     let settings = Settings::default()
         .with_download_delay(SignedDuration::from_millis(300))
         .with_idle_timeout(SignedDuration::from_secs(3))
         .with_middleware(
             "custom_signature",
-            MiddlewareConfig {
+            Config {
                 enabled: true,
-                r#type: MiddlewareType::Download,
+                stage: Stage::Download,
                 order: 50,
                 options: BTreeMap::from([(
                     "secret".to_string(),
@@ -308,9 +317,9 @@ async fn main() {
         )
         .with_middleware(
             "stats",
-            MiddlewareConfig {
+            Config {
                 enabled: true,
-                r#type: MiddlewareType::Download,
+                stage: Stage::Download,
                 order: 10,
                 options: BTreeMap::from([(
                     "label".to_string(),
@@ -319,25 +328,25 @@ async fn main() {
             },
         );
 
-    // Step 4: 构建引擎，注册工厂，加载插件
+    // Step 4: build the engine, register factories, then load plugins
     let engine = Engine::new(Memory::default(), Http::default(), Browser)
         .with_settings(settings)
-        // 插件作者注册工厂函数（名称必须与 plugins.toml 中的 name 对应）
+        // Factory keys must match the manifest `name` values.
         .register_middleware("custom_signature", |options| {
             Ok(Box::new(CustomSignatureMiddleware::new(options)))
         })
         .register_middleware("stats", |options| {
             Ok(Box::new(StatsMiddleware::new(options)))
         })
-        // 验证：所有 plugins.toml 中声明的 middleware 插件都有工厂
+        // Verify that every declared middleware manifest has a factory.
         .load_plugins(&registry)
-        .expect("插件加载失败");
+        .expect("failed to load plugins");
 
-    println!("  插件加载完成，引擎就绪\n");
-    println!("  中间件执行顺序：stats(10) → custom_signature(50)");
-    println!("  按 Ctrl+C 停止\n");
+    println!("  plugins loaded, engine is ready\n");
+    println!("  middleware order: stats(10) -> custom_signature(50)");
+    println!("  press Ctrl+C to stop\n");
 
-    // Step 5: 运行
+    // Step 5: run
     let mut engine = engine;
     let handle = engine.shutdown_handle();
     tokio::spawn(async move {

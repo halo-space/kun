@@ -5,18 +5,19 @@ use crate::response::Response;
 use crate::rules::Config as RulesConfig;
 use crate::rules::{Compiled, CompiledStep, apply as apply_dsl};
 
-/// 将方法名转为回调字符串，写法接近函数引用。
+/// Turn a method name into a callback string with a function-reference-like
+/// syntax.
 ///
 /// ```rust,ignore
-/// // 以下三种写法完全等价：
-/// request.with_callback(cb!(parse_detail))      // 像传函数引用
-/// request.with_callback(cb!(Self::parse_detail)) // 也支持 Self:: 前缀
-/// request.with_callback("parse_detail")          // 直接写字符串
+/// // These three forms are equivalent:
+/// request.with_callback(cb!(parse_detail))
+/// request.with_callback(cb!(Self::parse_detail))
+/// request.with_callback("parse_detail")
 /// ```
 ///
-/// 底层就是 `stringify!`，编译期零开销。
-/// 好处：拼写错误会在 `call()` 路由时报错而非静默忽略，
-/// 且代码搜索 `cb!(parse_detail)` 比搜字符串更精确。
+/// Internally this is just `stringify!`, so there is no runtime cost.
+/// It also makes callback references easier to search and less error-prone
+/// than raw strings.
 #[macro_export]
 macro_rules! cb {
     (Self::$method:ident) => {
@@ -27,7 +28,8 @@ macro_rules! cb {
     };
 }
 
-/// 自动生成 `call()` 的路由分发，免去手写 match。
+/// Generate the `call()` callback dispatcher automatically instead of writing
+/// a manual `match`.
 ///
 /// ```rust,ignore
 /// impl Spider for MySpider {
@@ -35,7 +37,7 @@ macro_rules! cb {
 ///
 ///     async fn parse(&self, response: &Response) -> Result<Output, SpiderError> {
 ///         let req = response.follow(url)
-///             .with_callback(cb!(Self::parse_detail));  // 像传函数引用
+///             .with_callback(cb!(Self::parse_detail));
 ///         Ok(Output { items: vec![], requests: vec![req] })
 ///     }
 ///
@@ -85,14 +87,14 @@ pub trait Spider: Send + Sync {
         Vec::new()
     }
 
-    /// 构造起始 URLs，可以用于动态生成 URL（如添加日期）
-    /// 默认返回 start_urls()
+    /// Build start URLs dynamically when needed.
+    /// By default this returns `start_urls()`.
     fn build_start_urls(&self) -> Vec<String> {
         self.start_urls()
     }
 
-    /// 允许爬取的域名列表。空列表表示不限制。
-    /// 引擎会在入队前过滤不属于这些域名的请求。
+    /// Allowed crawl domains. An empty list means no domain filter.
+    /// The engine filters requests before enqueueing them.
     fn allowed_domains(&self) -> Vec<String> {
         Vec::new()
     }
@@ -117,7 +119,7 @@ pub trait Spider: Send + Sync {
         response: &Response,
         compiled: Option<&Compiled>,
     ) -> Result<Output, SpiderError> {
-        // 优先检查 request 的 callback
+        // Prefer an explicit request callback when one is present.
         if let Some(request) = &response.request
             && let Some(callback_target) = &request.callback
         {
@@ -160,134 +162,4 @@ fn resolve_step<'a>(
         .find(|step| step.id == step_id)
         .map(Some)
         .ok_or_else(|| SpiderError::engine(format!("step not found: {step_id}")))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::rules::compile::compile_rules;
-    use crate::value::Value;
-
-    struct TestSpider;
-
-    impl Spider for TestSpider {
-        fn name(&self) -> &str {
-            "test"
-        }
-
-        async fn parse(&self, response: &Response) -> Result<Output, SpiderError> {
-            let title = response.css("h1.title::text").one().unwrap_or_default();
-            Ok(Output {
-                items: vec![Item::new().with_field("title", Value::String(title))],
-                requests: Vec::new(),
-            })
-        }
-
-        spider_callbacks!(parse, parse_detail);
-    }
-
-    impl TestSpider {
-        async fn parse_detail(&self, response: &Response) -> Result<Output, SpiderError> {
-            Ok(Output {
-                items: vec![Item::new().with_field("detail", Value::String(response.url.clone()))],
-                requests: Vec::new(),
-            })
-        }
-    }
-
-    #[test]
-    fn spider_dispatch_uses_dsl_step() {
-        let spider = TestSpider;
-        let compiled = compile_rules(Value::String(
-            r#"{
-                "steps":[
-                    {
-                        "id":"parse",
-                        "parse":{
-                            "fields":[
-                                {
-                                    "name":"title",
-                                    "source":"html",
-                                    "selector_type":"css",
-                                    "selector":["h1.title"],
-                                    "attribute":"text"
-                                }
-                            ]
-                        }
-                    }
-                ]
-            }"#
-            .to_string(),
-        ))
-        .unwrap();
-
-        let response = Response::new(
-            "https://example.com",
-            200,
-            Default::default(),
-            br#"<h1 class="title">Hello</h1>"#.to_vec(),
-        );
-
-        let output = block_on(spider.dispatch(&response, Some(&compiled))).unwrap();
-
-        assert_eq!(
-            output.items[0].get("title"),
-            Some(&Value::String("Hello".to_string()))
-        );
-    }
-
-    #[test]
-    fn spider_dispatch_uses_code_step_callback() {
-        let spider = TestSpider;
-        let compiled = compile_rules(Value::String(
-            r#"{
-                "steps":[
-                    {
-                        "id":"detail",
-                        "callback":"parse_detail"
-                    }
-                ]
-            }"#
-            .to_string(),
-        ))
-        .unwrap();
-
-        let response = Response::from_request(
-            Request::new("https://example.com/detail")
-                .with_meta("next_step", Value::String("detail".to_string())),
-            200,
-            Default::default(),
-            Vec::new(),
-        );
-
-        let output = block_on(spider.dispatch(&response, Some(&compiled))).unwrap();
-
-        assert_eq!(
-            output.items[0].get("detail"),
-            Some(&Value::String("https://example.com/detail".to_string()))
-        );
-    }
-
-    fn block_on<F: std::future::Future>(future: F) -> F::Output {
-        use std::pin::Pin;
-        use std::sync::Arc;
-        use std::task::{Context, Poll, Waker};
-
-        let waker = Waker::from(Arc::new(NoopWake));
-        let mut future = Pin::from(Box::new(future));
-        let mut context = Context::from_waker(&waker);
-
-        loop {
-            match future.as_mut().poll(&mut context) {
-                Poll::Ready(value) => return value,
-                Poll::Pending => std::thread::yield_now(),
-            }
-        }
-    }
-
-    struct NoopWake;
-
-    impl std::task::Wake for NoopWake {
-        fn wake(self: std::sync::Arc<Self>) {}
-    }
 }

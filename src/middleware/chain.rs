@@ -1,29 +1,29 @@
 use crate::engine::context::EngineContext;
-use crate::engine::types::Flow;
+use crate::engine::flow::Flow;
 use crate::error::SpiderError;
 use crate::future::BoxFuture;
+use crate::middleware::config::{Config, Stage};
 use crate::middleware::traits::Middleware;
-use crate::middleware::types::{MiddlewareConfig, MiddlewareType};
 
-pub struct MiddlewareEntry {
+pub struct Entry {
     pub key: String,
-    pub config: MiddlewareConfig,
+    pub config: Config,
     pub middleware: Box<dyn Middleware>,
 }
 
 #[derive(Default)]
-pub struct MiddlewareChain {
-    pub entries: Vec<MiddlewareEntry>,
+pub struct Chain {
+    pub entries: Vec<Entry>,
 }
 
-impl MiddlewareChain {
+impl Chain {
     pub fn push(
         &mut self,
         key: impl Into<String>,
-        config: MiddlewareConfig,
+        config: Config,
         middleware: Box<dyn Middleware>,
     ) {
-        self.entries.push(MiddlewareEntry {
+        self.entries.push(Entry {
             key: key.into(),
             config,
             middleware,
@@ -33,14 +33,14 @@ impl MiddlewareChain {
 
     pub fn process_request<'a>(
         &'a self,
-        kind: MiddlewareType,
+        kind: Stage,
         context: &'a mut EngineContext,
     ) -> BoxFuture<'a, Result<Flow, SpiderError>> {
         Box::pin(async move {
             for entry in self
                 .entries
                 .iter()
-                .filter(|entry| matches_type(entry, kind))
+                .filter(|entry| matches_stage(entry, kind))
             {
                 let flow = entry.middleware.process_request(context).await?;
                 if !matches!(flow, Flow::Continue) {
@@ -53,14 +53,14 @@ impl MiddlewareChain {
 
     pub fn process_response<'a>(
         &'a self,
-        kind: MiddlewareType,
+        kind: Stage,
         context: &'a mut EngineContext,
     ) -> BoxFuture<'a, Result<Flow, SpiderError>> {
         Box::pin(async move {
             for entry in self
                 .entries
                 .iter()
-                .filter(|entry| matches_type(entry, kind))
+                .filter(|entry| matches_stage(entry, kind))
             {
                 let flow = entry.middleware.process_response(context).await?;
                 if !matches!(flow, Flow::Continue) {
@@ -73,7 +73,7 @@ impl MiddlewareChain {
 
     pub fn process_exception<'a>(
         &'a self,
-        kind: MiddlewareType,
+        kind: Stage,
         context: &'a mut EngineContext,
         error: &'a SpiderError,
     ) -> BoxFuture<'a, Result<Flow, SpiderError>> {
@@ -81,7 +81,7 @@ impl MiddlewareChain {
             for entry in self
                 .entries
                 .iter()
-                .filter(|entry| matches_type(entry, kind))
+                .filter(|entry| matches_stage(entry, kind))
             {
                 let flow = entry.middleware.process_exception(context, error).await?;
                 if !matches!(flow, Flow::Continue) {
@@ -93,15 +93,15 @@ impl MiddlewareChain {
     }
 }
 
-fn matches_type(entry: &MiddlewareEntry, kind: MiddlewareType) -> bool {
-    entry.config.enabled && entry.config.r#type == kind
+fn matches_stage(entry: &Entry, kind: Stage) -> bool {
+    entry.config.enabled && entry.config.stage == kind
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::engine::context::EngineContext;
-    use crate::engine::types::Flow;
+    use crate::engine::flow::Flow;
     use crate::request::Request;
     use std::collections::BTreeMap;
     use std::future::Future;
@@ -110,60 +110,60 @@ mod tests {
     use std::task::{Context, Poll, Wake, Waker};
 
     #[test]
-    fn middleware_chain_runs_enabled_entries_in_order() {
+    fn chain_runs_enabled_entries_in_order() {
         let log = Arc::new(Mutex::new(Vec::new()));
-        let mut chain = MiddlewareChain::default();
+        let mut chain = Chain::default();
 
         chain.push(
             "second",
-            config(true, 200, MiddlewareType::Download),
+            config(true, 200, Stage::Download),
             Box::new(Record::new("second", log.clone())),
         );
         chain.push(
             "first",
-            config(true, 100, MiddlewareType::Download),
+            config(true, 100, Stage::Download),
             Box::new(Record::new("first", log.clone())),
         );
         chain.push(
             "disabled",
-            config(false, 50, MiddlewareType::Download),
+            config(false, 50, Stage::Download),
             Box::new(Record::new("disabled", log.clone())),
         );
 
         let mut context = EngineContext::new(Request::new("https://example.com"));
-        let flow = block_on(chain.process_request(MiddlewareType::Download, &mut context)).unwrap();
+        let flow = block_on(chain.process_request(Stage::Download, &mut context)).unwrap();
 
         assert_eq!(flow, Flow::Continue);
         assert_eq!(*log.lock().unwrap(), vec!["first:req", "second:req"]);
     }
 
     #[test]
-    fn middleware_chain_filters_by_type() {
+    fn chain_filters_by_stage() {
         let log = Arc::new(Mutex::new(Vec::new()));
-        let mut chain = MiddlewareChain::default();
+        let mut chain = Chain::default();
 
         chain.push(
             "download",
-            config(true, 100, MiddlewareType::Download),
+            config(true, 100, Stage::Download),
             Box::new(Record::new("download", log.clone())),
         );
         chain.push(
             "spider",
-            config(true, 100, MiddlewareType::Spider),
+            config(true, 100, Stage::Spider),
             Box::new(Record::new("spider", log.clone())),
         );
 
         let mut context = EngineContext::new(Request::new("https://example.com"));
-        let flow = block_on(chain.process_response(MiddlewareType::Spider, &mut context)).unwrap();
+        let flow = block_on(chain.process_response(Stage::Spider, &mut context)).unwrap();
 
         assert_eq!(flow, Flow::Continue);
         assert_eq!(*log.lock().unwrap(), vec!["spider:res"]);
     }
 
-    fn config(enabled: bool, order: i32, r#type: MiddlewareType) -> MiddlewareConfig {
-        MiddlewareConfig {
+    fn config(enabled: bool, order: i32, stage: Stage) -> Config {
+        Config {
             enabled,
-            r#type,
+            stage,
             order,
             options: BTreeMap::new(),
         }

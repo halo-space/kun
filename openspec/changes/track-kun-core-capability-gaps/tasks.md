@@ -22,7 +22,7 @@
 - [x] 3.2 明确 retry、delayed task、inflight task 在 task identity 下的行为。
 - [x] 3.3 校验 scheduler 在“同 URL 不同 meta/body/method”场景下的正确性。
 - [x] 3.4 同步 `openspec/specs/runtime-engine/spec.md` 与 scheduler 测试。
-- [ ] 3.5 明确当前 scheduler 的 memory-only 边界，并规划 durable scheduler/frontier 的最小接口或实现方向。
+- [x] 3.5 明确当前 scheduler 的 memory-only 边界，并规划 durable scheduler/state store 的最小接口或实现方向。
 
 ## 4. Cookies / Proxy / HTTP 真实能力
 
@@ -82,12 +82,12 @@
 
 ## 11. Engine 结构整理
 
-- [x] 11.1 收口 `engine` 中任务执行参数，把 `execute_task_with_permits` / `decide_task_execution` 的上下文整理成更稳定的结构体，而不是继续扩散参数列表。
-- [x] 11.2 评估 `TaskDecision` 的体积差异，明确是否通过 `Box` 或其它方式降低大枚举变体的拷贝/栈占用。
+- [x] 11.1 收口 `engine` 中任务执行参数，把 task run / reservation 相关上下文整理成更稳定的结构体，而不是继续扩散参数列表。
+- [x] 11.2 评估 `TaskOutcome` 的体积差异，明确是否通过 `Box` 或其它方式降低大枚举变体的拷贝/栈占用。
 - [x] 11.3 在不改变现有运行时语义的前提下，为 `engine` 结构整理补最小回归测试。
 - [x] 11.4 清理 `engine` 内部局部命名，去掉 `sem` 一类缩写，统一使用 `global_semaphore`、`domain_semaphore` 这类完整命名。
-- [x] 11.5 如果本轮仍暂时保留单文件实现，下一轮评估将任务执行相关逻辑拆到独立子模块，至少明确 `task executor` / `task decision apply` 的拆分边界。
-- [x] 11.6 统一 `engine` 内部任务执行命名语义，避免 `TaskOutcome`、`TaskResult`、`execute_task_inner()`、`flow_to_outcome()` 这类跨层级混用；明确“middleware flow”“task decision/result”“result apply/handle”各自的命名边界。
+- [x] 11.5 如果本轮仍暂时保留单文件实现，下一轮评估将任务执行相关逻辑拆到独立子模块，至少明确 `task executor` / `task run apply` 的拆分边界。
+- [x] 11.6 统一 `engine` 内部任务执行命名语义，避免 `TaskOutcome`、`TaskRun`、`run()`、`map_flow_to_task_outcome()` 这类跨层级混用；明确“middleware flow”“task run/outcome”“run apply/handle”各自的命名边界。
 
 ## 12. Response Body / Text 语义
 

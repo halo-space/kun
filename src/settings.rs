@@ -3,10 +3,11 @@ use crate::runtime::Config as RuntimeConfig;
 use crate::value::Value;
 use jiff::SignedDuration;
 
-/// 引擎级全局配置，对应 Scrapy 的 settings.py。
+/// Engine-level global configuration, similar to Scrapy's `settings.py`.
 ///
-/// Spider 不持有这些配置 —— Spider 只管解析。
-/// 所有运行参数（速率、重试、并发、超时等）都在 Settings 里。
+/// The spider itself does not own these values and stays focused on parsing.
+/// Runtime parameters such as rate limits, retries, concurrency, and timeouts
+/// all live in `Settings`.
 ///
 /// ```rust,ignore
 /// let settings = Settings::default()
@@ -100,7 +101,7 @@ impl Settings {
     pub fn with_middleware(
         mut self,
         key: impl Into<String>,
-        config: crate::middleware::MiddlewareConfig,
+        config: crate::middleware::Config,
     ) -> Self {
         self.middlewares.insert(key.into(), config);
         self

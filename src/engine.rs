@@ -1,20 +1,18 @@
 pub mod context;
+pub mod flow;
 mod task;
-pub mod types;
 
 use crate::download::traits::Downloader;
-use crate::engine::task::{
-    TaskExecutionLease, TaskExecutionResult, TaskExecutor, apply_task_execution_result,
-};
+use crate::engine::task::{TaskExecutor, TaskRun, TaskRunReservation, apply_task_run};
 use crate::error::SpiderError;
-use crate::middleware::{FactoryRegistry, MiddlewareChain, build as build_middleware};
+use crate::middleware::{Chain, Config, Registry, build as build_middleware};
 use crate::plugins::types::{
     PluginKind, engine_reserved_plugin_kind_names, engine_supported_plugin_kind_names,
 };
 use crate::rules::Compiled;
 use crate::runtime::compile::{compile as compile_runtime, merge as merge_middleware};
 use crate::runtime::{Config as RuntimeConfig, merge as merge_runtime};
-use crate::scheduler::traits::Scheduler;
+use crate::scheduler::{Scheduler, Task};
 use crate::settings::Settings;
 use crate::spider::{Output as SpiderOutput, Spider};
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -27,9 +25,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(test)]
 use crate::engine::context::EngineContext;
 #[cfg(test)]
-use crate::engine::task::{TaskDecision, run_middleware_request, run_middleware_response};
+use crate::engine::task::{TaskOutcome, run_middleware_request, run_middleware_response};
 #[cfg(test)]
-use crate::middleware::MiddlewareType;
+use crate::middleware::Stage;
 #[cfg(test)]
 use crate::request::RequestMode;
 
@@ -39,8 +37,8 @@ pub struct Engine<S, H, B, P = ()> {
     pub browser: B,
     pub pipeline: P,
     pub settings: Settings,
-    pub middleware: MiddlewareChain,
-    pub plugins: FactoryRegistry,
+    pub middleware: Chain,
+    pub plugins: Registry,
     prepared: bool,
     shutdown: Arc<AtomicBool>,
 }
@@ -62,8 +60,8 @@ where
             browser,
             pipeline: (),
             settings: Settings::default(),
-            middleware: MiddlewareChain::default(),
-            plugins: FactoryRegistry::new(),
+            middleware: Chain::default(),
+            plugins: Registry::new(),
             prepared: false,
             shutdown: Arc::new(AtomicBool::new(false)),
         }
@@ -82,7 +80,7 @@ where
         self
     }
 
-    pub fn with_middleware(mut self, middleware: MiddlewareChain) -> Self {
+    pub fn with_middleware(mut self, middleware: Chain) -> Self {
         self.middleware = middleware;
         self
     }
@@ -101,31 +99,32 @@ where
         }
     }
 
-    /// 直接注册一个自定义中间件实例到引擎级中间件链。
+    /// Register a custom middleware instance directly on the engine-level chain.
     ///
-    /// 这个中间件对所有请求/响应生效。
+    /// This middleware applies to every request and response.
     ///
     /// ```ignore
     /// engine.add_middleware(
     ///     "custom_ua",
-    ///     MiddlewareConfig { enabled: true, r#type: MiddlewareType::Download, order: 50, .. },
+    ///     Config { enabled: true, stage: Stage::Download, order: 50, .. },
     ///     Box::new(MyUaMiddleware),
     /// );
     /// ```
     pub fn add_middleware(
         mut self,
         key: impl Into<String>,
-        config: crate::middleware::MiddlewareConfig,
+        config: Config,
         middleware: Box<dyn crate::middleware::Middleware>,
     ) -> Self {
         self.middleware.push(key, config, middleware);
         self
     }
 
-    /// 注册一个自定义中间件工厂。
+    /// Register a custom middleware factory.
     ///
-    /// 注册后，可以在 `Settings::middlewares` 或 DSL 规则的 `MIDDLEWARES` 中
-    /// 用同名 key 引用，引擎会自动调用工厂创建实例。
+    /// After registration, the same key can be referenced from
+    /// `Settings::middlewares` or a DSL `MIDDLEWARES` section, and the engine
+    /// will call the factory automatically to create the instance.
     ///
     /// ```ignore
     /// engine.register_middleware("custom_ua", |options| {
@@ -146,14 +145,16 @@ where
         self
     }
 
-    /// 加载插件清单，验证所有声明的中间件插件都已注册工厂。
+    /// Load plugin manifests and verify that every declared middleware plugin
+    /// has a registered factory.
     ///
-    /// 调用此方法前，先用 `register_middleware()` 注册每个中间件插件的工厂函数。
-    /// `load_plugins()` 当前只支持 `kind = "middleware"` 的插件；其余已知 kind
-    /// 仅保留命名空间，不会被引擎自动装配。
+    /// Before calling this method, register each middleware factory with
+    /// `register_middleware()`. `load_plugins()` currently supports only
+    /// `kind = "middleware"` plugins; other known kinds are kept as
+    /// namespaces only and are not auto-wired by the engine.
     ///
-    /// 它会验证 `plugins.toml` 中声明的每个 middleware 插件在引擎中都有对应的工厂，
-    /// 否则返回错误。
+    /// It verifies that every middleware declared in `plugins.toml` has a
+    /// matching engine factory and returns an error otherwise.
     ///
     /// ```ignore
     /// let manifests = load_plugin_manifest("plugins.toml")?;
@@ -199,15 +200,15 @@ where
                 plugin = manifest.name.as_str(),
                 kind = "middleware",
                 entry = manifest.entry.as_str(),
-                "插件已加载"
+                "plugin loaded"
             );
         }
         Ok(self)
     }
 
-    /// 获取一个可 Clone 的停止句柄。
+    /// Get a clonable shutdown handle.
     ///
-    /// 典型用法：
+    /// Example:
     /// ```ignore
     /// let handle = engine.shutdown_handle();
     /// tokio::spawn(async move {
@@ -222,29 +223,34 @@ where
         }
     }
 
-    /// 启动引擎，**持续运行**直到收到 stop 信号。
+    /// Run the engine continuously until a stop signal is received.
     ///
-    /// 支持并发下载：
-    /// - `settings.concurrent_requests` 控制全局并发上限（默认 16）
-    /// - `settings.concurrent_requests_per_domain` 控制每域名并发上限（默认 8）
+    /// Concurrent downloads are controlled by:
+    /// - `settings.concurrent_requests` for the global concurrency limit
+    /// - `settings.concurrent_requests_per_domain` for the per-domain limit
     ///
-    /// 引擎不会因为队列为空而自动退出。只有两种方式退出：
-    /// 1. 调用 `engine.stop()` 或 `shutdown_handle().stop()`
-    /// 2. Ctrl+C（配合 tokio::signal 调 stop）
+    /// The engine does not exit automatically when the queue becomes empty.
+    /// It exits only when:
+    /// 1. `engine.stop()` or `shutdown_handle().stop()` is called
+    /// 2. Ctrl+C triggers a stop signal
     pub async fn run<Sp: Spider>(&mut self, spider: &Sp) -> Result<Vec<SpiderOutput>, SpiderError> {
         let spider_name = spider.name();
-        tracing::info!(spider = spider_name, "引擎启动");
+        tracing::info!(spider = spider_name, "engine started");
 
         let allowed_domains = spider.allowed_domains();
         if !allowed_domains.is_empty() {
-            tracing::info!(spider = spider_name, domains = ?allowed_domains, "域名过滤已启用");
+            tracing::info!(
+                spider = spider_name,
+                domains = ?allowed_domains,
+                "allowed domain filter enabled"
+            );
         }
 
         self.pipeline.open(spider_name).await?;
 
         let compiled = match spider.rules() {
             Some(config) => {
-                tracing::info!(spider = spider_name, "加载 DSL 规则");
+                tracing::info!(spider = spider_name, "loading DSL rules");
                 Some(crate::rules::load(&config).await?)
             }
             None => None,
@@ -256,13 +262,11 @@ where
         tracing::info!(
             spider = spider_name,
             count = start_urls.len(),
-            "入队起始 URL"
+            "enqueueing start URLs"
         );
         for url in start_urls {
             let request = crate::request::Request::new(url);
-            self.scheduler
-                .enqueue(crate::scheduler::types::ScheduledTask::new(request))
-                .await?;
+            self.scheduler.enqueue(Task::new(request)).await?;
         }
 
         let max_concurrent = self.settings.concurrent_requests;
@@ -281,15 +285,15 @@ where
             spider = spider_name,
             concurrent = max_concurrent,
             per_domain = per_domain_limit,
-            "并发配置"
+            "concurrency settings"
         );
 
         let global_semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
         let mut domain_semaphores: BTreeMap<String, Arc<tokio::sync::Semaphore>> = BTreeMap::new();
 
-        let default_step_mw = MiddlewareChain::default();
+        let default_step_chain = Chain::default();
 
-        type TaskFuture<'a> = Pin<Box<dyn std::future::Future<Output = TaskExecutionResult> + 'a>>;
+        type TaskFuture<'a> = Pin<Box<dyn std::future::Future<Output = TaskRun> + 'a>>;
         let mut inflight: FuturesUnordered<TaskFuture<'_>> = FuturesUnordered::new();
         let mut outputs = Vec::new();
         let mut round = 0usize;
@@ -298,8 +302,8 @@ where
         let http = &self.http;
         let browser = &self.browser;
         let pipeline = &self.pipeline;
-        let engine_mw = &self.middleware;
-        let step_mws = &step_middlewares;
+        let engine_chain = &self.middleware;
+        let step_chains = &step_middlewares;
         let allowed_domains = &allowed_domains;
         let shutdown = &self.shutdown;
 
@@ -307,11 +311,11 @@ where
             if shutdown.load(Ordering::Relaxed) {
                 tracing::info!(
                     spider = spider_name,
-                    "收到 stop 信号，等待 {} 个进行中任务完成...",
+                    "received stop signal, waiting for {} in-flight tasks to finish...",
                     inflight.len()
                 );
                 while let Some(result) = inflight.next().await {
-                    apply_task_execution_result(
+                    apply_task_run(
                         result,
                         scheduler,
                         allowed_domains,
@@ -328,7 +332,7 @@ where
                 let Ok(global_permit_guard) = global_semaphore.clone().try_acquire_owned() else {
                     break;
                 };
-                let Some(task) = scheduler.lease().await? else {
+                let Some(task) = scheduler.take_ready().await? else {
                     drop(global_permit_guard);
                     break;
                 };
@@ -342,20 +346,20 @@ where
                     .clone();
 
                 let step_id = step_id_from_request(&task.request);
-                let step_mw = step_mws.get(&step_id).unwrap_or(&default_step_mw);
+                let step_chain = step_chains.get(&step_id).unwrap_or(&default_step_chain);
 
                 let task_executor = TaskExecutor {
                     http,
                     browser,
                     pipeline,
-                    engine_middleware: engine_mw,
-                    step_middleware: step_mw,
+                    engine_chain,
+                    step_chain,
                     spider,
                     compiled: compiled.as_ref(),
                     allowed_domains,
                     spider_name,
                 };
-                let task_execution_lease = TaskExecutionLease::new(
+                let task_run_reservation = TaskRunReservation::new(
                     task.id.clone(),
                     task.request,
                     global_permit_guard,
@@ -363,7 +367,7 @@ where
                 );
 
                 inflight.push(Box::pin(
-                    task_executor.execute_with_permits(task_execution_lease),
+                    task_executor.run_with_reservation(task_run_reservation),
                 ));
             }
 
@@ -372,7 +376,7 @@ where
                     tracing::debug!(
                         spider = spider_name,
                         idle_ms = idle_timeout.as_millis(),
-                        "队列为空，等待新任务..."
+                        "queue is empty, waiting for new tasks..."
                     );
                     tokio::time::sleep(idle_timeout_std).await;
                 } else {
@@ -382,7 +386,7 @@ where
             }
 
             if let Some(result) = inflight.next().await {
-                apply_task_execution_result(
+                apply_task_run(
                     result,
                     scheduler,
                     allowed_domains,
@@ -401,13 +405,13 @@ where
             spider = spider_name,
             rounds = round,
             total_items,
-            "引擎已停止"
+            "engine stopped"
         );
 
         Ok(outputs)
     }
 
-    /// 主动停止引擎。当前轮次结束后优雅退出。
+    /// Signal the engine to stop and exit gracefully after the current loop.
     pub fn stop(&self) {
         self.shutdown.store(true, Ordering::Relaxed);
     }
@@ -415,14 +419,14 @@ where
     fn build_step_middlewares(
         &self,
         compiled: Option<&Compiled>,
-    ) -> Result<BTreeMap<String, MiddlewareChain>, SpiderError> {
+    ) -> Result<BTreeMap<String, Chain>, SpiderError> {
         let base_runtime = self.settings.to_runtime_config();
         let defaults = compile_runtime(&base_runtime)?;
         let merged_base = merge_middleware(defaults, self.settings.middlewares.clone());
 
         let mut out = BTreeMap::new();
-        let base_mw = build_middleware(&merged_base, &self.plugins)?;
-        out.insert("parse".to_string(), base_mw);
+        let base_chain = build_middleware(&merged_base, &self.plugins)?;
+        out.insert("parse".to_string(), base_chain);
 
         if let Some(compiled) = compiled {
             for step in &compiled.steps {
@@ -436,8 +440,8 @@ where
                     merge_middleware(step_defaults, self.settings.middlewares.clone()),
                     step_overrides,
                 );
-                let mw = build_middleware(&merged, &self.plugins)?;
-                out.insert(step.id.clone(), mw);
+                let chain = build_middleware(&merged, &self.plugins)?;
+                out.insert(step.id.clone(), chain);
             }
         }
 
@@ -463,17 +467,17 @@ fn is_domain_allowed(url: &str, allowed: &[String]) -> bool {
         .any(|d| domain == d.as_str() || domain.ends_with(&format!(".{d}")))
 }
 
-/// 引擎停止句柄。可 Clone，跨线程使用。
+/// Clonable engine shutdown handle.
 ///
-/// 调用 `stop()` 通知引擎在当前轮次结束后优雅退出。
-/// 典型用法：配合 `tokio::signal::ctrl_c()` 在收到 Ctrl+C 时停止引擎。
+/// Calling `stop()` tells the engine to exit gracefully after the current loop.
+/// Typical usage is wiring it to `tokio::signal::ctrl_c()`.
 #[derive(Clone)]
 pub struct ShutdownHandle {
     flag: Arc<AtomicBool>,
 }
 
 impl ShutdownHandle {
-    /// 通知引擎停止。引擎会在当前轮次结束后退出 run() 循环。
+    /// Notify the engine to stop after the current run loop iteration.
     pub fn stop(&self) {
         self.flag.store(true, Ordering::Relaxed);
     }
@@ -532,30 +536,25 @@ where
     P: crate::pipeline::Pipeline,
 {
     async fn execute_once(&mut self) -> Result<Option<crate::response::Response>, SpiderError> {
-        let Some(task) = self.scheduler.lease().await? else {
+        let Some(task) = self.scheduler.take_ready().await? else {
             return Ok(None);
         };
         let task_id = task.id.clone();
         let mut context = EngineContext::new(task.request).with_task_id(task_id.clone());
 
-        let default_mw = MiddlewareChain::default();
-        let step_mw = &default_mw;
+        let default_chain = Chain::default();
+        let step_chain = &default_chain;
 
-        match run_middleware_request(
-            &self.middleware,
-            step_mw,
-            MiddlewareType::Download,
-            &mut context,
-        )
-        .await
+        match run_middleware_request(&self.middleware, step_chain, Stage::Download, &mut context)
+            .await
         {
-            Ok(crate::engine::types::Flow::Continue) => {}
+            Ok(crate::engine::flow::Flow::Continue) => {}
             Ok(_) => {
-                self.scheduler.ack(&task_id).await?;
+                self.scheduler.complete(&task_id).await?;
                 return Ok(None);
             }
             Err(e) => {
-                self.scheduler.nack(&task_id).await?;
+                self.scheduler.requeue(&task_id).await?;
                 return Err(e);
             }
         }
@@ -568,33 +567,28 @@ where
         let response = match response {
             Ok(r) => r,
             Err(e) => {
-                self.scheduler.nack(&task_id).await?;
+                self.scheduler.requeue(&task_id).await?;
                 return Err(e);
             }
         };
 
         context.response = Some(response.clone());
 
-        match run_middleware_response(
-            &self.middleware,
-            step_mw,
-            MiddlewareType::Download,
-            &mut context,
-        )
-        .await
+        match run_middleware_response(&self.middleware, step_chain, Stage::Download, &mut context)
+            .await
         {
-            Ok(crate::engine::types::Flow::Continue) => {}
+            Ok(crate::engine::flow::Flow::Continue) => {}
             Ok(_) => {
-                self.scheduler.ack(&task_id).await?;
+                self.scheduler.complete(&task_id).await?;
                 return Ok(None);
             }
             Err(e) => {
-                self.scheduler.nack(&task_id).await?;
+                self.scheduler.requeue(&task_id).await?;
                 return Err(e);
             }
         }
 
-        self.scheduler.ack(&task_id).await?;
+        self.scheduler.complete(&task_id).await?;
         Ok(Some(response))
     }
 
@@ -602,64 +596,60 @@ where
         &mut self,
         spider: &Sp,
         compiled: Option<&Compiled>,
-        step_mws: &mut BTreeMap<String, MiddlewareChain>,
+        step_chains: &mut BTreeMap<String, Chain>,
     ) -> Result<Option<crate::spider::Output>, SpiderError> {
         if !self.prepared {
-            *step_mws = self.build_step_middlewares(compiled)?;
+            *step_chains = self.build_step_middlewares(compiled)?;
             self.prepared = true;
         }
 
-        let Some(task) = self.scheduler.lease().await? else {
+        let Some(task) = self.scheduler.take_ready().await? else {
             return Ok(None);
         };
         let task_id = task.id.clone();
 
         let step_id = step_id_from_request(&task.request);
-        let default_mw = MiddlewareChain::default();
-        let step_mw = step_mws.get(&step_id).unwrap_or(&default_mw);
+        let default_chain = Chain::default();
+        let step_chain = step_chains.get(&step_id).unwrap_or(&default_chain);
 
         let task_executor = TaskExecutor {
             http: &self.http,
             browser: &self.browser,
             pipeline: &self.pipeline,
-            engine_middleware: &self.middleware,
-            step_middleware: step_mw,
+            engine_chain: &self.middleware,
+            step_chain,
             spider,
             compiled,
             allowed_domains: &[],
             spider_name: spider.name(),
         };
 
-        let decision = task_executor
-            .decide_execution(task_id.clone(), task.request)
-            .await;
+        let outcome = task_executor.run(task_id.clone(), task.request).await;
 
-        match decision {
-            TaskDecision::Success(output) => {
+        match outcome {
+            TaskOutcome::Success(output) => {
                 for follow in &output.follows {
                     if follow.dont_filter || is_domain_allowed(&follow.url, &[]) {
-                        self.scheduler
-                            .enqueue(crate::scheduler::types::ScheduledTask::new(follow.clone()))
-                            .await?;
+                        self.scheduler.enqueue(Task::new(follow.clone())).await?;
                     }
                 }
-                self.scheduler.ack(&task_id).await?;
+                self.scheduler.complete(&task_id).await?;
                 Ok(Some(crate::spider::Output {
                     items: output.items,
                     requests: output.follows,
                 }))
             }
-            TaskDecision::Retry(retry_task) => {
+            TaskOutcome::Retry(retry_task) => {
                 self.scheduler.enqueue(*retry_task).await?;
-                self.scheduler.ack(&task_id).await?;
+                self.scheduler.complete(&task_id).await?;
                 Ok(None)
             }
-            TaskDecision::Drop => {
-                self.scheduler.ack(&task_id).await?;
+            TaskOutcome::Drop => {
+                self.scheduler.complete(&task_id).await?;
                 Ok(None)
             }
-            TaskDecision::Error(e) => {
-                self.scheduler.nack(&task_id).await?;
+            TaskOutcome::Error(e) => {
+                self.scheduler.requeue(&task_id).await?;
                 Err(e)
             }
         }
@@ -670,17 +660,15 @@ where
 mod tests {
     use super::*;
     use crate::engine::context::EngineContext;
-    use crate::engine::types::Flow;
+    use crate::engine::flow::Flow;
+    use crate::middleware::Config;
     use crate::middleware::traits::Middleware;
-    use crate::middleware::types::MiddlewareConfig;
     use crate::pipeline::Pipeline;
     use crate::plugins::{PluginManifest, PluginRegistry};
     use crate::request::Request;
     use crate::response::Response;
-    use crate::rules::compile::compile_rules;
     use crate::scheduler::memory::Memory;
-    use crate::scheduler::traits::Scheduler;
-    use crate::scheduler::types::ScheduledTask;
+    use crate::scheduler::{Scheduler, Task};
     use crate::spider::{Output as SpiderOutput, Spider};
     use crate::value::Value;
     use jiff::SignedDuration;
@@ -693,8 +681,7 @@ mod tests {
     #[test]
     fn engine_executes_http_task_once() {
         let mut scheduler = Memory::default();
-        block_on(scheduler.enqueue(ScheduledTask::new(Request::new("https://example.com"))))
-            .unwrap();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com")))).unwrap();
 
         let mut engine = Engine::new(scheduler, StubHttp, StubBrowser);
         let response = block_on(engine.execute_once()).unwrap().unwrap();
@@ -706,10 +693,8 @@ mod tests {
     #[test]
     fn engine_executes_browser_task_once() {
         let mut scheduler = Memory::default();
-        block_on(scheduler.enqueue(ScheduledTask::new(Request::browser(
-            "https://example.com/browser",
-        ))))
-        .unwrap();
+        block_on(scheduler.enqueue(Task::new(Request::browser("https://example.com/browser"))))
+            .unwrap();
 
         let mut engine = Engine::new(scheduler, StubHttp, StubBrowser);
         let response = block_on(engine.execute_once()).unwrap().unwrap();
@@ -721,16 +706,15 @@ mod tests {
     #[test]
     fn engine_runs_download_middlewares_around_fetch() {
         let mut scheduler = Memory::default();
-        block_on(scheduler.enqueue(ScheduledTask::new(Request::new("https://example.com"))))
-            .unwrap();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com")))).unwrap();
 
         let log = Arc::new(Mutex::new(Vec::new()));
-        let mut middleware = MiddlewareChain::default();
+        let mut middleware = Chain::default();
         middleware.push(
             "recorder",
-            MiddlewareConfig {
+            Config {
                 enabled: true,
-                r#type: MiddlewareType::Download,
+                stage: Stage::Download,
                 order: 100,
                 options: BTreeMap::<String, Value>::new(),
             },
@@ -771,118 +755,18 @@ mod tests {
     }
 
     #[test]
-    fn engine_executes_dsl_step_after_download() {
-        let mut scheduler = Memory::default();
-        block_on(scheduler.enqueue(ScheduledTask::new(Request::new("https://example.com"))))
-            .unwrap();
-
-        let compiled = compile_rules(Value::String(
-            r#"{
-                "steps":[
-                    {
-                        "id":"parse",
-                        "parse":{
-                            "fields":[
-                                {
-                                    "name":"title",
-                                    "source":"html",
-                                    "selector_type":"css",
-                                    "selector":["h1.title"],
-                                    "attribute":"text"
-                                }
-                            ]
-                        }
-                    }
-                ]
-            }"#
-            .to_string(),
-        ))
-        .unwrap();
-
-        let mut engine = Engine::new(scheduler, HtmlHttp, StubBrowser);
-        let mut step_mws = BTreeMap::new();
-        let output =
-            block_on(engine.execute_spider_once(&TestSpider, Some(&compiled), &mut step_mws))
-                .unwrap()
-                .unwrap();
-
-        assert_eq!(
-            output.items[0].get("title"),
-            Some(&Value::String("Hello".to_string()))
-        );
-    }
-
-    #[test]
-    fn engine_enqueues_follow_request_and_runs_next_step() {
-        let mut scheduler = Memory::default();
-        block_on(scheduler.enqueue(ScheduledTask::new(Request::new("https://example.com/list"))))
-            .unwrap();
-
-        let compiled = compile_rules(Value::String(
-            r#"{
-                "steps":[
-                    {
-                        "id":"parse",
-                        "parse":{
-                            "links":[
-                                {
-                                    "name":"detail",
-                                    "source":"html",
-                                    "selector_type":"css",
-                                    "selector":["a.detail"],
-                                    "attribute":"attr:href",
-                                    "next_step":"detail"
-                                }
-                            ]
-                        }
-                    },
-                    {
-                        "id":"detail",
-                        "callback":"parse_detail"
-                    }
-                ]
-            }"#
-            .to_string(),
-        ))
-        .unwrap();
-
-        let mut engine = Engine::new(scheduler, FlowHttp, StubBrowser);
-        let mut step_mws = BTreeMap::new();
-        let first =
-            block_on(engine.execute_spider_once(&FlowSpider, Some(&compiled), &mut step_mws))
-                .unwrap()
-                .unwrap();
-        let second =
-            block_on(engine.execute_spider_once(&FlowSpider, Some(&compiled), &mut step_mws))
-                .unwrap()
-                .unwrap();
-
-        assert_eq!(first.requests.len(), 1);
-        assert_eq!(first.requests[0].url, "https://example.com/detail/1");
-        assert_eq!(
-            first.requests[0].meta.get("next_step"),
-            Some(&Value::String("detail".to_string()))
-        );
-        assert_eq!(
-            second.items[0].get("detail"),
-            Some(&Value::String("https://example.com/detail/1".to_string()))
-        );
-    }
-
-    #[test]
     fn engine_loads_runtime_middlewares_and_applies_explicit_overrides() {
         let mut scheduler = Memory::default();
-        block_on(scheduler.enqueue(ScheduledTask::new(Request::new("https://example.com"))))
-            .unwrap();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com")))).unwrap();
 
         let mut engine =
             Engine::new(scheduler, HtmlHttp, StubBrowser).with_settings(runtime_settings());
-        let mut step_mws = BTreeMap::new();
-        block_on(engine.execute_spider_once(&SimpleSpider("runtime"), None, &mut step_mws))
+        let mut step_chains = BTreeMap::new();
+        block_on(engine.execute_spider_once(&SimpleSpider("runtime"), None, &mut step_chains))
             .unwrap()
             .unwrap();
 
-        let keys = step_mws
+        let keys = step_chains
             .get("parse")
             .unwrap()
             .entries
@@ -895,7 +779,7 @@ mod tests {
         assert!(keys.contains(&"rate_limit"));
         assert!(keys.contains(&"dedup"));
 
-        let dedup = step_mws
+        let dedup = step_chains
             .get("parse")
             .unwrap()
             .entries
@@ -909,14 +793,8 @@ mod tests {
     #[test]
     fn engine_dedups_duplicate_requests_before_fetch() {
         let mut scheduler = Memory::default();
-        block_on(scheduler.enqueue(ScheduledTask::new(Request::new(
-            "https://example.com/dedup",
-        ))))
-        .unwrap();
-        block_on(scheduler.enqueue(ScheduledTask::new(Request::new(
-            "https://example.com/dedup",
-        ))))
-        .unwrap();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/dedup")))).unwrap();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/dedup")))).unwrap();
 
         let fetches = Arc::new(Mutex::new(0usize));
         let downloader = CountHttp {
@@ -925,13 +803,13 @@ mod tests {
         };
         let mut engine =
             Engine::new(scheduler, downloader, StubBrowser).with_settings(dedup_settings());
-        let mut step_mws = BTreeMap::new();
+        let mut step_chains = BTreeMap::new();
 
         let first =
-            block_on(engine.execute_spider_once(&SimpleSpider("dedup"), None, &mut step_mws))
+            block_on(engine.execute_spider_once(&SimpleSpider("dedup"), None, &mut step_chains))
                 .unwrap();
         let second =
-            block_on(engine.execute_spider_once(&SimpleSpider("dedup"), None, &mut step_mws))
+            block_on(engine.execute_spider_once(&SimpleSpider("dedup"), None, &mut step_chains))
                 .unwrap();
 
         assert!(first.is_some());
@@ -942,10 +820,7 @@ mod tests {
     #[test]
     fn engine_retries_on_configured_status() {
         let mut scheduler = Memory::default();
-        block_on(scheduler.enqueue(ScheduledTask::new(Request::new(
-            "https://example.com/retry",
-        ))))
-        .unwrap();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/retry")))).unwrap();
 
         let fetches = Arc::new(Mutex::new(0usize));
         let downloader = CountHttp {
@@ -954,13 +829,13 @@ mod tests {
         };
         let mut engine =
             Engine::new(scheduler, downloader, StubBrowser).with_settings(retry_settings());
-        let mut step_mws = BTreeMap::new();
+        let mut step_chains = BTreeMap::new();
 
         let first =
-            block_on(engine.execute_spider_once(&SimpleSpider("retry"), None, &mut step_mws))
+            block_on(engine.execute_spider_once(&SimpleSpider("retry"), None, &mut step_chains))
                 .unwrap();
         let second =
-            block_on(engine.execute_spider_once(&SimpleSpider("retry"), None, &mut step_mws))
+            block_on(engine.execute_spider_once(&SimpleSpider("retry"), None, &mut step_chains))
                 .unwrap();
 
         assert!(first.is_none());
@@ -971,10 +846,8 @@ mod tests {
     #[test]
     fn engine_respects_retry_backoff_delay() {
         let mut scheduler = Memory::default();
-        block_on(scheduler.enqueue(ScheduledTask::new(Request::new(
-            "https://example.com/retry-backoff",
-        ))))
-        .unwrap();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/retry-backoff"))))
+            .unwrap();
 
         let fetches = Arc::new(Mutex::new(0usize));
         let downloader = CountHttp {
@@ -983,25 +856,25 @@ mod tests {
         };
         let mut engine =
             Engine::new(scheduler, downloader, StubBrowser).with_settings(retry_backoff_settings());
-        let mut step_mws = BTreeMap::new();
+        let mut step_chains = BTreeMap::new();
 
         let first = block_on(engine.execute_spider_once(
             &SimpleSpider("retry_backoff"),
             None,
-            &mut step_mws,
+            &mut step_chains,
         ))
         .unwrap();
         let second = block_on(engine.execute_spider_once(
             &SimpleSpider("retry_backoff"),
             None,
-            &mut step_mws,
+            &mut step_chains,
         ))
         .unwrap();
         std::thread::sleep(to_std_duration(SignedDuration::from_millis(15)).unwrap());
         let third = block_on(engine.execute_spider_once(
             &SimpleSpider("retry_backoff"),
             None,
-            &mut step_mws,
+            &mut step_chains,
         ))
         .unwrap();
 
@@ -1014,14 +887,10 @@ mod tests {
     #[test]
     fn engine_respects_interval_gate_delay() {
         let mut scheduler = Memory::default();
-        block_on(scheduler.enqueue(ScheduledTask::new(Request::new(
-            "https://example.com/interval/1",
-        ))))
-        .unwrap();
-        block_on(scheduler.enqueue(ScheduledTask::new(Request::new(
-            "https://example.com/interval/2",
-        ))))
-        .unwrap();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/interval/1"))))
+            .unwrap();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/interval/2"))))
+            .unwrap();
 
         let fetches = Arc::new(Mutex::new(0usize));
         let downloader = CountHttp {
@@ -1030,17 +899,17 @@ mod tests {
         };
         let mut engine =
             Engine::new(scheduler, downloader, StubBrowser).with_settings(interval_settings());
-        let mut step_mws = BTreeMap::new();
+        let mut step_chains = BTreeMap::new();
 
         let first =
-            block_on(engine.execute_spider_once(&SimpleSpider("interval"), None, &mut step_mws))
+            block_on(engine.execute_spider_once(&SimpleSpider("interval"), None, &mut step_chains))
                 .unwrap();
         let second =
-            block_on(engine.execute_spider_once(&SimpleSpider("interval"), None, &mut step_mws))
+            block_on(engine.execute_spider_once(&SimpleSpider("interval"), None, &mut step_chains))
                 .unwrap();
         std::thread::sleep(to_std_duration(SignedDuration::from_millis(15)).unwrap());
         let third =
-            block_on(engine.execute_spider_once(&SimpleSpider("interval"), None, &mut step_mws))
+            block_on(engine.execute_spider_once(&SimpleSpider("interval"), None, &mut step_chains))
                 .unwrap();
 
         assert!(first.is_some());
@@ -1052,14 +921,8 @@ mod tests {
     #[test]
     fn engine_respects_rate_limit_delay() {
         let mut scheduler = Memory::default();
-        block_on(scheduler.enqueue(ScheduledTask::new(Request::new(
-            "https://example.com/rate/1",
-        ))))
-        .unwrap();
-        block_on(scheduler.enqueue(ScheduledTask::new(Request::new(
-            "https://example.com/rate/2",
-        ))))
-        .unwrap();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/rate/1")))).unwrap();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/rate/2")))).unwrap();
 
         let fetches = Arc::new(Mutex::new(0usize));
         let downloader = CountHttp {
@@ -1068,288 +931,37 @@ mod tests {
         };
         let mut engine =
             Engine::new(scheduler, downloader, StubBrowser).with_settings(rate_limit_settings());
-        let mut step_mws = BTreeMap::new();
+        let mut step_chains = BTreeMap::new();
 
-        let first =
-            block_on(engine.execute_spider_once(&SimpleSpider("rate_limit"), None, &mut step_mws))
-                .unwrap();
-        let second =
-            block_on(engine.execute_spider_once(&SimpleSpider("rate_limit"), None, &mut step_mws))
-                .unwrap();
+        let first = block_on(engine.execute_spider_once(
+            &SimpleSpider("rate_limit"),
+            None,
+            &mut step_chains,
+        ))
+        .unwrap();
+        let second = block_on(engine.execute_spider_once(
+            &SimpleSpider("rate_limit"),
+            None,
+            &mut step_chains,
+        ))
+        .unwrap();
 
         assert!(first.is_some());
         assert!(second.is_none());
         assert_eq!(*fetches.lock().unwrap(), 1);
-    }
-
-    #[test]
-    fn engine_applies_step_runtime_before_download() {
-        let mut scheduler = Memory::default();
-        block_on(
-            scheduler.enqueue(ScheduledTask::new(
-                Request::new("https://example.com/detail/1")
-                    .with_meta("next_step", Value::String("detail".to_string())),
-            )),
-        )
-        .unwrap();
-        block_on(
-            scheduler.enqueue(ScheduledTask::new(
-                Request::new("https://example.com/detail/2")
-                    .with_meta("next_step", Value::String("detail".to_string())),
-            )),
-        )
-        .unwrap();
-
-        let compiled = compile_rules(Value::String(
-            r#"{
-                "steps":[
-                    {
-                        "id":"detail",
-                        "callback":"parse_detail",
-                        "runtime":{
-                            "schedule":{"interval_ms":10}
-                        }
-                    }
-                ]
-            }"#
-            .to_string(),
-        ))
-        .unwrap();
-
-        let fetches = Arc::new(Mutex::new(0usize));
-        let downloader = CountHttp {
-            fetches: fetches.clone(),
-            statuses: vec![200, 200],
-        };
-        let mut engine = Engine::new(scheduler, downloader, StubBrowser);
-        let mut step_mws = BTreeMap::new();
-
-        let first =
-            block_on(engine.execute_spider_once(&FlowSpider, Some(&compiled), &mut step_mws))
-                .unwrap();
-        let second =
-            block_on(engine.execute_spider_once(&FlowSpider, Some(&compiled), &mut step_mws))
-                .unwrap();
-
-        assert!(first.is_some());
-        assert!(second.is_none());
-        assert_eq!(*fetches.lock().unwrap(), 1);
-        assert!(step_mws.contains_key("detail"));
-    }
-
-    #[test]
-    fn engine_applies_step_schedule_config_before_download() {
-        let mut scheduler = Memory::default();
-        block_on(
-            scheduler.enqueue(ScheduledTask::new(
-                Request::new("https://example.com/detail/1")
-                    .with_meta("next_step", Value::String("detail".to_string())),
-            )),
-        )
-        .unwrap();
-        block_on(
-            scheduler.enqueue(ScheduledTask::new(
-                Request::new("https://example.com/detail/2")
-                    .with_meta("next_step", Value::String("detail".to_string())),
-            )),
-        )
-        .unwrap();
-
-        let compiled = compile_rules(Value::String(
-            r#"{
-                "steps":[
-                    {
-                        "id":"detail",
-                        "callback":"parse_detail",
-                        "schedule":{"interval":10}
-                    }
-                ]
-            }"#
-            .to_string(),
-        ))
-        .unwrap();
-
-        let fetches = Arc::new(Mutex::new(0usize));
-        let downloader = CountHttp {
-            fetches: fetches.clone(),
-            statuses: vec![200, 200],
-        };
-        let mut engine = Engine::new(scheduler, downloader, StubBrowser);
-        let mut step_mws = BTreeMap::new();
-
-        let first =
-            block_on(engine.execute_spider_once(&FlowSpider, Some(&compiled), &mut step_mws))
-                .unwrap();
-        let second =
-            block_on(engine.execute_spider_once(&FlowSpider, Some(&compiled), &mut step_mws))
-                .unwrap();
-
-        assert!(first.is_some());
-        assert!(second.is_none());
-        assert_eq!(*fetches.lock().unwrap(), 1);
-    }
-
-    #[test]
-    fn engine_applies_step_retry_config_after_download() {
-        let mut scheduler = Memory::default();
-        block_on(
-            scheduler.enqueue(ScheduledTask::new(
-                Request::new("https://example.com/detail")
-                    .with_meta("next_step", Value::String("detail".to_string())),
-            )),
-        )
-        .unwrap();
-
-        let compiled = compile_rules(Value::String(
-            r#"{
-                "steps":[
-                    {
-                        "id":"detail",
-                        "callback":"parse_detail",
-                        "retry":{
-                            "count":1,
-                            "http_status":[500]
-                        }
-                    }
-                ]
-            }"#
-            .to_string(),
-        ))
-        .unwrap();
-
-        let fetches = Arc::new(Mutex::new(0usize));
-        let downloader = CountHttp {
-            fetches: fetches.clone(),
-            statuses: vec![500, 200],
-        };
-        let mut engine = Engine::new(scheduler, downloader, StubBrowser);
-        let mut step_mws = BTreeMap::new();
-
-        let first =
-            block_on(engine.execute_spider_once(&FlowSpider, Some(&compiled), &mut step_mws))
-                .unwrap();
-        let second =
-            block_on(engine.execute_spider_once(&FlowSpider, Some(&compiled), &mut step_mws))
-                .unwrap();
-
-        assert!(first.is_none());
-        assert!(second.is_some());
-        assert_eq!(*fetches.lock().unwrap(), 2);
-    }
-
-    #[test]
-    fn engine_applies_step_dedup_config_before_download() {
-        let mut scheduler = Memory::default();
-        block_on(
-            scheduler.enqueue(ScheduledTask::new(
-                Request::new("https://example.com/detail/1")
-                    .with_meta("next_step", Value::String("detail".to_string()))
-                    .with_meta("product_id", Value::String("sku-1".to_string())),
-            )),
-        )
-        .unwrap();
-        block_on(
-            scheduler.enqueue(ScheduledTask::new(
-                Request::new("https://example.com/detail/2")
-                    .with_meta("next_step", Value::String("detail".to_string()))
-                    .with_meta("product_id", Value::String("sku-1".to_string())),
-            )),
-        )
-        .unwrap();
-
-        let compiled = compile_rules(Value::String(
-            r#"{
-                "steps":[
-                    {
-                        "id":"detail",
-                        "callback":"parse_detail",
-                        "dedup":{
-                            "enabled":true,
-                            "key":["product_id"],
-                            "scope":"STEP"
-                        }
-                    }
-                ]
-            }"#
-            .to_string(),
-        ))
-        .unwrap();
-
-        let fetches = Arc::new(Mutex::new(0usize));
-        let downloader = CountHttp {
-            fetches: fetches.clone(),
-            statuses: vec![200, 200],
-        };
-        let mut engine = Engine::new(scheduler, downloader, StubBrowser);
-        let mut step_mws = BTreeMap::new();
-
-        let first =
-            block_on(engine.execute_spider_once(&FlowSpider, Some(&compiled), &mut step_mws))
-                .unwrap();
-        let second =
-            block_on(engine.execute_spider_once(&FlowSpider, Some(&compiled), &mut step_mws))
-                .unwrap();
-
-        assert!(first.is_some());
-        assert!(second.is_none());
-        assert_eq!(*fetches.lock().unwrap(), 1);
-    }
-
-    #[test]
-    fn engine_applies_step_middlewares_override_spider() {
-        let mut scheduler = Memory::default();
-        block_on(
-            scheduler.enqueue(ScheduledTask::new(
-                Request::new("https://example.com/detail/1")
-                    .with_meta("next_step", Value::String("detail".to_string())),
-            )),
-        )
-        .unwrap();
-
-        let compiled = compile_rules(Value::String(
-            r#"{
-                "steps":[
-                    {
-                        "id":"detail",
-                        "callback":"parse_detail",
-                        "runtime":{"schedule":{"interval_ms":10}},
-                        "MIDDLEWARES":{
-                            "dedup":{"enabled":false,"order":999}
-                        }
-                    }
-                ]
-            }"#
-            .to_string(),
-        ))
-        .unwrap();
-
-        let mut engine = Engine::new(scheduler, HtmlHttp, StubBrowser);
-        let mut step_mws = BTreeMap::new();
-        block_on(engine.execute_spider_once(&FlowSpider, Some(&compiled), &mut step_mws)).unwrap();
-
-        let dedup = step_mws
-            .get("detail")
-            .unwrap()
-            .entries
-            .iter()
-            .find(|entry| entry.key == "dedup")
-            .unwrap();
-        assert!(!dedup.config.enabled);
-        assert_eq!(dedup.config.order, 999);
     }
 
     #[test]
     fn engine_pipeline_memory_keeps_and_stores_items() {
         let mut scheduler = Memory::default();
-        block_on(scheduler.enqueue(ScheduledTask::new(Request::new("https://example.com/item"))))
-            .unwrap();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/item")))).unwrap();
 
         let pipeline = crate::pipeline::Memory::default();
         let mut engine =
             Engine::new(scheduler, StubHttp, StubBrowser).with_pipeline(pipeline.clone());
-        let mut step_mws = BTreeMap::new();
+        let mut step_chains = BTreeMap::new();
 
-        let output = block_on(engine.execute_spider_once(&ItemSpider, None, &mut step_mws))
+        let output = block_on(engine.execute_spider_once(&ItemSpider, None, &mut step_chains))
             .unwrap()
             .unwrap();
 
@@ -1363,13 +975,12 @@ mod tests {
     #[test]
     fn engine_pipeline_can_drop_items_explicitly() {
         let mut scheduler = Memory::default();
-        block_on(scheduler.enqueue(ScheduledTask::new(Request::new("https://example.com/item"))))
-            .unwrap();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/item")))).unwrap();
 
         let mut engine = Engine::new(scheduler, StubHttp, StubBrowser).with_pipeline(DropPipeline);
-        let mut step_mws = BTreeMap::new();
+        let mut step_chains = BTreeMap::new();
 
-        let output = block_on(engine.execute_spider_once(&ItemSpider, None, &mut step_mws))
+        let output = block_on(engine.execute_spider_once(&ItemSpider, None, &mut step_chains))
             .unwrap()
             .unwrap();
 
@@ -1379,95 +990,15 @@ mod tests {
     #[test]
     fn engine_pipeline_error_fails_task_explicitly() {
         let mut scheduler = Memory::default();
-        block_on(scheduler.enqueue(ScheduledTask::new(Request::new("https://example.com/item"))))
-            .unwrap();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/item")))).unwrap();
 
         let mut engine = Engine::new(scheduler, StubHttp, StubBrowser).with_pipeline(FailPipeline);
-        let mut step_mws = BTreeMap::new();
+        let mut step_chains = BTreeMap::new();
 
         let error =
-            block_on(engine.execute_spider_once(&ItemSpider, None, &mut step_mws)).unwrap_err();
+            block_on(engine.execute_spider_once(&ItemSpider, None, &mut step_chains)).unwrap_err();
 
         assert!(error.to_string().contains("pipeline failed"));
-    }
-
-    #[tokio::test]
-    async fn engine_run_processes_start_urls_to_completion() {
-        let scheduler = Memory::default();
-        let mut engine = Engine::new(scheduler, HtmlHttp, StubBrowser)
-            .with_settings(Settings::default().with_idle_timeout(SignedDuration::from_millis(10)));
-
-        let handle = engine.shutdown_handle();
-        tokio::spawn(async move {
-            tokio::time::sleep(to_std_duration(SignedDuration::from_millis(200)).unwrap()).await;
-            handle.stop();
-        });
-
-        let outputs = engine.run(&RunSpider).await.unwrap();
-
-        assert_eq!(outputs.len(), 2);
-        assert_eq!(
-            outputs[0].items[0].get("title"),
-            Some(&Value::String("Hello".to_string()))
-        );
-    }
-
-    #[tokio::test]
-    async fn engine_run_opens_and_closes_pipeline_with_spider_name() {
-        let scheduler = Memory::default();
-        let pipeline = LifecyclePipeline::default();
-        let mut engine = Engine::new(scheduler, HtmlHttp, StubBrowser)
-            .with_pipeline(pipeline.clone())
-            .with_settings(Settings::default().with_idle_timeout(SignedDuration::from_millis(10)));
-
-        let handle = engine.shutdown_handle();
-        tokio::spawn(async move {
-            tokio::time::sleep(to_std_duration(SignedDuration::from_millis(200)).unwrap()).await;
-            handle.stop();
-        });
-
-        engine.run(&RunSpider).await.unwrap();
-
-        assert_eq!(
-            pipeline.events(),
-            vec![
-                "open:run_spider".to_string(),
-                "close:run_spider".to_string(),
-            ]
-        );
-    }
-
-    struct RunSpider;
-
-    impl Spider for RunSpider {
-        fn name(&self) -> &str {
-            "run_spider"
-        }
-
-        fn start_urls(&self) -> Vec<String> {
-            vec![
-                "https://example.com/page/1".to_string(),
-                "https://example.com/page/2".to_string(),
-            ]
-        }
-
-        fn rules(&self) -> Option<crate::rules::Config> {
-            Some(crate::rules::Config {
-                r#type: "inline".to_string(),
-                options: [(
-                    "value".to_string(),
-                    Value::String(
-                        r#"{"steps":[{"id":"parse","parse":{"fields":[{"name":"title","source":"html","selector_type":"css","selector":["h1.title"],"attribute":"text"}]}}]}"#.to_string(),
-                    ),
-                )]
-                .into_iter()
-                .collect(),
-            })
-        }
-
-        async fn parse(&self, _response: &Response) -> Result<SpiderOutput, SpiderError> {
-            Ok(SpiderOutput::empty())
-        }
     }
 
     fn block_on<F: Future>(future: F) -> F::Output {
@@ -1551,25 +1082,6 @@ mod tests {
         }
     }
 
-    struct FlowHttp;
-
-    impl crate::download::traits::Downloader for FlowHttp {
-        async fn fetch(&self, request: &Request) -> Result<Response, SpiderError> {
-            let body = if request.url.ends_with("/list") {
-                br#"<a class="detail" href="https://example.com/detail/1">1</a>"#.to_vec()
-            } else {
-                b"<h1>detail</h1>".to_vec()
-            };
-
-            Ok(Response::from_request(
-                request.clone(),
-                200,
-                Default::default(),
-                body,
-            ))
-        }
-    }
-
     struct CountHttp {
         fetches: Arc<Mutex<usize>>,
         statuses: Vec<u16>,
@@ -1588,44 +1100,6 @@ mod tests {
                 Default::default(),
                 Vec::new(),
             ))
-        }
-    }
-
-    struct TestSpider;
-
-    impl Spider for TestSpider {
-        fn name(&self) -> &str {
-            "test"
-        }
-
-        async fn parse(&self, _response: &Response) -> Result<SpiderOutput, SpiderError> {
-            Ok(SpiderOutput::empty())
-        }
-    }
-
-    struct FlowSpider;
-
-    impl Spider for FlowSpider {
-        fn name(&self) -> &str {
-            "flow"
-        }
-
-        async fn parse(&self, _response: &Response) -> Result<SpiderOutput, SpiderError> {
-            Ok(SpiderOutput::empty())
-        }
-
-        async fn call(&self, name: &str, response: &Response) -> Result<SpiderOutput, SpiderError> {
-            match name {
-                "parse" => self.parse(response).await,
-                "parse_detail" => Ok(SpiderOutput {
-                    items: vec![
-                        crate::item::Item::new()
-                            .with_field("detail", Value::String(response.url.clone())),
-                    ],
-                    requests: Vec::new(),
-                }),
-                other => Err(SpiderError::engine(format!("unknown callback: {other}"))),
-            }
         }
     }
 
@@ -1682,35 +1156,6 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Default)]
-    struct LifecyclePipeline {
-        events: Arc<Mutex<Vec<String>>>,
-    }
-
-    impl LifecyclePipeline {
-        fn events(&self) -> Vec<String> {
-            self.events.lock().unwrap().clone()
-        }
-    }
-
-    impl Pipeline for LifecyclePipeline {
-        async fn open(&self, spider_name: &str) -> Result<(), SpiderError> {
-            self.events
-                .lock()
-                .unwrap()
-                .push(format!("open:{spider_name}"));
-            Ok(())
-        }
-
-        async fn close(&self, spider_name: &str) -> Result<(), SpiderError> {
-            self.events
-                .lock()
-                .unwrap()
-                .push(format!("close:{spider_name}"));
-            Ok(())
-        }
-    }
-
     fn runtime_settings() -> Settings {
         Settings::default()
             .with_runtime(crate::runtime::Config {
@@ -1730,9 +1175,9 @@ mod tests {
             .with_middlewares(
                 [(
                     "dedup".to_string(),
-                    MiddlewareConfig {
+                    Config {
                         enabled: false,
-                        r#type: MiddlewareType::Download,
+                        stage: Stage::Download,
                         order: 999,
                         options: BTreeMap::new(),
                     },
@@ -1809,58 +1254,5 @@ mod tests {
             retry: BTreeMap::new(),
             dedup: BTreeMap::new(),
         })
-    }
-
-    struct DslSpider;
-
-    impl Spider for DslSpider {
-        fn name(&self) -> &str {
-            "dsl_test"
-        }
-
-        fn start_urls(&self) -> Vec<String> {
-            vec!["https://example.com".to_string()]
-        }
-
-        fn rules(&self) -> Option<crate::rules::Config> {
-            Some(crate::rules::Config::inline(Value::String(
-                r#"{"steps":[{"id":"parse","parse":{"fields":[{"name":"title","source":"html","selector_type":"css","selector":["h1"],"attribute":"text"}]}}]}"#.to_string()
-            )))
-        }
-    }
-
-    struct DslHttp;
-
-    impl crate::download::traits::Downloader for DslHttp {
-        async fn fetch(&self, request: &Request) -> Result<Response, SpiderError> {
-            Ok(Response::from_request(
-                request.clone(),
-                200,
-                Default::default(),
-                br#"<h1>Test Title</h1>"#.to_vec(),
-            ))
-        }
-    }
-
-    #[tokio::test]
-    async fn engine_loads_and_runs_dsl_spider() {
-        let spider = DslSpider;
-        let mut engine = Engine::new(Memory::default(), DslHttp, StubBrowser)
-            .with_settings(Settings::default().with_idle_timeout(SignedDuration::from_millis(10)));
-
-        let handle = engine.shutdown_handle();
-        tokio::spawn(async move {
-            tokio::time::sleep(to_std_duration(SignedDuration::from_millis(200)).unwrap()).await;
-            handle.stop();
-        });
-
-        let outputs = engine.run(&spider).await.unwrap();
-
-        assert_eq!(outputs.len(), 1);
-        assert_eq!(outputs[0].items.len(), 1);
-        assert_eq!(
-            outputs[0].items[0].get("title"),
-            Some(&Value::String("Test Title".to_string()))
-        );
     }
 }

@@ -12,7 +12,7 @@ use playwright_rs::protocol::{
     BrowserContextOptions, ContinueOptions, Cookie, GotoOptions, Playwright, ProxySettings,
     Viewport,
 };
-#[cfg(feature = "browser")]
+#[cfg(any(feature = "browser", test))]
 use serde_json::json;
 #[cfg(any(feature = "browser", test))]
 use std::collections::BTreeMap;
@@ -97,19 +97,129 @@ fn validate_browser_request_contract(
     _request: &Request,
     config: &BrowserConfig,
 ) -> Result<(), SpiderError> {
-    if config.stealth {
-        return Err(SpiderError::download(
-            "browser stealth is not implemented yet on the Playwright route",
-        ));
-    }
-
-    if config.fingerprint_profile.is_some() {
-        return Err(SpiderError::download(
-            "browser fingerprint_profile is not implemented yet on the Playwright route",
-        ));
-    }
+    resolve_fingerprint_profile(config).map(|_| ())?;
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BrowserFingerprintProfile {
+    name: &'static str,
+    user_agent: &'static str,
+    locale: &'static str,
+    timezone_id: &'static str,
+    accept_language: &'static str,
+    languages: &'static [&'static str],
+    platform: &'static str,
+    vendor: &'static str,
+}
+
+#[cfg(feature = "browser")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BrowserExecutionPlan {
+    profile: Option<BrowserFingerprintProfile>,
+    init_script: Option<String>,
+}
+
+#[cfg(feature = "browser")]
+impl BrowserExecutionPlan {
+    fn from_config(config: &BrowserConfig) -> Result<Self, SpiderError> {
+        let profile = resolve_fingerprint_profile(config)?;
+        let init_script = build_browser_init_script(config, profile.as_ref());
+
+        Ok(Self {
+            profile,
+            init_script,
+        })
+    }
+}
+
+fn resolve_fingerprint_profile(
+    config: &BrowserConfig,
+) -> Result<Option<BrowserFingerprintProfile>, SpiderError> {
+    let Some(profile_name) = config.fingerprint_profile.as_deref() else {
+        return Ok(None);
+    };
+
+    match profile_name {
+        "desktop_zh_cn" => Ok(Some(BrowserFingerprintProfile {
+            name: "desktop_zh_cn",
+            user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+            locale: "zh-CN",
+            timezone_id: "Asia/Shanghai",
+            accept_language: "zh-CN,zh;q=0.9,en;q=0.8",
+            languages: &["zh-CN", "zh", "en"],
+            platform: "Win32",
+            vendor: "Google Inc.",
+        })),
+        "desktop_en_us" => Ok(Some(BrowserFingerprintProfile {
+            name: "desktop_en_us",
+            user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+            locale: "en-US",
+            timezone_id: "America/New_York",
+            accept_language: "en-US,en;q=0.9",
+            languages: &["en-US", "en"],
+            platform: "Win32",
+            vendor: "Google Inc.",
+        })),
+        other => Err(SpiderError::download(format!(
+            "browser fingerprint_profile is not supported on the Playwright route: {other}"
+        ))),
+    }
+}
+
+#[cfg(any(feature = "browser", test))]
+fn build_browser_init_script(
+    config: &BrowserConfig,
+    profile: Option<&BrowserFingerprintProfile>,
+) -> Option<String> {
+    if !config.stealth && profile.is_none() {
+        return None;
+    }
+
+    let languages = profile
+        .map(|profile| profile.languages)
+        .unwrap_or(&["en-US", "en"]);
+    let platform = profile.map(|profile| profile.platform).unwrap_or("Win32");
+    let vendor = profile
+        .map(|profile| profile.vendor)
+        .unwrap_or("Google Inc.");
+    let languages_json = json!(languages).to_string();
+    let platform_json = json!(platform).to_string();
+    let vendor_json = json!(vendor).to_string();
+    let mut lines = Vec::new();
+
+    if config.stealth {
+        lines.push(
+            "Object.defineProperty(navigator, 'webdriver', { get: () => undefined, configurable: true });"
+                .to_string(),
+        );
+    }
+
+    if config.stealth || profile.is_some() {
+        lines.push(format!(
+            "Object.defineProperty(navigator, 'languages', {{ get: () => {languages_json}.slice(), configurable: true }});"
+        ));
+        lines.push(format!(
+            "Object.defineProperty(navigator, 'platform', {{ get: () => {platform_json}, configurable: true }});"
+        ));
+        lines.push(format!(
+            "Object.defineProperty(navigator, 'vendor', {{ get: () => {vendor_json}, configurable: true }});"
+        ));
+        lines.push(
+            "if (!window.chrome) { Object.defineProperty(window, 'chrome', { value: { runtime: {} }, configurable: true }); }"
+                .to_string(),
+        );
+    }
+
+    if config.stealth {
+        lines.push(
+            "if (navigator.permissions && navigator.permissions.query) { const originalQuery = navigator.permissions.query.bind(navigator.permissions); navigator.permissions.query = (parameters) => { if (parameters && parameters.name === 'notifications') { return Promise.resolve({ state: Notification.permission }); } return originalQuery(parameters); }; }"
+                .to_string(),
+        );
+    }
+
+    Some(format!("(() => {{\n{}\n}})();", lines.join("\n")))
 }
 
 #[cfg(any(feature = "browser", test))]
@@ -241,7 +351,13 @@ async fn fetch_with_playwright_inner(
 ) -> Result<BrowserFetchResult, SpiderError> {
     let _session_execution_guard = acquire_browser_session_execution_guard(request).await;
     let playwright = Playwright::launch().await.map_err(map_playwright_error)?;
-    let options = build_context_options(config, request, request.timeout)?;
+    let execution_plan = BrowserExecutionPlan::from_config(config)?;
+    let options = build_context_options(
+        config,
+        request,
+        request.timeout,
+        execution_plan.profile.as_ref(),
+    )?;
     let navigation_request_override = BrowserNavigationRequestOverride::for_request(request);
     let user_data_dir = BrowserUserDataDir::for_request(request)?;
     let user_data_path = user_data_dir.path();
@@ -269,6 +385,7 @@ async fn fetch_with_playwright_inner(
     .map_err(map_playwright_error)?;
 
     let result = async {
+        apply_execution_plan_to_context(&context, &execution_plan).await?;
         apply_request_cookies_to_context(&context, request).await?;
 
         if let Some(navigation_request_override) = navigation_request_override.clone() {
@@ -342,6 +459,7 @@ fn build_context_options(
     config: &BrowserConfig,
     request: &Request,
     timeout: Option<SignedDuration>,
+    profile: Option<&BrowserFingerprintProfile>,
 ) -> Result<BrowserContextOptions, SpiderError> {
     let mut builder = BrowserContextOptions::builder()
         .headless(config.headless)
@@ -349,6 +467,13 @@ fn build_context_options(
             width: config.viewport.width,
             height: config.viewport.height,
         });
+
+    if let Some(profile) = profile {
+        builder = builder
+            .user_agent(profile.user_agent.to_string())
+            .locale(profile.locale.to_string())
+            .timezone_id(profile.timezone_id.to_string());
+    }
 
     if let Some(timeout) = timeout {
         let timeout = to_std_duration(timeout)
@@ -365,16 +490,55 @@ fn build_context_options(
         });
     }
 
-    let headers = request
-        .headers
-        .iter()
-        .map(|(key, values)| (key.clone(), values.join(", ")))
-        .collect();
-    if !request.headers.is_empty() {
+    let headers = build_browser_context_headers(request, profile);
+    if !headers.is_empty() {
         builder = builder.extra_http_headers(headers);
     }
 
     Ok(builder.build())
+}
+
+#[cfg(feature = "browser")]
+async fn apply_execution_plan_to_context(
+    context: &playwright_rs::protocol::BrowserContext,
+    execution_plan: &BrowserExecutionPlan,
+) -> Result<(), SpiderError> {
+    let Some(init_script) = execution_plan.init_script.as_deref() else {
+        return Ok(());
+    };
+
+    context
+        .add_init_script(init_script)
+        .await
+        .map_err(map_playwright_error)
+}
+
+#[cfg(any(feature = "browser", test))]
+fn build_browser_context_headers(
+    request: &Request,
+    profile: Option<&BrowserFingerprintProfile>,
+) -> std::collections::HashMap<String, String> {
+    let mut headers = BTreeMap::new();
+
+    if let Some(profile) = profile {
+        headers.insert(
+            "accept-language".to_string(),
+            profile.accept_language.to_string(),
+        );
+    }
+
+    for (key, values) in &request.headers {
+        if let Some(existing_key) = headers
+            .keys()
+            .find(|existing| existing.eq_ignore_ascii_case(key))
+            .cloned()
+        {
+            headers.remove(&existing_key);
+        }
+        headers.insert(key.clone(), values.join(", "));
+    }
+
+    headers.into_iter().collect()
 }
 
 #[cfg(any(feature = "browser", test))]
@@ -616,29 +780,41 @@ mod tests {
     }
 
     #[test]
-    fn browser_request_contract_rejects_stealth() {
+    fn browser_request_contract_allows_stealth() {
         let request = Request::browser("https://example.com")
             .with_browser(BrowserConfig::default().with_stealth(true));
 
-        let error = validate_browser_request_contract(
+        let result = validate_browser_request_contract(
             &request,
             request
                 .browser
                 .as_ref()
                 .expect("browser config should exist"),
-        )
-        .unwrap_err();
-
-        assert_eq!(
-            error,
-            SpiderError::download("browser stealth is not implemented yet on the Playwright route",)
         );
+
+        assert!(result.is_ok());
     }
 
     #[test]
-    fn browser_request_contract_rejects_fingerprint_profile() {
+    fn browser_request_contract_allows_supported_fingerprint_profile() {
         let request = Request::browser("https://example.com")
-            .with_browser(BrowserConfig::default().with_fingerprint_profile("desktop"));
+            .with_browser(BrowserConfig::default().with_fingerprint_profile("desktop_zh_cn"));
+
+        let result = validate_browser_request_contract(
+            &request,
+            request
+                .browser
+                .as_ref()
+                .expect("browser config should exist"),
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn browser_request_contract_rejects_unsupported_fingerprint_profile() {
+        let request = Request::browser("https://example.com")
+            .with_browser(BrowserConfig::default().with_fingerprint_profile("desktop_unknown"));
 
         let error = validate_browser_request_contract(
             &request,
@@ -652,7 +828,7 @@ mod tests {
         assert_eq!(
             error,
             SpiderError::download(
-                "browser fingerprint_profile is not implemented yet on the Playwright route",
+                "browser fingerprint_profile is not supported on the Playwright route: desktop_unknown",
             )
         );
     }
@@ -830,6 +1006,59 @@ mod tests {
     }
 
     #[test]
+    fn resolve_fingerprint_profile_returns_builtin_profile() {
+        let config = BrowserConfig::default().with_fingerprint_profile("desktop_zh_cn");
+
+        let profile = resolve_fingerprint_profile(&config)
+            .unwrap()
+            .expect("profile should resolve");
+
+        assert_eq!(profile.name, "desktop_zh_cn");
+        assert_eq!(profile.locale, "zh-CN");
+        assert_eq!(profile.timezone_id, "Asia/Shanghai");
+        assert_eq!(profile.languages, ["zh-CN", "zh", "en"]);
+    }
+
+    #[test]
+    fn build_browser_init_script_supports_profile_and_stealth() {
+        let config = BrowserConfig::default()
+            .with_stealth(true)
+            .with_fingerprint_profile("desktop_en_us");
+        let profile = resolve_fingerprint_profile(&config)
+            .unwrap()
+            .expect("profile should resolve");
+        let init_script =
+            build_browser_init_script(&config, Some(&profile)).expect("init script should exist");
+
+        assert!(init_script.contains("Object.defineProperty(navigator, 'webdriver'"));
+        assert!(init_script.contains("Object.defineProperty(navigator, 'languages'"));
+        assert!(init_script.contains("navigator.permissions.query"));
+        assert!(init_script.contains("en-US"));
+        assert!(init_script.contains("Win32"));
+    }
+
+    #[test]
+    fn build_browser_context_headers_prefers_request_header_over_profile_default() {
+        let request = Request::browser("https://example.com")
+            .with_header("Accept-Language", "fr-FR,fr;q=0.9")
+            .with_header("x-token", "abc");
+        let profile = resolve_fingerprint_profile(
+            &BrowserConfig::default().with_fingerprint_profile("desktop_zh_cn"),
+        )
+        .unwrap()
+        .expect("profile should resolve");
+
+        let headers = build_browser_context_headers(&request, Some(&profile));
+
+        assert_eq!(
+            headers.get("Accept-Language").map(String::as_str),
+            Some("fr-FR,fr;q=0.9")
+        );
+        assert!(!headers.contains_key("accept-language"));
+        assert_eq!(headers.get("x-token").map(String::as_str), Some("abc"));
+    }
+
+    #[test]
     fn browser_session_execution_lock_is_stable_per_session_id() {
         let first = browser_session_execution_lock("shared-browser");
         let second = browser_session_execution_lock("shared-browser");
@@ -870,13 +1099,15 @@ mod tests {
     fn browser_downloader_rejects_unsupported_config_before_launch() {
         let downloader = Browser;
         let request = Request::browser("https://example.com")
-            .with_browser(BrowserConfig::default().with_stealth(true));
+            .with_browser(BrowserConfig::default().with_fingerprint_profile("desktop_unknown"));
 
         let error = block_on(downloader.fetch(&request)).unwrap_err();
 
         assert_eq!(
             error,
-            SpiderError::download("browser stealth is not implemented yet on the Playwright route",)
+            SpiderError::download(
+                "browser fingerprint_profile is not supported on the Playwright route: desktop_unknown",
+            )
         );
     }
 
@@ -885,12 +1116,22 @@ mod tests {
     fn build_context_options_matches_browser_contract() {
         let config = BrowserConfig::default()
             .with_headless(false)
-            .with_viewport(1440, 900);
+            .with_viewport(1440, 900)
+            .with_fingerprint_profile("desktop_zh_cn");
         let request = Request::browser("https://example.com")
+            .with_header("Accept-Language", "fr-FR,fr;q=0.9")
             .with_header("x-token", "abc")
             .with_proxy("http://127.0.0.1:8080");
-        let options =
-            build_context_options(&config, &request, Some(SignedDuration::from_secs(8))).unwrap();
+        let profile = resolve_fingerprint_profile(&config)
+            .unwrap()
+            .expect("profile should resolve");
+        let options = build_context_options(
+            &config,
+            &request,
+            Some(SignedDuration::from_secs(8)),
+            Some(&profile),
+        )
+        .unwrap();
 
         assert_eq!(options.headless, Some(false));
         assert_eq!(
@@ -902,6 +1143,17 @@ mod tests {
             Some(900)
         );
         assert_eq!(options.timeout, Some(8000.0));
+        assert_eq!(options.user_agent.as_deref(), Some(profile.user_agent));
+        assert_eq!(options.locale.as_deref(), Some("zh-CN"));
+        assert_eq!(options.timezone_id.as_deref(), Some("Asia/Shanghai"));
+        assert_eq!(
+            options
+                .extra_http_headers
+                .as_ref()
+                .and_then(|headers| headers.get("Accept-Language"))
+                .map(String::as_str),
+            Some("fr-FR,fr;q=0.9")
+        );
         assert_eq!(
             options
                 .extra_http_headers

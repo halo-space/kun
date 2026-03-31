@@ -1,28 +1,45 @@
 # halo-spider
 
-一个受 Scrapy 启发的 Rust 异步爬虫框架，提供代码爬虫与 DSL 配置化两种入口，并使用 OpenSpec 管理规范与变更。
+一个受 Scrapy 启发的 Rust 异步爬虫框架。当前优先补齐和稳定代码爬虫与共享底层能力；DSL 入口仍保留，但配置面暂时后置，并使用 OpenSpec 管理规范与变更。
 
 ## 当前状态
 
 - 库代码位于 `src/`
 - 示例位于 `examples/`
+- 功能说明文档位于 `docs/capabilities.md`
 - 当前规范源位于 `openspec/specs/`
 - 后续需求、方案、任务统一从 `openspec/changes/` 发起
 - `openspec init` 生成的协作入口位于 `.claude/commands/opsx/` 与 `.codex/skills/`
 
+## 功能说明
+
+按功能模块整理的能力说明见 [docs/capabilities.md](/Users/xiaohan/soft/project/xiaohan/kun/docs/capabilities.md)。
+
+这份文档会集中解释：
+
+- `Request`、`Response`、`download`、`scheduler`、`pipeline` 各自负责什么
+- `scheduler::state::{Snapshot, Counts, Store}` 这组类型分别表示什么
+- 当前已经落地的底层能力、明确的边界以及暂缓项
+
 ## 底层能力概览
 
-已完成的底层能力：
+README 这里只保留总览；模块级细节统一放到 [docs/capabilities.md](/Users/xiaohan/soft/project/xiaohan/kun/docs/capabilities.md)。
 
-- 统一 `Request` 模型已经覆盖 `timeout`、`proxy`、`session`、request cookies 与 `follow` 继承语义
-- HTTP 下载链路已经接到真实的 `cookies`、`proxy`、redirect 与 timeout 能力
-- `browser` 模式已经具备最小可用下载能力，并已支持最小的 browser session 复用能力，以及统一 `Request` 上的 `method` / `body`
-- `pipeline` 是唯一 item 输出链路，当前内置 `pipeline::Memory` 与 `pipeline::JsonLines`
+当前已落地的底层能力：
+
+- `Request` 已经是统一执行单元，覆盖 `method`、`headers`、`body`、`timeout`、`proxy`、`session`、request cookies 与 `follow` 继承语义
+- `download::Http` 已接到真实的 timeout、proxy、redirect、cookie jar 与 session cookies 能力
+- `download::Browser` 已具备最小可用浏览器下载能力，并支持统一 `Request` 上的 `method` / `body` / `headers` / `timeout` / `proxy` / cookies / session
+- `Response.body` 与 `Response.text` 的语义已经明确并统一解码
+- `scheduler::Memory` 已把任务状态收口为 `ready / delayed / inflight`，并支持导出/恢复 `scheduler::state::Snapshot`
+- `pipeline` 是唯一 item 处理链路，当前内置 `pipeline::Memory` 与 `pipeline::JsonLines`
 - plugin 自动装载当前只支持 `middleware` kind，其它 kind 先保留命名空间
+- DSL 当前定位已经明确为“共享底层能力的配置化入口”，不是另一套独立运行时
 
-仍待补齐的底层能力：
+当前仍待补齐的底层能力：
 
-- 共享 validation 还没有扩到更完整的规则集
+- 共享 validation 还没有扩到更完整的规则集与失败策略
+- 还没有内置 crash-safe durable scheduler 实现；当前只把 `scheduler::state::Store` 这层持久化边界显式建模出来
 - 文件之外的数据库、消息队列等 pipeline 输出还没有内置实现
 - HTML XPath、OCR、parse 后处理等 parser 能力仍未收敛
 
@@ -157,9 +174,9 @@ let mut engine = Engine::new(scheduler, http, browser)
 
 完整可运行示例见 `examples/pipeline_memory.rs` 与 `examples/pipeline_json_lines.rs`。
 
-## DSL 编写流程（推荐）
+## DSL 状态（暂缓）
 
-使用 JSON DSL 规则文件驱动爬虫，无需编写解析代码：
+项目里仍保留 `Spider::rules()` 这条入口，引擎也会继续负责加载和编译 rules：
 
 ```rust
 use halo_spider::rules::Config as RulesConfig;
@@ -184,9 +201,13 @@ impl Spider for MyDslSpider {
 
 引擎会自动加载、编译规则并分发到 DSL step。
 
-当前 `examples/` 先优先展示 kun 现有的实际能力。DSL 配置示例会在配置面稳定后，再按模块补回。
+但当前不把 DSL 作为主推使用方式，`examples/` 也不再维护字段级 DSL 示例。原因很简单：
 
-DSL 不是另一套独立运行时，而是把代码爬虫已有能力配置化后的入口。无论是 Rust 回调模式还是 JSON DSL 模式，底层都走同一套框架执行链路：
+- 当前优先把代码爬虫与共享底层能力做实
+- DSL 只是这些底层能力的配置化入口，不是另一套独立运行时
+- 在配置面重新收敛前，不继续维护容易过期的 DSL 字段清单和外部示例
+
+DSL 当前的定位可以先简单理解成：把代码爬虫已有底层能力做成配置化入口。它不是另一套独立运行时。无论是 Rust 回调模式还是 JSON DSL 模式，底层都走同一套框架执行链路：
 
 ```text
 Spider / rules
@@ -206,6 +227,8 @@ Spider / rules
 - `Response.body` 保留原始响应字节，`Response.text` 是从 `body` 派生出的解码文本；当前优先使用 BOM、`Content-Type charset` 与文档内编码声明，再回退 UTF-8 lossy。
 - `dedup`、`schedule`、`retry` 等能力属于 `kun` 框架本身的爬虫能力，DSL 只是这些能力的配置化表达，不应实现成一套独立于代码爬虫的专用流程。
 
+如果你现在要写新的爬虫，优先建议直接用代码模式；等共享底层能力进一步稳定后，再回到 DSL 配置面做统一收口。
+
 ## Browser 能力边界
 
 当前 `browser` 模式走 `playwright-rs` 这条实现线，对外仍然只是 `kun` 的一个浏览器下载能力，不额外暴露单独的 backend 概念。
@@ -223,6 +246,8 @@ Spider / rules
 - request headers
 - request proxy
 - request session
+- built-in `fingerprint_profile = desktop_zh_cn | desktop_en_us`
+- minimal `stealth = true` bootstrap
 - browser response status / headers
 - 页面渲染后的 HTML 抓取
 
@@ -233,10 +258,15 @@ Spider / rules
 当前 browser `Response` 会带上真实的导航 `status` 与响应头；`protocol` 继续表示
 browser 执行路径，`ip_address` 与 `certificate` 由于 Playwright 当前接口限制仍保持为空。
 
-当前还没有实现、并且会显式报错的能力：
+当前已经支持的 browser 指纹能力边界：
 
-- `stealth`
-- `fingerprint_profile`
+- `fingerprint_profile` 当前只支持内置 profile：`desktop_zh_cn`、`desktop_en_us`
+- `stealth = true` 当前会注入最小 bootstrap，覆盖 `navigator.webdriver`、`navigator.languages`、`navigator.platform`、最小 `window.chrome` 与 notifications permissions 查询补丁
+
+当前仍未实现、并且会继续显式报错的能力：
+
+- 自定义 `fingerprint_profile` 名称
+- 更完整的第三方 stealth 套件或更高阶浏览器指纹伪装能力
 
 如果当前构建没有启用 `browser` feature，browser request 会直接返回显式错误，不会再返回 stub response。
 
@@ -258,120 +288,7 @@ npx playwright@1.58.2 install chromium firefox webkit
 - `ocr` 相关解析能力当前暂不实现
 - DSL 配置面当前后置，优先补齐和稳定代码爬虫与共享底层能力
 
-### DSL 配置选项
-
-**meta（透传字段）**：
-```json
-{
-  "id": "parse_list",
-  "meta": {
-    "source": "homepage",
-    "category": "news"
-  }
-}
-```
-
-`step.meta` 会在当前 step 生成后续 `Request` 时合并进 `request.meta`。它会和父请求已有的 `meta`、当前 step 已解析出的字段值、以及 `links[].meta` 一起继续往后传递。
-
-如果只是某一条 link 需要给下一个请求单独补几个参数，用 `links[].meta`：
-
-```json
-{
-  "next_step": "detail",
-  "meta": {
-    "from_list": true
-  }
-}
-```
-
-**dedup（去重配置）**：
-```json
-{
-  "dedup": {
-    "enabled": true,
-    "key": ["product_id"],
-    "ttl": 86400,
-    "scope": "TASK"
-  }
-}
-```
-
-`dedup.key` 会基于统一的请求上下文工作：
-
-- `url` 表示按请求 URL 去重
-- `["product_id"]` 表示按 `request.meta.product_id` 去重
-- `["product_id", "meta.category"]` 表示按多个参数拼接后的值去重
-- `scope = TASK | STEP | CUSTOM` 会继续映射到共享 dedup 逻辑
-
-**retry（重试配置）**：
-```json
-{
-  "retry": {
-    "count": 3,
-    "http_status": [500, 502, 503],
-    "backoff": [1000, 2000, 5000]
-  }
-}
-```
-
-`retry` 会编译为共享 runtime 的重试配置，由引擎在下载失败或命中指定 `http_status` 时统一处理。
-
-**schedule（调度配置）**：
-```json
-{
-  "schedule": {
-    "concurrency": 2,
-    "interval": 1000
-  }
-}
-```
-
-`schedule.interval` 和 `schedule.concurrency` 也会编译进共享 runtime/middleware 链路，因此 DSL 和代码爬虫遵守相同的节流与并发控制语义。
-
-**next_url_config.FUNCTION（最小 URL 生成函数）**：
-```json
-{
-  "next_url_config": {
-    "mode": "FUNCTION",
-    "fn": "concat",
-    "args": [
-      "https://ep.shxwcb.com/",
-      {
-        "fn": "replace",
-        "args": [
-          {"meta": "period_date"},
-          "-",
-          "/"
-        ]
-      },
-      "/",
-      {
-        "fn": "coalesce",
-        "args": [
-          {"field": "front_page"},
-          {"meta": "front_page"}
-        ]
-      }
-    ]
-  }
-}
-```
-
-当前先只支持 3 个通用函数：
-
-- `concat`：按顺序拼接所有参数
-- `replace`：`replace(input, from, to)`
-- `coalesce`：返回第一个非空值
-
-`args` 里的参数目前支持这几类最小形态：
-
-- 标量字面量：`"https://example.com/"`、`"-"`、`true`、`123`
-- 字段引用：`{"field": "front_page"}`
-- meta 引用：`{"meta": "period_date"}`
-- 显式字面量：`{"value": "literal"}`
-- 嵌套函数：`{"fn": "replace", "args": [...]}`
-
-当前没有继续保留面向外部的 DSL 配置样例目录，避免在 DSL 结构调整期间给出过期示例。
+README 当前不再承诺字段级 DSL 配置说明。等配置面稳定后，再按模块补回。
 
 ## AI 选择器
 

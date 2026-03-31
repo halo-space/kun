@@ -1,5 +1,5 @@
 use crate::engine::context::EngineContext;
-use crate::engine::types::Flow;
+use crate::engine::flow::Flow;
 use crate::error::SpiderError;
 use crate::future::BoxFuture;
 use crate::middleware::traits::Middleware;
@@ -10,12 +10,12 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Default)]
-pub struct RateLimitMiddleware {
+pub struct RateLimit {
     rate_per_minute: usize,
     hits_ms: Mutex<VecDeque<u64>>,
 }
 
-impl RateLimitMiddleware {
+impl RateLimit {
     pub fn new(options: &BTreeMap<String, Value>) -> Self {
         Self {
             rate_per_minute: options
@@ -27,7 +27,7 @@ impl RateLimitMiddleware {
     }
 }
 
-impl Middleware for RateLimitMiddleware {
+impl Middleware for RateLimit {
     fn process_request<'a>(
         &'a self,
         _context: &'a mut EngineContext,
@@ -88,7 +88,7 @@ mod tests {
 
     #[test]
     fn rate_limit_returns_retry_when_window_is_full() {
-        let middleware = RateLimitMiddleware::new(
+        let middleware = RateLimit::new(
             &[("rate_per_minute".to_string(), Value::Number(1.0))]
                 .into_iter()
                 .collect::<BTreeMap<_, _>>(),

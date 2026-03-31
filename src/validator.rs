@@ -1,6 +1,7 @@
 use crate::error::SpiderError;
 use crate::item::Item;
 use crate::value::Value;
+use regex::Regex;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,9 +50,13 @@ impl TryFrom<&str> for ValidationType {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ValidationRule {
     pub required: bool,
+    pub regex: Option<String>,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub enum_values: Vec<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -72,6 +77,26 @@ impl ValidationPlan {
 
     pub fn with_required(mut self, required: bool) -> Self {
         self.rule.required = required;
+        self
+    }
+
+    pub fn with_regex(mut self, pattern: impl Into<String>) -> Self {
+        self.rule.regex = Some(pattern.into());
+        self
+    }
+
+    pub fn with_min(mut self, min: f64) -> Self {
+        self.rule.min = Some(min);
+        self
+    }
+
+    pub fn with_max(mut self, max: f64) -> Self {
+        self.rule.max = Some(max);
+        self
+    }
+
+    pub fn with_enum(mut self, values: impl IntoIterator<Item = Value>) -> Self {
+        self.rule.enum_values = values.into_iter().collect();
         self
     }
 }
@@ -103,7 +128,7 @@ fn validate_field(plan: &ValidationPlan, value: Option<&Value>) -> Result<(), Sp
     };
 
     if plan.value_type.matches(value) {
-        return Ok(());
+        return validate_rule(plan, value);
     }
 
     Err(SpiderError::parse(format!(
@@ -111,6 +136,110 @@ fn validate_field(plan: &ValidationPlan, value: Option<&Value>) -> Result<(), Sp
         plan.name,
         plan.value_type.as_str()
     )))
+}
+
+fn validate_rule(plan: &ValidationPlan, value: &Value) -> Result<(), SpiderError> {
+    if let Some(pattern) = plan.rule.regex.as_deref() {
+        validate_regex(plan, value, pattern)?;
+    }
+
+    if let Some(min) = plan.rule.min {
+        validate_min(plan, value, min)?;
+    }
+
+    if let Some(max) = plan.rule.max {
+        validate_max(plan, value, max)?;
+    }
+
+    if !plan.rule.enum_values.is_empty() && !plan.rule.enum_values.iter().any(|item| item == value)
+    {
+        return Err(SpiderError::parse(format!(
+            "validation failed for field {}: value is not in enum set",
+            plan.name
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_regex(plan: &ValidationPlan, value: &Value, pattern: &str) -> Result<(), SpiderError> {
+    let Value::String(text) = value else {
+        return Err(SpiderError::parse(format!(
+            "validation failed for field {}: regex rule only supports text values",
+            plan.name
+        )));
+    };
+
+    let regex = Regex::new(pattern).map_err(|error| {
+        SpiderError::parse(format!(
+            "validation failed for field {}: invalid regex pattern {pattern}: {error}",
+            plan.name
+        ))
+    })?;
+
+    if regex.is_match(text) {
+        return Ok(());
+    }
+
+    Err(SpiderError::parse(format!(
+        "validation failed for field {}: value does not match regex {pattern}",
+        plan.name
+    )))
+}
+
+fn validate_min(plan: &ValidationPlan, value: &Value, min: f64) -> Result<(), SpiderError> {
+    let (label, actual) = comparable_metric(plan, value, "min")?;
+    if actual >= min {
+        return Ok(());
+    }
+
+    Err(SpiderError::parse(format!(
+        "validation failed for field {}: {label} must be >= {}",
+        plan.name,
+        format_number(min)
+    )))
+}
+
+fn validate_max(plan: &ValidationPlan, value: &Value, max: f64) -> Result<(), SpiderError> {
+    let (label, actual) = comparable_metric(plan, value, "max")?;
+    if actual <= max {
+        return Ok(());
+    }
+
+    Err(SpiderError::parse(format!(
+        "validation failed for field {}: {label} must be <= {}",
+        plan.name,
+        format_number(max)
+    )))
+}
+
+fn comparable_metric<'a>(
+    plan: &'a ValidationPlan,
+    value: &'a Value,
+    rule_name: &str,
+) -> Result<(&'static str, f64), SpiderError> {
+    match value {
+        Value::Number(value) => Ok(("value", *value)),
+        Value::String(value) => Ok(("text length", value.chars().count() as f64)),
+        Value::Array(value) => Ok(("list length", value.len() as f64)),
+        Value::Object(value) => Ok(("object size", value.len() as f64)),
+        Value::Bool(_) => Err(SpiderError::parse(format!(
+            "validation failed for field {}: {rule_name} rule is not supported for bool values",
+            plan.name
+        ))),
+        Value::Null => Err(SpiderError::parse(format!(
+            "validation failed for field {}: {rule_name} rule cannot be applied to null",
+            plan.name
+        ))),
+    }
+}
+
+fn format_number(value: f64) -> String {
+    let mut text = value.to_string();
+    if text.ends_with(".0") {
+        text.truncate(text.len() - 2);
+    }
+    text
 }
 
 #[cfg(test)]
@@ -163,5 +292,108 @@ mod tests {
         let plans = vec![ValidationPlan::new("count", ValidationType::Number).with_required(true)];
 
         assert!(validate_item(&item, &plans).is_ok());
+    }
+
+    #[test]
+    fn validate_fields_accepts_regex_min_max_and_enum_rules() {
+        let fields = BTreeMap::from([
+            ("title".to_string(), Value::String("post-2026".to_string())),
+            ("count".to_string(), Value::Number(5.0)),
+            ("kind".to_string(), Value::String("news".to_string())),
+        ]);
+        let plans = vec![
+            ValidationPlan::new("title", ValidationType::Text)
+                .with_regex(r"^post-\d{4}$")
+                .with_min(4.0)
+                .with_max(16.0),
+            ValidationPlan::new("count", ValidationType::Number)
+                .with_min(1.0)
+                .with_max(10.0),
+            ValidationPlan::new("kind", ValidationType::Text).with_enum([
+                Value::String("news".to_string()),
+                Value::String("notice".to_string()),
+            ]),
+        ];
+
+        assert!(validate_fields(&fields, &plans).is_ok());
+    }
+
+    #[test]
+    fn validate_fields_rejects_regex_mismatch() {
+        let fields = BTreeMap::from([("title".to_string(), Value::String("bad".to_string()))]);
+        let plans =
+            vec![ValidationPlan::new("title", ValidationType::Text).with_regex(r"^post-\d+$")];
+
+        let error = validate_fields(&fields, &plans).unwrap_err();
+
+        assert_eq!(
+            error,
+            SpiderError::Parse(
+                "validation failed for field title: value does not match regex ^post-\\d+$"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn validate_fields_rejects_number_below_min() {
+        let fields = BTreeMap::from([("count".to_string(), Value::Number(1.0))]);
+        let plans = vec![ValidationPlan::new("count", ValidationType::Number).with_min(3.0)];
+
+        let error = validate_fields(&fields, &plans).unwrap_err();
+
+        assert_eq!(
+            error,
+            SpiderError::Parse("validation failed for field count: value must be >= 3".to_string())
+        );
+    }
+
+    #[test]
+    fn validate_fields_rejects_text_above_max_length() {
+        let fields = BTreeMap::from([("title".to_string(), Value::String("abcdef".to_string()))]);
+        let plans = vec![ValidationPlan::new("title", ValidationType::Text).with_max(3.0)];
+
+        let error = validate_fields(&fields, &plans).unwrap_err();
+
+        assert_eq!(
+            error,
+            SpiderError::Parse(
+                "validation failed for field title: text length must be <= 3".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn validate_fields_rejects_value_outside_enum() {
+        let fields = BTreeMap::from([("kind".to_string(), Value::String("blog".to_string()))]);
+        let plans = vec![
+            ValidationPlan::new("kind", ValidationType::Text).with_enum([
+                Value::String("news".to_string()),
+                Value::String("notice".to_string()),
+            ]),
+        ];
+
+        let error = validate_fields(&fields, &plans).unwrap_err();
+
+        assert_eq!(
+            error,
+            SpiderError::Parse(
+                "validation failed for field kind: value is not in enum set".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn validate_fields_rejects_invalid_regex_pattern() {
+        let fields = BTreeMap::from([("title".to_string(), Value::String("post-1".to_string()))]);
+        let plans = vec![ValidationPlan::new("title", ValidationType::Text).with_regex("(")];
+
+        let error = validate_fields(&fields, &plans).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("validation failed for field title: invalid regex pattern")
+        );
     }
 }

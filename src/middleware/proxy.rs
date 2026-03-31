@@ -1,5 +1,5 @@
 use crate::engine::context::EngineContext;
-use crate::engine::types::Flow;
+use crate::engine::flow::Flow;
 use crate::error::SpiderError;
 use crate::future::BoxFuture;
 use crate::middleware::traits::Middleware;
@@ -9,13 +9,13 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Default)]
-pub struct ProxyMiddleware {
+pub struct Proxy {
     fixed_proxy: Option<String>,
     pool: Vec<String>,
     next_index: AtomicUsize,
 }
 
-impl ProxyMiddleware {
+impl Proxy {
     pub fn new(options: &BTreeMap<String, Value>) -> Self {
         Self {
             fixed_proxy: options
@@ -47,7 +47,7 @@ impl ProxyMiddleware {
     }
 }
 
-impl Middleware for ProxyMiddleware {
+impl Middleware for Proxy {
     fn process_request<'a>(
         &'a self,
         context: &'a mut EngineContext,
@@ -77,7 +77,7 @@ mod tests {
 
     #[test]
     fn proxy_middleware_applies_fixed_proxy_when_request_has_none() {
-        let middleware = ProxyMiddleware::new(
+        let middleware = Proxy::new(
             &[(
                 "url".to_string(),
                 Value::String("http://127.0.0.1:8080".to_string()),
@@ -98,7 +98,7 @@ mod tests {
 
     #[test]
     fn proxy_middleware_keeps_explicit_request_proxy() {
-        let middleware = ProxyMiddleware::new(
+        let middleware = Proxy::new(
             &[(
                 "url".to_string(),
                 Value::String("http://127.0.0.1:8080".to_string()),
@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn proxy_middleware_rotates_proxy_pool_round_robin() {
-        let middleware = ProxyMiddleware::new(
+        let middleware = Proxy::new(
             &[(
                 "pool".to_string(),
                 Value::Array(vec![

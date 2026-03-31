@@ -1,5 +1,5 @@
 use crate::engine::context::EngineContext;
-use crate::engine::types::Flow;
+use crate::engine::flow::Flow;
 use crate::error::SpiderError;
 use crate::future::BoxFuture;
 use crate::middleware::traits::Middleware;
@@ -10,12 +10,12 @@ use std::sync::Mutex;
 const SLOT_KEY: &str = "_concurrency_gate_slot";
 
 #[derive(Default)]
-pub struct ConcurrencyGateMiddleware {
+pub struct ConcurrencyGate {
     limit: usize,
     inflight: Mutex<usize>,
 }
 
-impl ConcurrencyGateMiddleware {
+impl ConcurrencyGate {
     pub fn new(options: &BTreeMap<String, Value>) -> Self {
         Self {
             limit: options
@@ -47,7 +47,7 @@ impl ConcurrencyGateMiddleware {
     }
 }
 
-impl Middleware for ConcurrencyGateMiddleware {
+impl Middleware for ConcurrencyGate {
     fn process_request<'a>(
         &'a self,
         context: &'a mut EngineContext,
@@ -111,7 +111,7 @@ mod tests {
 
     #[test]
     fn concurrency_gate_retries_when_limit_is_reached_and_recovers_after_release() {
-        let middleware = ConcurrencyGateMiddleware::new(
+        let middleware = ConcurrencyGate::new(
             &[("concurrency".to_string(), Value::Number(1.0))]
                 .into_iter()
                 .collect::<BTreeMap<_, _>>(),

@@ -1,11 +1,16 @@
 use crate::request::Request;
+use jiff::Timestamp;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Stable identity for a scheduled task.
+///
+/// This lets the scheduler track tasks independently even when multiple
+/// requests share the same URL.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TaskId(String);
 
 impl TaskId {
+    /// Creates a new task identity.
     pub fn new() -> Self {
         static NEXT_TASK_ID: AtomicU64 = AtomicU64::new(1);
         Self(format!(
@@ -14,6 +19,7 @@ impl TaskId {
         ))
     }
 
+    /// Returns the string representation of this task identity.
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
@@ -25,19 +31,22 @@ impl Default for TaskId {
     }
 }
 
+/// A request plus scheduler-owned execution metadata.
 #[derive(Debug, Clone)]
-pub struct ScheduledTask {
+pub struct Task {
     pub id: TaskId,
     pub request: Request,
     pub ready_at_ms: Option<u64>,
 }
 
-impl ScheduledTask {
+impl Task {
+    /// Creates an immediately ready task with a fresh task identity.
     pub fn new(request: Request) -> Self {
-        Self::with_task_id(request, TaskId::new())
+        Self::with_id(request, TaskId::new())
     }
 
-    pub fn with_task_id(request: Request, id: TaskId) -> Self {
+    /// Creates an immediately ready task with an explicit task identity.
+    pub fn with_id(request: Request, id: TaskId) -> Self {
         Self {
             id,
             request,
@@ -45,11 +54,13 @@ impl ScheduledTask {
         }
     }
 
+    /// Creates a delayed task with a fresh task identity.
     pub fn with_delay_ms(request: Request, delay_ms: u64) -> Self {
-        Self::with_task_id_and_delay(request, TaskId::new(), delay_ms)
+        Self::with_id_and_delay(request, TaskId::new(), delay_ms)
     }
 
-    pub fn with_task_id_and_delay(request: Request, id: TaskId, delay_ms: u64) -> Self {
+    /// Creates a delayed task with an explicit task identity.
+    pub fn with_id_and_delay(request: Request, id: TaskId, delay_ms: u64) -> Self {
         Self {
             id,
             request,
@@ -57,6 +68,7 @@ impl ScheduledTask {
         }
     }
 
+    /// Returns whether this task is ready to be taken for execution now.
     pub fn is_ready(&self) -> bool {
         self.ready_at_ms
             .map(|value| value <= now_ms())
@@ -65,8 +77,5 @@ impl ScheduledTask {
 }
 
 fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+    u64::try_from(Timestamp::now().as_millisecond()).unwrap_or_default()
 }

@@ -6,10 +6,10 @@ use std::fs::{OpenOptions, create_dir_all};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// 将处理后的 Item 逐行写入 JSON Lines 文件的内置 pipeline。
+/// Built-in pipeline that writes processed items to a JSON Lines file.
 ///
-/// `open()` 会确保父目录存在，并清空目标文件；
-/// `process()` 会把每个 item 作为单独一行 JSON object 追加写入。
+/// `open()` ensures the parent directory exists and truncates the target file.
+/// `process()` appends each item as a single JSON object line.
 #[derive(Debug, Clone)]
 pub struct JsonLines {
     path: PathBuf,

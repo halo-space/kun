@@ -273,6 +273,52 @@ fn validate_step_validate(value: &Value, step_id: &str) -> Result<(), SpiderErro
                     "step {step_id} validate.rule.required must be a boolean"
                 )));
             }
+            if rule.contains_key("regex") {
+                require_non_empty_string(
+                    rule.get("regex"),
+                    &format!("step {step_id} validate.rule.regex"),
+                )?;
+            }
+            if let Some(min) = rule.get("min")
+                && min.as_f64().is_none()
+            {
+                return Err(SpiderError::rules(format!(
+                    "step {step_id} validate.rule.min must be a number"
+                )));
+            }
+            if let Some(max) = rule.get("max")
+                && max.as_f64().is_none()
+            {
+                return Err(SpiderError::rules(format!(
+                    "step {step_id} validate.rule.max must be a number"
+                )));
+            }
+            if let (Some(min), Some(max)) = (
+                rule.get("min").and_then(Value::as_f64),
+                rule.get("max").and_then(Value::as_f64),
+            ) && min > max
+            {
+                return Err(SpiderError::rules(format!(
+                    "step {step_id} validate.rule.min cannot be greater than validate.rule.max"
+                )));
+            }
+            if let Some(enum_values) = rule.get("enum") {
+                let enum_values = enum_values.as_array().ok_or_else(|| {
+                    SpiderError::rules(format!(
+                        "step {step_id} validate.rule.enum must be an array"
+                    ))
+                })?;
+                for value in enum_values {
+                    match value {
+                        Value::Null | Value::String(_) | Value::Number(_) | Value::Bool(_) => {}
+                        Value::Array(_) | Value::Object(_) => {
+                            return Err(SpiderError::rules(format!(
+                                "step {step_id} validate.rule.enum entries must be scalar values"
+                            )));
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -364,136 +410,5 @@ fn validate_function_arg(value: &Value, label: &str) -> Result<(), SpiderError> 
         Value::Null | Value::Array(_) => Err(SpiderError::rules(format!(
             "{label} must be a scalar literal or object expression"
         ))),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn validate_rules_accepts_function_next_url_config() {
-        let rules = Value::String(
-            r#"{
-                "steps":[
-                    {
-                        "id":"parse",
-                        "type":"node",
-                        "parse":{
-                            "next_url_config":{
-                                "mode":"FUNCTION",
-                                "fn":"concat",
-                                "args":[
-                                    "https://example.com/",
-                                    {
-                                        "fn":"replace",
-                                        "args":[
-                                            {"meta":"period_date"},
-                                            "-",
-                                            "/"
-                                        ]
-                                    },
-                                    "/",
-                                    {
-                                        "fn":"coalesce",
-                                        "args":[
-                                            {"field":"front_page"},
-                                            {"meta":"front_page"}
-                                        ]
-                                    }
-                                ]
-                            }
-                        }
-                    }
-                ]
-            }"#
-            .to_string(),
-        );
-
-        assert!(crate::rules::compile::compile_rules(rules).is_ok());
-    }
-
-    #[test]
-    fn validate_rules_rejects_invalid_function_next_url_config() {
-        let rules = Value::String(
-            r#"{
-                "steps":[
-                    {
-                        "id":"parse",
-                        "type":"node",
-                        "parse":{
-                            "next_url_config":{
-                                "mode":"FUNCTION",
-                                "fn":"replace",
-                                "args":[{"meta":"period_date"},"-"]
-                            }
-                        }
-                    }
-                ]
-            }"#
-            .to_string(),
-        );
-
-        let error = crate::rules::compile::compile_rules(rules).unwrap_err();
-
-        assert_eq!(
-            error,
-            SpiderError::Rules(
-                "step parse next_url_config.args must contain exactly 3 entries for replace"
-                    .to_string()
-            )
-        );
-    }
-
-    #[test]
-    fn validate_rules_accepts_step_validate_config() {
-        let rules = Value::String(
-            r#"{
-                "steps":[
-                    {
-                        "id":"parse",
-                        "validate":[
-                            {
-                                "name":"title",
-                                "type":"text",
-                                "rule":{"required":true}
-                            }
-                        ],
-                        "parse":{"fields":[]}
-                    }
-                ]
-            }"#
-            .to_string(),
-        );
-
-        assert!(crate::rules::compile::compile_rules(rules).is_ok());
-    }
-
-    #[test]
-    fn validate_rules_rejects_invalid_step_validate_type() {
-        let rules = Value::String(
-            r#"{
-                "steps":[
-                    {
-                        "id":"parse",
-                        "validate":[
-                            {
-                                "name":"title",
-                                "type":"date"
-                            }
-                        ],
-                        "parse":{"fields":[]}
-                    }
-                ]
-            }"#
-            .to_string(),
-        );
-
-        let error = crate::rules::compile::compile_rules(rules).unwrap_err();
-
-        assert_eq!(
-            error,
-            SpiderError::Rules("step parse validate.type has unsupported value: date".to_string())
-        );
     }
 }

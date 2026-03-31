@@ -1,10 +1,10 @@
 use crate::error::SpiderError;
-use crate::middleware::{MiddlewareConfig, MiddlewareType};
-use crate::runtime::{Config, MiddlewareMap};
+use crate::middleware::{Config, Stage};
+use crate::runtime::{Config as RuntimeConfig, MiddlewareMap};
 use crate::value::Value;
 use std::collections::BTreeMap;
 
-pub fn compile(runtime: &Config) -> Result<MiddlewareMap, SpiderError> {
+pub fn compile(runtime: &RuntimeConfig) -> Result<MiddlewareMap, SpiderError> {
     let mut middleware = MiddlewareMap::new();
 
     compile_retry(runtime, &mut middleware)?;
@@ -24,7 +24,10 @@ pub fn merge(defaults: MiddlewareMap, explicit: MiddlewareMap) -> MiddlewareMap 
     merged
 }
 
-fn compile_retry(runtime: &Config, middleware: &mut MiddlewareMap) -> Result<(), SpiderError> {
+fn compile_retry(
+    runtime: &RuntimeConfig,
+    middleware: &mut MiddlewareMap,
+) -> Result<(), SpiderError> {
     if runtime.retry.is_empty() {
         return Ok(());
     }
@@ -63,7 +66,10 @@ fn compile_retry(runtime: &Config, middleware: &mut MiddlewareMap) -> Result<(),
     Ok(())
 }
 
-fn compile_dedup(runtime: &Config, middleware: &mut MiddlewareMap) -> Result<(), SpiderError> {
+fn compile_dedup(
+    runtime: &RuntimeConfig,
+    middleware: &mut MiddlewareMap,
+) -> Result<(), SpiderError> {
     if runtime.dedup.is_empty() {
         return Ok(());
     }
@@ -77,9 +83,9 @@ fn compile_dedup(runtime: &Config, middleware: &mut MiddlewareMap) -> Result<(),
     if enabled {
         middleware.insert(
             "dedup".to_string(),
-            MiddlewareConfig {
+            Config {
                 enabled: true,
-                r#type: MiddlewareType::Download,
+                stage: Stage::Download,
                 order: 220,
                 options: runtime.dedup.clone(),
             },
@@ -89,7 +95,10 @@ fn compile_dedup(runtime: &Config, middleware: &mut MiddlewareMap) -> Result<(),
     Ok(())
 }
 
-fn compile_schedule(runtime: &Config, middleware: &mut MiddlewareMap) -> Result<(), SpiderError> {
+fn compile_schedule(
+    runtime: &RuntimeConfig,
+    middleware: &mut MiddlewareMap,
+) -> Result<(), SpiderError> {
     if runtime.schedule.is_empty() {
         return Ok(());
     }
@@ -121,10 +130,10 @@ fn compile_schedule(runtime: &Config, middleware: &mut MiddlewareMap) -> Result<
     Ok(())
 }
 
-fn config(order: i32, options: Vec<Option<(String, Value)>>) -> MiddlewareConfig {
-    MiddlewareConfig {
+fn config(order: i32, options: Vec<Option<(String, Value)>>) -> Config {
+    Config {
         enabled: true,
-        r#type: MiddlewareType::Download,
+        stage: Stage::Download,
         order,
         options: options.into_iter().flatten().collect(),
     }
@@ -153,7 +162,7 @@ mod tests {
 
     #[test]
     fn compile_generates_default_runtime_middlewares() {
-        let runtime = Config {
+        let runtime = RuntimeConfig {
             schedule: [
                 ("concurrency".to_string(), Value::Number(2.0)),
                 ("interval_ms".to_string(), Value::Number(1000.0)),
@@ -196,9 +205,9 @@ mod tests {
     fn merge_prefers_explicit_middleware() {
         let defaults = [(
             "rate_limit".to_string(),
-            MiddlewareConfig {
+            Config {
                 enabled: true,
-                r#type: MiddlewareType::Download,
+                stage: Stage::Download,
                 order: 130,
                 options: BTreeMap::new(),
             },
@@ -208,9 +217,9 @@ mod tests {
 
         let explicit = [(
             "rate_limit".to_string(),
-            MiddlewareConfig {
+            Config {
                 enabled: false,
-                r#type: MiddlewareType::Download,
+                stage: Stage::Download,
                 order: 999,
                 options: BTreeMap::new(),
             },

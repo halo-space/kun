@@ -16,12 +16,12 @@
 use halo_spider::download::{Browser, Http};
 use halo_spider::engine::Engine;
 use halo_spider::engine::context::EngineContext;
-use halo_spider::engine::types::Flow;
+use halo_spider::engine::flow::Flow;
 use halo_spider::error::SpiderError;
 use halo_spider::future::BoxFuture;
 use halo_spider::item::Item;
 use halo_spider::middleware::traits::Middleware;
-use halo_spider::middleware::types::{MiddlewareConfig, MiddlewareType};
+use halo_spider::middleware::{Config, Stage};
 use halo_spider::response::Response;
 use halo_spider::scheduler::Memory;
 use halo_spider::settings::Settings;
@@ -213,9 +213,9 @@ async fn main() {
     // 只需要声明名字和 options，引擎通过工厂自动实例化
     let settings = settings.with_middleware(
         "stats",
-        MiddlewareConfig {
+        Config {
             enabled: true,
-            r#type: MiddlewareType::Download,
+            stage: Stage::Download,
             order: 10,
             options: BTreeMap::from([("label".to_string(), Value::String("global".to_string()))]),
         },
@@ -226,9 +226,9 @@ async fn main() {
         // 方式1：直接注册中间件实例 —— UserAgent
         .add_middleware(
             "custom_ua",
-            MiddlewareConfig {
+            Config {
                 enabled: true,
-                r#type: MiddlewareType::Download,
+                stage: Stage::Download,
                 order: 100,
                 options: BTreeMap::new(),
             },
@@ -239,9 +239,9 @@ async fn main() {
         // 方式1：直接注册中间件实例 —— RequestLogger
         .add_middleware(
             "request_logger",
-            MiddlewareConfig {
+            Config {
                 enabled: true,
-                r#type: MiddlewareType::Download,
+                stage: Stage::Download,
                 order: 200,
                 options: BTreeMap::new(),
             },

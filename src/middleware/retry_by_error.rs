@@ -1,5 +1,5 @@
 use crate::engine::context::EngineContext;
-use crate::engine::types::Flow;
+use crate::engine::flow::Flow;
 use crate::error::SpiderError;
 use crate::future::BoxFuture;
 use crate::middleware::traits::Middleware;
@@ -7,12 +7,12 @@ use crate::value::Value;
 use std::collections::BTreeMap;
 
 #[derive(Default)]
-pub struct RetryByErrorMiddleware {
+pub struct RetryByError {
     count: u64,
     backoff_ms: Vec<u64>,
 }
 
-impl RetryByErrorMiddleware {
+impl RetryByError {
     pub fn new(options: &BTreeMap<String, Value>) -> Self {
         Self {
             count: parse_count(options).unwrap_or(1),
@@ -33,7 +33,7 @@ impl RetryByErrorMiddleware {
     }
 }
 
-impl Middleware for RetryByErrorMiddleware {
+impl Middleware for RetryByError {
     fn process_exception<'a>(
         &'a self,
         context: &'a mut EngineContext,

@@ -1,17 +1,44 @@
 use crate::error::SpiderError;
-use crate::scheduler::traits::Scheduler;
-use crate::scheduler::types::{ScheduledTask, TaskId};
+use crate::scheduler::state::{Counts, Snapshot};
+use crate::scheduler::{Scheduler, Task, TaskId};
 use std::collections::VecDeque;
 
 #[derive(Default)]
 pub struct Memory {
-    ready: VecDeque<ScheduledTask>,
-    delayed: Vec<ScheduledTask>,
-    inflight: Vec<ScheduledTask>,
+    ready: VecDeque<Task>,
+    delayed: Vec<Task>,
+    inflight: Vec<Task>,
 }
 
 impl Memory {
-    fn push_task(&mut self, task: ScheduledTask) {
+    /// Restores a memory scheduler from an existing state snapshot.
+    pub fn from_snapshot(snapshot: Snapshot) -> Self {
+        Self {
+            ready: VecDeque::from(snapshot.ready),
+            delayed: snapshot.delayed,
+            inflight: snapshot.inflight,
+        }
+    }
+
+    /// Exports the current in-memory scheduler state.
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            ready: self.ready.iter().cloned().collect(),
+            delayed: self.delayed.clone(),
+            inflight: self.inflight.clone(),
+        }
+    }
+
+    /// Returns the number of tasks tracked in each state bucket.
+    pub fn counts(&self) -> Counts {
+        Counts {
+            ready: self.ready.len(),
+            delayed: self.delayed.len(),
+            inflight: self.inflight.len(),
+        }
+    }
+
+    fn push_task(&mut self, task: Task) {
         if task.is_ready() {
             self.ready.push_back(task);
         } else {
@@ -33,12 +60,12 @@ impl Memory {
 }
 
 impl Scheduler for Memory {
-    async fn enqueue(&mut self, task: ScheduledTask) -> Result<(), SpiderError> {
+    async fn enqueue(&mut self, task: Task) -> Result<(), SpiderError> {
         self.push_task(task);
         Ok(())
     }
 
-    async fn lease(&mut self) -> Result<Option<ScheduledTask>, SpiderError> {
+    async fn take_ready(&mut self) -> Result<Option<Task>, SpiderError> {
         self.promote_delayed();
 
         let Some(task) = self.ready.pop_front() else {
@@ -49,12 +76,12 @@ impl Scheduler for Memory {
         Ok(Some(task))
     }
 
-    async fn ack(&mut self, task_id: &TaskId) -> Result<(), SpiderError> {
+    async fn complete(&mut self, task_id: &TaskId) -> Result<(), SpiderError> {
         self.inflight.retain(|task| &task.id != task_id);
         Ok(())
     }
 
-    async fn nack(&mut self, task_id: &TaskId) -> Result<(), SpiderError> {
+    async fn requeue(&mut self, task_id: &TaskId) -> Result<(), SpiderError> {
         if let Some(pos) = self.inflight.iter().position(|task| &task.id == task_id) {
             let task = self.inflight.remove(pos);
             self.ready.push_front(task);
@@ -71,7 +98,7 @@ impl Scheduler for Memory {
 mod tests {
     use super::*;
     use crate::request::Request;
-    use crate::scheduler::traits::Scheduler;
+    use crate::scheduler::Scheduler;
     use jiff::SignedDuration;
     use std::future::Future;
     use std::pin::Pin;
@@ -79,30 +106,28 @@ mod tests {
     use std::task::{Context, Poll, Wake, Waker};
 
     #[test]
-    fn memory_scheduler_supports_async_enqueue_and_lease() {
+    fn memory_scheduler_supports_async_enqueue_and_take_ready() {
         let mut scheduler = Memory::default();
-        let task = ScheduledTask::new(Request::new("https://example.com"));
+        let task = Task::new(Request::new("https://example.com"));
 
         block_on(scheduler.enqueue(task.clone())).unwrap();
-        let leased = block_on(scheduler.lease()).unwrap();
+        let taken = block_on(scheduler.take_ready()).unwrap();
 
         assert_eq!(
-            leased.as_ref().map(|task| task.id.as_str()),
+            taken.as_ref().map(|task| task.id.as_str()),
             Some(task.id.as_str())
         );
-        assert_eq!(leased.map(|task| task.request.url), Some(task.request.url));
+        assert_eq!(taken.map(|task| task.request.url), Some(task.request.url));
     }
 
     #[test]
-    fn memory_scheduler_tracks_inflight_until_ack() {
+    fn memory_scheduler_tracks_inflight_until_complete() {
         let mut scheduler = Memory::default();
-        block_on(scheduler.enqueue(ScheduledTask::new(Request::new("https://example.com/a"))))
-            .unwrap();
-        block_on(scheduler.enqueue(ScheduledTask::new(Request::new("https://example.com/b"))))
-            .unwrap();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/a")))).unwrap();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/b")))).unwrap();
 
-        let first = block_on(scheduler.lease()).unwrap();
-        let second = block_on(scheduler.lease()).unwrap();
+        let first = block_on(scheduler.take_ready()).unwrap();
+        let second = block_on(scheduler.take_ready()).unwrap();
 
         assert_eq!(
             first.as_ref().map(|t| t.request.url.as_str()),
@@ -115,26 +140,23 @@ mod tests {
 
         assert!(block_on(scheduler.has_pending()).unwrap());
 
-        block_on(scheduler.ack(&first.as_ref().unwrap().id)).unwrap();
-        block_on(scheduler.ack(&second.as_ref().unwrap().id)).unwrap();
+        block_on(scheduler.complete(&first.as_ref().unwrap().id)).unwrap();
+        block_on(scheduler.complete(&second.as_ref().unwrap().id)).unwrap();
 
         assert!(!block_on(scheduler.has_pending()).unwrap());
     }
 
     #[test]
-    fn memory_scheduler_nack_requeues_inflight_task() {
+    fn memory_scheduler_requeue_puts_inflight_task_back_to_ready() {
         let mut scheduler = Memory::default();
-        block_on(scheduler.enqueue(ScheduledTask::new(Request::new(
-            "https://example.com/retry",
-        ))))
-        .unwrap();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/retry")))).unwrap();
 
-        let first = block_on(scheduler.lease()).unwrap().unwrap();
+        let first = block_on(scheduler.take_ready()).unwrap().unwrap();
         assert_eq!(first.request.url, "https://example.com/retry".to_string());
 
-        block_on(scheduler.nack(&first.id)).unwrap();
+        block_on(scheduler.requeue(&first.id)).unwrap();
 
-        let second = block_on(scheduler.lease()).unwrap();
+        let second = block_on(scheduler.take_ready()).unwrap();
         assert_eq!(
             second.map(|task| task.request.url),
             Some("https://example.com/retry".to_string())
@@ -144,12 +166,12 @@ mod tests {
     #[test]
     fn memory_scheduler_distinguishes_same_url_tasks_by_task_identity() {
         let mut scheduler = Memory::default();
-        block_on(scheduler.enqueue(ScheduledTask::new(
+        block_on(scheduler.enqueue(Task::new(
             Request::new("https://example.com/detail").with_method("GET"),
         )))
         .unwrap();
         block_on(
-            scheduler.enqueue(ScheduledTask::new(
+            scheduler.enqueue(Task::new(
                 Request::new("https://example.com/detail")
                     .with_method("POST")
                     .with_meta("page", crate::value::Value::Number(2.0)),
@@ -157,34 +179,34 @@ mod tests {
         )
         .unwrap();
 
-        let first = block_on(scheduler.lease()).unwrap().unwrap();
-        let second = block_on(scheduler.lease()).unwrap().unwrap();
+        let first = block_on(scheduler.take_ready()).unwrap().unwrap();
+        let second = block_on(scheduler.take_ready()).unwrap().unwrap();
 
         assert_ne!(first.id, second.id);
         assert_eq!(first.request.url, second.request.url);
 
-        block_on(scheduler.ack(&first.id)).unwrap();
+        block_on(scheduler.complete(&first.id)).unwrap();
         assert!(block_on(scheduler.has_pending()).unwrap());
 
-        block_on(scheduler.ack(&second.id)).unwrap();
+        block_on(scheduler.complete(&second.id)).unwrap();
         assert!(!block_on(scheduler.has_pending()).unwrap());
     }
 
     #[test]
     fn memory_scheduler_skips_delayed_task_until_ready() {
         let mut scheduler = Memory::default();
-        block_on(scheduler.enqueue(ScheduledTask::with_delay_ms(
+        block_on(scheduler.enqueue(Task::with_delay_ms(
             Request::new("https://example.com/delayed"),
             10,
         )))
         .unwrap();
 
-        let first = block_on(scheduler.lease()).unwrap();
+        let first = block_on(scheduler.take_ready()).unwrap();
         assert!(first.is_none());
 
         std::thread::sleep(std::time::Duration::try_from(SignedDuration::from_millis(15)).unwrap());
 
-        let second = block_on(scheduler.lease()).unwrap();
+        let second = block_on(scheduler.take_ready()).unwrap();
         assert_eq!(
             second.map(|task| task.request.url),
             Some("https://example.com/delayed".to_string())
@@ -194,22 +216,62 @@ mod tests {
     #[test]
     fn memory_scheduler_keeps_ready_order_when_delayed_exists() {
         let mut scheduler = Memory::default();
-        block_on(scheduler.enqueue(ScheduledTask::with_delay_ms(
+        block_on(scheduler.enqueue(Task::with_delay_ms(
             Request::new("https://example.com/delayed"),
             20,
         )))
         .unwrap();
-        block_on(scheduler.enqueue(ScheduledTask::new(Request::new(
-            "https://example.com/ready",
-        ))))
-        .unwrap();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/ready")))).unwrap();
 
-        let first = block_on(scheduler.lease()).unwrap();
+        let first = block_on(scheduler.take_ready()).unwrap();
 
         assert_eq!(
             first.map(|task| task.request.url),
             Some("https://example.com/ready".to_string())
         );
+    }
+
+    #[test]
+    fn memory_scheduler_exposes_scheduler_state_with_explicit_state_buckets() {
+        let mut scheduler = Memory::default();
+        let ready = Task::new(Request::new("https://example.com/ready"));
+        let delayed = Task::with_delay_ms(Request::new("https://example.com/delayed"), 20);
+
+        block_on(scheduler.enqueue(ready.clone())).unwrap();
+        block_on(scheduler.enqueue(delayed.clone())).unwrap();
+
+        let taken = block_on(scheduler.take_ready()).unwrap().unwrap();
+        let snapshot = scheduler.snapshot();
+
+        assert_eq!(snapshot.counts().ready, 0);
+        assert_eq!(snapshot.counts().delayed, 1);
+        assert_eq!(snapshot.counts().inflight, 1);
+        assert_eq!(snapshot.counts().total(), 2);
+        assert!(snapshot.has_pending());
+        assert_eq!(
+            snapshot.delayed[0].request.url,
+            "https://example.com/delayed".to_string()
+        );
+        assert_eq!(snapshot.inflight[0].id.as_str(), taken.id.as_str());
+    }
+
+    #[test]
+    fn memory_scheduler_can_restore_from_snapshot() {
+        let ready = Task::new(Request::new("https://example.com/ready"));
+        let delayed = Task::with_delay_ms(Request::new("https://example.com/delayed"), 20);
+        let inflight = Task::new(Request::new("https://example.com/inflight"));
+        let scheduler = Memory::from_snapshot(Snapshot {
+            ready: vec![ready.clone()],
+            delayed: vec![delayed.clone()],
+            inflight: vec![inflight.clone()],
+        });
+
+        let counts = scheduler.counts();
+
+        assert_eq!(counts.ready, 1);
+        assert_eq!(counts.delayed, 1);
+        assert_eq!(counts.inflight, 1);
+        assert_eq!(counts.total(), 3);
     }
 
     fn block_on<F: Future>(future: F) -> F::Output {

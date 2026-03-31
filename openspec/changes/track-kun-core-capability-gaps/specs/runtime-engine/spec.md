@@ -16,6 +16,18 @@
 - **WHEN** 某个 inflight task 因失败被重试或延迟重排
 - **THEN** 该任务在 ready、delayed 与 inflight 之间流转时保持同一个 task identity，而不是重新退化成按 URL 跟踪
 
+#### Scenario: Memory scheduler keeps its scheduler state boundary explicit
+
+- **WHEN** 当前使用 `scheduler::Memory`
+- **THEN** 它把 scheduler state 明确为 `ready`、`delayed` 与 `inflight` 三组任务状态
+- **AND** 这些状态可以导出为共享 `scheduler::state::Snapshot`，而不是只藏在内存实现细节里
+
+#### Scenario: Durable scheduler state is a separate persistence concern
+
+- **WHEN** 调用方需要 crash-safe scheduler state/scheduler
+- **THEN** 它应基于共享 `scheduler::state::Snapshot` / `scheduler::state::Store` 边界落到独立持久化实现
+- **AND** 当前 `scheduler::Memory` 的边界保持为 memory-only
+
 ### Requirement: Engine Defines Validation And Item Pipeline Failure Semantics
 
 系统 MUST 明确 validation、单一 item pipeline 以及 item 丢弃时的引擎行为语义。

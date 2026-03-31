@@ -1,11 +1,26 @@
 use crate::error::SpiderError;
-use crate::scheduler::types::{ScheduledTask, TaskId};
+use crate::scheduler::{Task, TaskId};
 
 #[allow(async_fn_in_trait)]
+/// Coordinates task lifecycle transitions for the engine.
+///
+/// A scheduler is responsible for moving tasks through the current runtime
+/// state buckets: `ready`, `delayed`, and `inflight`.
 pub trait Scheduler: Send + Sync {
-    async fn enqueue(&mut self, task: ScheduledTask) -> Result<(), SpiderError>;
-    async fn lease(&mut self) -> Result<Option<ScheduledTask>, SpiderError>;
-    async fn ack(&mut self, task_id: &TaskId) -> Result<(), SpiderError>;
-    async fn nack(&mut self, task_id: &TaskId) -> Result<(), SpiderError>;
+    /// Adds a task into scheduler state.
+    async fn enqueue(&mut self, task: Task) -> Result<(), SpiderError>;
+
+    /// Takes one ready task for execution and moves it into `inflight`.
+    ///
+    /// The caller must later resolve it with `complete()` or `requeue()`.
+    async fn take_ready(&mut self) -> Result<Option<Task>, SpiderError>;
+
+    /// Marks an inflight task as completed and removes it from scheduler state.
+    async fn complete(&mut self, task_id: &TaskId) -> Result<(), SpiderError>;
+
+    /// Marks an inflight task as not completed and requeues it for later work.
+    async fn requeue(&mut self, task_id: &TaskId) -> Result<(), SpiderError>;
+
+    /// Returns whether any task still remains in scheduler state.
     async fn has_pending(&self) -> Result<bool, SpiderError>;
 }
