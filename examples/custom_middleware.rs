@@ -74,7 +74,7 @@ impl Middleware for RequestLoggerMiddleware {
                 url = context.request.url.as_str(),
                 method = context.request.method.as_str(),
                 headers = ?context.request.headers,
-                "[RequestLogger] 发送请求"
+                "[RequestLogger] sending request"
             );
             Ok(Flow::Continue)
         })
@@ -90,7 +90,7 @@ impl Middleware for RequestLoggerMiddleware {
                     url = context.request.url.as_str(),
                     status = resp.status,
                     body_len = resp.body.len(),
-                    "[RequestLogger] 收到响应"
+                    "[RequestLogger] received response"
                 );
             }
             Ok(Flow::Continue)
@@ -129,7 +129,11 @@ impl Middleware for StatsMiddleware {
     ) -> BoxFuture<'a, Result<Flow, SpiderError>> {
         Box::pin(async move {
             let n = self.request_count.fetch_add(1, Ordering::Relaxed) + 1;
-            tracing::info!(label = self.label.as_str(), count = n, "[Stats] 请求计数");
+            tracing::info!(
+                label = self.label.as_str(),
+                count = n,
+                "[Stats] request count"
+            );
             Ok(Flow::Continue)
         })
     }
@@ -140,7 +144,11 @@ impl Middleware for StatsMiddleware {
     ) -> BoxFuture<'a, Result<Flow, SpiderError>> {
         Box::pin(async move {
             let n = self.response_count.fetch_add(1, Ordering::Relaxed) + 1;
-            tracing::info!(label = self.label.as_str(), count = n, "[Stats] 响应计数");
+            tracing::info!(
+                label = self.label.as_str(),
+                count = n,
+                "[Stats] response count"
+            );
             Ok(Flow::Continue)
         })
     }
@@ -182,7 +190,7 @@ impl PeriodDemoSpider {
             .unwrap_or("unknown");
         let title = response.css("h2.S10_bb").text().one().unwrap_or_default();
 
-        tracing::info!(period_date, title = title.as_str(), "解析版面页");
+        tracing::info!(period_date, title = title.as_str(), "parsed edition page");
 
         Ok(Output {
             items: vec![
@@ -254,34 +262,34 @@ async fn main() {
 
     let spider = PeriodDemoSpider;
 
-    println!("=== 自定义中间件示例 ===");
+    println!("=== Custom Middleware Example ===");
     println!("Spider: {}", spider.name());
     println!();
-    println!("已注册的引擎级中间件：");
-    println!("  - custom_ua (order=100): 注入自定义 User-Agent");
-    println!("  - request_logger (order=200): 打印请求/响应日志");
+    println!("Registered engine-level middleware:");
+    println!("  - custom_ua (order=100): inject a custom User-Agent");
+    println!("  - request_logger (order=200): log requests and responses");
     println!();
-    println!("已注册的配置驱动中间件：");
-    println!("  - stats (order=10): 统计请求/响应数量（通过 Settings 配置）");
+    println!("Registered config-driven middleware:");
+    println!("  - stats (order=10): count requests and responses via Settings");
     println!();
-    println!("中间件执行顺序：stats(10) → custom_ua(100) → request_logger(200)");
-    println!("按 Ctrl+C 停止");
+    println!("Middleware order: stats(10) -> custom_ua(100) -> request_logger(200)");
+    println!("Press Ctrl+C to stop");
     println!();
 
     let handle = engine.shutdown_handle();
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.ok();
-        tracing::info!("收到 Ctrl+C，停止引擎...");
+        tracing::info!("received Ctrl+C, stopping engine...");
         handle.stop();
     });
 
     match engine.run(&spider).await {
         Ok(outputs) => {
             let total: usize = outputs.iter().map(|o| o.items.len()).sum();
-            println!("\n=== 完成 ===");
-            println!("共 {} 轮，{} 个 items", outputs.len(), total);
+            println!("\n=== Done ===");
+            println!("{} run(s), {} item(s) total", outputs.len(), total);
         }
-        Err(e) => eprintln!("出错: {e}"),
+        Err(e) => eprintln!("error: {e}"),
     }
 }
 
@@ -290,12 +298,12 @@ fn latest_period(response: &Response) -> Result<(String, String), SpiderError> {
         .xml("//period[last()]/period_date")
         .text()
         .one()
-        .ok_or_else(|| SpiderError::parse("未找到 period_date"))?;
+        .ok_or_else(|| SpiderError::parse("period_date not found"))?;
     let front_page = response
         .xml("//period[last()]/front_page")
         .text()
         .one()
-        .ok_or_else(|| SpiderError::parse("未找到 front_page"))?;
+        .ok_or_else(|| SpiderError::parse("front_page not found"))?;
     Ok((period_date, front_page))
 }
 
@@ -312,13 +320,13 @@ fn latest_edition_url(response: &Response) -> Result<String, SpiderError> {
     let mut parts = period_date.split('-');
     let year = parts
         .next()
-        .ok_or_else(|| SpiderError::parse("period_date 缺少年份"))?;
+        .ok_or_else(|| SpiderError::parse("period_date is missing year"))?;
     let month = parts
         .next()
-        .ok_or_else(|| SpiderError::parse("period_date 缺少月份"))?;
+        .ok_or_else(|| SpiderError::parse("period_date is missing month"))?;
     let day = parts
         .next()
-        .ok_or_else(|| SpiderError::parse("period_date 缺少日期"))?;
+        .ok_or_else(|| SpiderError::parse("period_date is missing day"))?;
 
     Ok(format!(
         "https://ep.shxwcb.com/{year}/{month}/{day}/{front_page}?f={year}/{month}/period.xml"

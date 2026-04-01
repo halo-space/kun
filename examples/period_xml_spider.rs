@@ -47,7 +47,7 @@ impl Spider for PeriodSpider {
             period_date = period_date.as_str(),
             front_page = front_page.as_str(),
             list_url = list_url.as_str(),
-            "解析到最新版面"
+            "resolved latest edition"
         );
 
         let req = response
@@ -80,7 +80,7 @@ impl PeriodSpider {
             period_date,
             front_page,
             url = response.url.as_str(),
-            "解析版面页"
+            "parsed edition page"
         );
 
         let links = extract_article_links(response);
@@ -106,16 +106,22 @@ impl PeriodSpider {
     }
 
     async fn parse_detail(&self, response: &Response) -> Result<Output, SpiderError> {
-        tracing::info!(url = response.url.as_str(), "解析详情页");
+        tracing::info!(url = response.url.as_str(), "parsed detail page");
 
         let title = response
             .css("p.title1")
             .text()
+            .fallback(response.css("title").text())
             .one()
-            .or_else(|| response.css("title").text().one())
             .unwrap_or_default();
         let subtitle = response.css("p.title5").text().one().unwrap_or_default();
-        let content = normalize_text(&response.css("td.content_tt").text().all().join(""));
+        let content = response
+            .css("td.content_tt")
+            .text()
+            .join("")
+            .normalize_whitespace()
+            .one()
+            .unwrap_or_default();
         let preview = truncate(&content, 120);
         let period_date = response
             .meta
@@ -163,8 +169,8 @@ async fn main() {
         Engine::new(Memory::default(), Http::default(), Browser).with_settings(settings);
 
     match engine.run(&spider).await {
-        Ok(_) => println!("\n=== 抓取完成 ==="),
-        Err(e) => eprintln!("抓取失败: {e}"),
+        Ok(_) => println!("\n=== Crawl Complete ==="),
+        Err(e) => eprintln!("crawl failed: {e}"),
     }
 }
 
@@ -173,12 +179,12 @@ fn latest_issue(response: &Response) -> Result<(String, String), SpiderError> {
         .xml("//period[last()]/period_date")
         .text()
         .one()
-        .ok_or_else(|| SpiderError::parse("未找到 period_date"))?;
+        .ok_or_else(|| SpiderError::parse("period_date not found"))?;
     let front_page = response
         .xml("//period[last()]/front_page")
         .text()
         .one()
-        .ok_or_else(|| SpiderError::parse("未找到 front_page"))?;
+        .ok_or_else(|| SpiderError::parse("front_page not found"))?;
     Ok((period_date, front_page))
 }
 
@@ -186,13 +192,13 @@ fn build_edition_url(period_date: &str, front_page: &str) -> Result<String, Spid
     let mut parts = period_date.split('-');
     let year = parts
         .next()
-        .ok_or_else(|| SpiderError::parse("period_date 缺少年份"))?;
+        .ok_or_else(|| SpiderError::parse("period_date is missing year"))?;
     let month = parts
         .next()
-        .ok_or_else(|| SpiderError::parse("period_date 缺少月份"))?;
+        .ok_or_else(|| SpiderError::parse("period_date is missing month"))?;
     let day = parts
         .next()
-        .ok_or_else(|| SpiderError::parse("period_date 缺少日期"))?;
+        .ok_or_else(|| SpiderError::parse("period_date is missing day"))?;
 
     Ok(format!(
         "https://ep.shxwcb.com/{year}/{month}/{day}/{front_page}?f={year}/{month}/period.xml"
@@ -216,13 +222,6 @@ fn extract_article_links(response: &Response) -> Vec<String> {
     }
 
     links
-}
-
-fn normalize_text(text: &str) -> String {
-    text.replace(['\n', '\r', '\t'], " ")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
 }
 
 fn truncate(text: &str, max_chars: usize) -> String {

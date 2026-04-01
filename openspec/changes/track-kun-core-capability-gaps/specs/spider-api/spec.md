@@ -21,6 +21,13 @@
 - **WHEN** DSL step 的运行时校验失败，或代码爬虫直接调用共享 validation API 校验失败
 - **THEN** 系统返回显式 parse error，而不是静默丢弃 item 或 request
 
+#### Scenario: Shared validation supports field paths
+
+- **WHEN** 代码爬虫或 DSL 对 `Validation.field` 使用 `meta.title`、`authors[0].name`、`tags[]`、`articles[].title` 这类字段路径
+- **THEN** 系统按对象路径、数组索引或数组展开解析目标值
+- **AND** 对数组展开路径按每个解析值逐个执行同一套 validation 规则
+- **AND** 校验失败时优先返回具体路径，例如 `articles[1].title`
+
 ### Requirement: Follow Request Derivation Must Preserve Shared Request Semantics
 
 系统 MUST 让 `response.follow()` 与显式构造 `Request` 使用同一套请求能力模型。

@@ -38,10 +38,10 @@ README 这里只保留总览；模块级细节统一放到 [docs/capabilities.md
 
 当前仍待补齐的底层能力：
 
-- 共享 validation 还没有扩到更完整的规则集与失败策略
+- 共享 validation 已支持字段路径解析与逐值校验（例如 `meta.title`、`authors[0].name`、`tags[]`、`articles[].title`），但还没有扩到更完整的规则集与失败策略
 - 还没有内置 crash-safe durable scheduler 实现；当前只把 `scheduler::state::Store` 这层持久化边界显式建模出来
 - 文件之外的数据库、消息队列等 pipeline 输出还没有内置实现
-- HTML XPath、OCR、parse 后处理等 parser 能力仍未收敛
+- HTML XPath、OCR、parse 后处理等 parser 能力仍未完全收敛；当前只补了最小 query transform：`fallback(...)`、`fallback_many(...)`、`field(...)`、`index(...)`、`flatten()`、`compact()`、`first_non_empty()`、`join(...)`、`replace(...)`、`normalize_whitespace()`、`parse_number()`、`parse_bool()`，以及最小 query 级断言：`require_non_empty()`、`require_one()`
 
 ## 快速开始
 

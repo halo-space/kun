@@ -138,12 +138,12 @@ fn latest_issue(response: &Response) -> Result<(String, String), SpiderError> {
         .xml("//period[last()]/period_date")
         .text()
         .one()
-        .ok_or_else(|| SpiderError::parse("未找到 period_date"))?;
+        .ok_or_else(|| SpiderError::parse("period_date not found"))?;
     let front_page = response
         .xml("//period[last()]/front_page")
         .text()
         .one()
-        .ok_or_else(|| SpiderError::parse("未找到 front_page"))?;
+        .ok_or_else(|| SpiderError::parse("front_page not found"))?;
 
     Ok((period_date, front_page))
 }
@@ -152,13 +152,13 @@ fn build_edition_url(period_date: &str, front_page: &str) -> Result<String, Spid
     let mut parts = period_date.split('-');
     let year = parts
         .next()
-        .ok_or_else(|| SpiderError::parse("period_date 缺少年份"))?;
+        .ok_or_else(|| SpiderError::parse("period_date is missing year"))?;
     let month = parts
         .next()
-        .ok_or_else(|| SpiderError::parse("period_date 缺少月份"))?;
+        .ok_or_else(|| SpiderError::parse("period_date is missing month"))?;
     let day = parts
         .next()
-        .ok_or_else(|| SpiderError::parse("period_date 缺少日期"))?;
+        .ok_or_else(|| SpiderError::parse("period_date is missing day"))?;
 
     Ok(format!(
         "https://ep.shxwcb.com/{year}/{month}/{day}/{front_page}?f={year}/{month}/period.xml"

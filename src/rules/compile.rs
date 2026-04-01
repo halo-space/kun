@@ -9,7 +9,7 @@ use crate::rules::schema::{
 };
 use crate::rules::validate::validate_rules;
 use crate::runtime::{Config as RuntimeConfig, merge as merge_runtime};
-use crate::validator::{ValidationPlan, ValidationRule, ValidationType};
+use crate::validator::{Validation, ValidationRule, ValidationType};
 use crate::value::Value;
 use std::collections::BTreeMap;
 
@@ -247,11 +247,11 @@ fn compile_runtime(runtime: BTreeMap<String, Value>) -> Result<RuntimeConfig, Sp
     })
 }
 
-fn parse_validation(value: &Value) -> Result<ValidationPlan, SpiderError> {
+fn parse_validation(value: &Value) -> Result<Validation, SpiderError> {
     let entry = value
         .as_object()
         .ok_or_else(|| SpiderError::rules("step validate entry must be an object"))?;
-    let name = required_string(entry, "name")?.to_string();
+    let field = required_string(entry, "name")?.to_string();
     let value_type =
         ValidationType::try_from(required_string(entry, "type")?).map_err(SpiderError::rules)?;
     let rule = entry.get("rule").and_then(Value::as_object);
@@ -275,8 +275,8 @@ fn parse_validation(value: &Value) -> Result<ValidationPlan, SpiderError> {
         .map(|values| values.to_vec())
         .unwrap_or_default();
 
-    Ok(ValidationPlan {
-        name,
+    Ok(Validation {
+        field,
         value_type,
         rule: ValidationRule {
             required,

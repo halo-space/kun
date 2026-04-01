@@ -160,17 +160,41 @@ README 负责总览，这里负责把每个模块现在到底能做什么、还�
 
 - HTML XPath
 - OCR
-- parse 后处理能力
+- 更完整的 parse 后处理能力
 
 所以现在如果是 HTML 页面，优先建议用 CSS 选择器，不建议把 XPath 当成已经可靠的 HTML 能力。
+
+当前已经落下的最小 query transform 能力：
+
+- `fallback(...)`：查询结果为空时用另一个 query 兜底
+- `fallback_many([...])`：按顺序尝试多个 query，返回第一个非空结果
+- `field("key")`：从结构化结果里提取对象字段
+- `index(i)`：从数组结果里提取指定位置元素
+- `flatten()`：把顶层数组结果展开成普通 value 列表，方便继续链式处理
+- `join(...)`：把多段提取结果串成一个文本值
+- `compact()`：丢掉 `null` 和空字符串结果，保留有效值
+- `first_non_empty()`：跳过空值，保留第一个有效结果
+- `replace(from, to)`：对字符串值做最小文本替换
+- `normalize_whitespace()`：统一折叠空白字符
+- `parse_number()`：把字符串或数字值收口成数值，失败时显式返回 parse error
+- `parse_bool()`：把 `true/false/1/0` 这类最小布尔文本收口成布尔值，失败时显式返回 parse error
+
+当前也补了最小 query 级约束：
+
+- `require_non_empty()`：要求至少有一个非空结果，否则直接返回 parse error
+- `require_one()`：要求恰好只有一个非空结果，否则直接返回 parse error
+
+更丰富的类型转换、normalize 规则与结构化后处理还没有统一收口；当前只补了最小多 query 兜底、结构投影、数组拉平、结果筛选、string transform、scalar conversion 与 query-level assertions。
 
 ## Validation
 
 `validate` 是底层共享能力，不应该只存在于 DSL 配置里。
 
-- 当前已经有共享 validation plan
-- DSL 可以编译到这套 plan
+- 当前已经有共享 `Validation` / `ValidationRule` 结构
+- DSL 可以编译到这套共享 validation 定义
 - 代码爬虫现在已经可以直接调用 `validator::validate_fields()` / `validator::validate_item()`
+- `Validation.field` 现在已经支持最小字段路径：`meta.title`、`authors[0].name`、`tags[]`、`articles[].title`
+- 如果使用数组展开路径，当前语义是“对展开后的每个值逐个校验”；报错时会尽量返回具体路径，例如 `articles[1].title`
 
 这块后续还会继续补更完整的规则集和失败策略。
 

@@ -62,11 +62,11 @@
 - When 它被编译或分发
 - Then 必须存在 callback 名称
 
-#### Scenario: step validate 编译到共享 validation plan
+#### Scenario: step validate 编译到共享 Validation 定义
 
 - Given 某个 step 声明了 `validate`
 - When rules compiler 构建该 step
-- Then `validate` 被编译为共享 validation plan，而不是保留为 DSL 私有原始 map
+- Then `validate` 被编译为共享 `Validation` 定义，而不是保留为 DSL 私有原始 map
 
 ### Requirement: Fetch plan 支持 request 与 browser 细节
 

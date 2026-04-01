@@ -2,11 +2,12 @@
 
 ## 1. 共享 Validation 能力
 
-- [x] 1.1 定义共享 validation plan 结构，并把它从 `rules` 的配置字段提升为可复用的底层能力。
+- [x] 1.1 定义共享 `Validation` / `ValidationRule` 结构，并把它从 `rules` 的配置字段提升为可复用的底层能力。
 - [x] 1.2 在 DSL 执行链中实际执行字段校验，而不是只解析 `step.validate`。
 - [x] 1.3 为代码爬虫提供直接调用同一套 validation 能力的 API，而不是要求代码模式自行手写重复逻辑。
 - [x] 1.4 明确校验失败的运行时语义：报错、丢弃还是可配置策略。
 - [x] 1.5 同步 `openspec/specs/spider-api/spec.md`、`openspec/specs/rules-dsl/spec.md` 与相关测试。
+- [x] 1.6 为共享 `Validation.field` 补最小字段路径能力，至少支持对象路径、数组索引与数组展开的逐值校验。
 
 ## 2. Request / Follow / Session 能力
 
@@ -48,7 +49,9 @@
 - [ ] 6.1 补齐 HTML XPath 能力，或明确提供稳定的 HTML XPath 替代实现。
 - [ ] 6.2 为 `ocr` selector_type 补真正 parser/runtime 支持，或从 schema 中移除占位能力。
 - [ ] 6.3 规划 parse 后处理能力：多选择器兜底、normalize、类型转换、结构化校验。
-- [ ] 6.4 同步 `README.md`、`TODO.md` 与 parser 测试。
+  - 当前已补最小 query transform：`fallback(...)`、`fallback_many(...)`、`field(...)`、`index(...)`、`flatten()`、`compact()`、`first_non_empty()`、`join(...)`、`replace(...)`、`normalize_whitespace()`、`parse_number()`、`parse_bool()`。
+  - 当前也已补最小 query 级断言：`require_non_empty()`、`require_one()`；更完整的多选择器策略与结构化后处理仍待统一收口。
+- [x] 6.4 同步 `README.md`、`TODO.md` 与 parser 测试。
 
 ## 7. Pipeline Item 处理能力
 

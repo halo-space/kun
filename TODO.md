@@ -7,12 +7,14 @@
 
 - HTML XPath 仍然暂缓。当前 XPath 基于 XML 解析器，在不规范 HTML 上不稳定，HTML 场景继续建议优先使用 CSS。
 - `ocr` 相关解析能力仍未实现，当前不纳入落地范围。
-- parse 后处理还比较薄：多选择器兜底、normalize、类型转换等能力还没有统一抽象。
+- parse 后处理已补最小 query transform：`fallback(...)`、`fallback_many(...)`、`field(...)`、`index(...)`、`flatten()`、`compact()`、`first_non_empty()`、`join(...)`、`replace(...)`、`normalize_whitespace()`、`parse_number()`、`parse_bool()`。
+- query 级最小断言也已补：`require_non_empty()`、`require_one()`。
+- 更完整的类型转换、结构化 normalize、多选择器策略收口与 parser 后处理语义还没有统一抽象；当前只补了最小多 query 兜底、结构投影、数组拉平、结果筛选、string transform、scalar conversion 与 query-level assertions。
 
 ## 2. Validation 缺口
 
-- 共享 validation 目前已经支持 `type`、`rule.required`、`rule.regex`、`rule.min/max` 与 `rule.enum`。
-- 嵌套对象、列表成员、字段级 normalize/转换后的再校验还没有统一语义。
+- 共享 `Validation` 目前已经支持 `field`、`value_type`、`rule.required`、`rule.regex`、`rule.min/max`、`rule.enum_values`，以及最小字段路径解析：`meta.title`、`authors[0].name`、`tags[]`、`articles[].title`。
+- 字段级 normalize/转换后的再校验、以及更丰富的失败策略还没有统一语义。
 
 ## 3. Request / Browser / Middleware 缺口
 

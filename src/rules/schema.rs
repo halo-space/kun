@@ -1,4 +1,4 @@
-use crate::validator::ValidationPlan;
+use crate::validator::Validation;
 use crate::value::Value;
 use std::collections::BTreeMap;
 
@@ -40,7 +40,7 @@ pub struct StepConfig {
     pub callback: Option<String>,
     pub fetch: FetchConfig,
     pub parse: ParseConfig,
-    pub validate: Vec<ValidationPlan>,
+    pub validate: Vec<Validation>,
     pub route: BTreeMap<String, Value>,
     pub output: BTreeMap<String, Value>,
     pub runtime: BTreeMap<String, Value>,
@@ -129,7 +129,7 @@ pub struct CompiledStep {
     pub callback: Option<String>,
     pub fetch: FetchPlan,
     pub parse: ParsePlan,
-    pub validate: Vec<ValidationPlan>,
+    pub validate: Vec<Validation>,
     pub runtime: crate::runtime::Config,
     pub middlewares: crate::middleware::Map,
     pub meta: Option<BTreeMap<String, Value>>,

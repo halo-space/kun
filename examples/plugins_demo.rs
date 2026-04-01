@@ -351,7 +351,7 @@ async fn main() {
     let handle = engine.shutdown_handle();
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.ok();
-        tracing::info!("收到 Ctrl+C，停止引擎...");
+        tracing::info!("received Ctrl+C, stopping engine...");
         handle.stop();
     });
 
@@ -360,10 +360,10 @@ async fn main() {
     match engine.run(&spider).await {
         Ok(outputs) => {
             let total: usize = outputs.iter().map(|o| o.items.len()).sum();
-            println!("\n=== 完成 ===");
-            println!("共 {} 轮，{} 个 items", outputs.len(), total);
+            println!("\n=== Done ===");
+            println!("{} run(s), {} item(s) total", outputs.len(), total);
         }
-        Err(e) => eprintln!("出错: {e}"),
+        Err(e) => eprintln!("error: {e}"),
     }
 }
 
@@ -372,12 +372,12 @@ fn latest_period(response: &Response) -> Result<(String, String), SpiderError> {
         .xml("//period[last()]/period_date")
         .text()
         .one()
-        .ok_or_else(|| SpiderError::parse("未找到 period_date"))?;
+        .ok_or_else(|| SpiderError::parse("period_date not found"))?;
     let front_page = response
         .xml("//period[last()]/front_page")
         .text()
         .one()
-        .ok_or_else(|| SpiderError::parse("未找到 front_page"))?;
+        .ok_or_else(|| SpiderError::parse("front_page not found"))?;
     Ok((period_date, front_page))
 }
 
@@ -394,13 +394,13 @@ fn latest_edition_url(response: &Response) -> Result<String, SpiderError> {
     let mut parts = period_date.split('-');
     let year = parts
         .next()
-        .ok_or_else(|| SpiderError::parse("period_date 缺少年份"))?;
+        .ok_or_else(|| SpiderError::parse("period_date is missing year"))?;
     let month = parts
         .next()
-        .ok_or_else(|| SpiderError::parse("period_date 缺少月份"))?;
+        .ok_or_else(|| SpiderError::parse("period_date is missing month"))?;
     let day = parts
         .next()
-        .ok_or_else(|| SpiderError::parse("period_date 缺少日期"))?;
+        .ok_or_else(|| SpiderError::parse("period_date is missing day"))?;
 
     Ok(format!(
         "https://ep.shxwcb.com/{year}/{month}/{day}/{front_page}?f={year}/{month}/period.xml"
