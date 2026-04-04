@@ -1,12 +1,13 @@
 use crate::request::Request;
 use jiff::Timestamp;
+use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Stable identity for a scheduled task.
 ///
 /// This lets the scheduler track tasks independently even when multiple
 /// requests share the same URL.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct TaskId(String);
 
 impl TaskId {
@@ -32,11 +33,13 @@ impl Default for TaskId {
 }
 
 /// A request plus scheduler-owned execution metadata.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     pub id: TaskId,
     pub request: Request,
     pub ready_at_ms: Option<u64>,
+    pub priority: i32,
+    pub depth: u32,
 }
 
 impl Task {
@@ -51,6 +54,8 @@ impl Task {
             id,
             request,
             ready_at_ms: None,
+            priority: 0,
+            depth: 0,
         }
     }
 
@@ -65,7 +70,25 @@ impl Task {
             id,
             request,
             ready_at_ms: Some(now_ms().saturating_add(delay_ms)),
+            priority: 0,
+            depth: 0,
         }
+    }
+
+    /// Assigns an explicit scheduler priority to this task.
+    ///
+    /// Higher values are taken before lower values.
+    pub fn with_priority(mut self, priority: i32) -> Self {
+        self.priority = priority;
+        self
+    }
+
+    /// Assigns the crawl depth for this task.
+    ///
+    /// Lower depth wins when priorities are equal.
+    pub fn with_depth(mut self, depth: u32) -> Self {
+        self.depth = depth;
+        self
     }
 
     /// Returns whether this task is ready to be taken for execution now.

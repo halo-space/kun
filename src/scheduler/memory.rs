@@ -1,6 +1,7 @@
 use crate::error::SpiderError;
-use crate::scheduler::state::{Counts, Snapshot};
+use crate::scheduler::checkpoint::{Checkpoint, Counts};
 use crate::scheduler::{Scheduler, Task, TaskId};
+use std::cmp::Ordering;
 use std::collections::VecDeque;
 
 #[derive(Default)]
@@ -11,18 +12,18 @@ pub struct Memory {
 }
 
 impl Memory {
-    /// Restores a memory scheduler from an existing state snapshot.
-    pub fn from_snapshot(snapshot: Snapshot) -> Self {
+    /// Restores a memory scheduler from an existing checkpoint.
+    pub fn from_checkpoint(checkpoint: Checkpoint) -> Self {
         Self {
-            ready: VecDeque::from(snapshot.ready),
-            delayed: snapshot.delayed,
-            inflight: snapshot.inflight,
+            ready: VecDeque::from(checkpoint.ready),
+            delayed: checkpoint.delayed,
+            inflight: checkpoint.inflight,
         }
     }
 
-    /// Exports the current in-memory scheduler state.
-    pub fn snapshot(&self) -> Snapshot {
-        Snapshot {
+    /// Exports the current in-memory scheduler checkpoint.
+    pub fn checkpoint(&self) -> Checkpoint {
+        Checkpoint {
             ready: self.ready.iter().cloned().collect(),
             delayed: self.delayed.clone(),
             inflight: self.inflight.clone(),
@@ -40,10 +41,20 @@ impl Memory {
 
     fn push_task(&mut self, task: Task) {
         if task.is_ready() {
-            self.ready.push_back(task);
+            self.push_ready_task(task);
         } else {
             self.delayed.push(task);
         }
+    }
+
+    fn push_ready_task(&mut self, task: Task) {
+        let insert_at = self
+            .ready
+            .iter()
+            .position(|existing| ready_ordering(&task, existing) == Ordering::Less)
+            .unwrap_or(self.ready.len());
+
+        self.ready.insert(insert_at, task);
     }
 
     fn promote_delayed(&mut self) {
@@ -84,7 +95,7 @@ impl Scheduler for Memory {
     async fn requeue(&mut self, task_id: &TaskId) -> Result<(), SpiderError> {
         if let Some(pos) = self.inflight.iter().position(|task| &task.id == task_id) {
             let task = self.inflight.remove(pos);
-            self.ready.push_front(task);
+            self.push_task(task);
         }
         Ok(())
     }
@@ -92,6 +103,13 @@ impl Scheduler for Memory {
     async fn has_pending(&self) -> Result<bool, SpiderError> {
         Ok(!self.ready.is_empty() || !self.delayed.is_empty() || !self.inflight.is_empty())
     }
+}
+
+fn ready_ordering(left: &Task, right: &Task) -> Ordering {
+    right
+        .priority
+        .cmp(&left.priority)
+        .then_with(|| left.depth.cmp(&right.depth))
 }
 
 #[cfg(test)]
@@ -232,6 +250,70 @@ mod tests {
     }
 
     #[test]
+    fn memory_scheduler_prefers_higher_priority_then_lower_depth() {
+        let mut scheduler = Memory::default();
+        block_on(
+            scheduler.enqueue(
+                Task::new(Request::new("https://example.com/depth-2"))
+                    .with_priority(0)
+                    .with_depth(2),
+            ),
+        )
+        .unwrap();
+        block_on(
+            scheduler.enqueue(
+                Task::new(Request::new("https://example.com/high-priority"))
+                    .with_priority(10)
+                    .with_depth(8),
+            ),
+        )
+        .unwrap();
+        block_on(
+            scheduler.enqueue(
+                Task::new(Request::new("https://example.com/depth-0"))
+                    .with_priority(0)
+                    .with_depth(0),
+            ),
+        )
+        .unwrap();
+
+        let first = block_on(scheduler.take_ready()).unwrap().unwrap();
+        let second = block_on(scheduler.take_ready()).unwrap().unwrap();
+        let third = block_on(scheduler.take_ready()).unwrap().unwrap();
+
+        assert_eq!(first.request.url, "https://example.com/high-priority");
+        assert_eq!(second.request.url, "https://example.com/depth-0");
+        assert_eq!(third.request.url, "https://example.com/depth-2");
+    }
+
+    #[test]
+    fn memory_scheduler_keeps_fifo_for_same_priority_and_depth() {
+        let mut scheduler = Memory::default();
+        block_on(
+            scheduler.enqueue(
+                Task::new(Request::new("https://example.com/first"))
+                    .with_priority(1)
+                    .with_depth(2),
+            ),
+        )
+        .unwrap();
+        block_on(
+            scheduler.enqueue(
+                Task::new(Request::new("https://example.com/second"))
+                    .with_priority(1)
+                    .with_depth(2),
+            ),
+        )
+        .unwrap();
+
+        let first = block_on(scheduler.take_ready()).unwrap().unwrap();
+        let second = block_on(scheduler.take_ready()).unwrap().unwrap();
+
+        assert_eq!(first.request.url, "https://example.com/first");
+        assert_eq!(second.request.url, "https://example.com/second");
+    }
+
+    #[test]
     fn memory_scheduler_exposes_scheduler_state_with_explicit_state_buckets() {
         let mut scheduler = Memory::default();
         let ready = Task::new(Request::new("https://example.com/ready"));
@@ -241,26 +323,26 @@ mod tests {
         block_on(scheduler.enqueue(delayed.clone())).unwrap();
 
         let taken = block_on(scheduler.take_ready()).unwrap().unwrap();
-        let snapshot = scheduler.snapshot();
+        let checkpoint = scheduler.checkpoint();
 
-        assert_eq!(snapshot.counts().ready, 0);
-        assert_eq!(snapshot.counts().delayed, 1);
-        assert_eq!(snapshot.counts().inflight, 1);
-        assert_eq!(snapshot.counts().total(), 2);
-        assert!(snapshot.has_pending());
+        assert_eq!(checkpoint.counts().ready, 0);
+        assert_eq!(checkpoint.counts().delayed, 1);
+        assert_eq!(checkpoint.counts().inflight, 1);
+        assert_eq!(checkpoint.counts().total(), 2);
+        assert!(checkpoint.has_pending());
         assert_eq!(
-            snapshot.delayed[0].request.url,
+            checkpoint.delayed[0].request.url,
             "https://example.com/delayed".to_string()
         );
-        assert_eq!(snapshot.inflight[0].id.as_str(), taken.id.as_str());
+        assert_eq!(checkpoint.inflight[0].id.as_str(), taken.id.as_str());
     }
 
     #[test]
-    fn memory_scheduler_can_restore_from_snapshot() {
+    fn memory_scheduler_can_restore_from_checkpoint() {
         let ready = Task::new(Request::new("https://example.com/ready"));
         let delayed = Task::with_delay_ms(Request::new("https://example.com/delayed"), 20);
         let inflight = Task::new(Request::new("https://example.com/inflight"));
-        let scheduler = Memory::from_snapshot(Snapshot {
+        let scheduler = Memory::from_checkpoint(Checkpoint {
             ready: vec![ready.clone()],
             delayed: vec![delayed.clone()],
             inflight: vec![inflight.clone()],

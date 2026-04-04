@@ -30,6 +30,15 @@ impl Item {
         self.fields.get(key)
     }
 
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::Value::Object(
+            self.fields
+                .iter()
+                .map(|(key, value)| (key.clone(), value.to_json()))
+                .collect(),
+        )
+    }
+
     pub fn len(&self) -> usize {
         self.fields.len()
     }
@@ -51,5 +60,20 @@ mod tests {
 
         assert_eq!(item.len(), 2);
         assert_eq!(item.get("title"), Some(&Value::String("hello".to_string())));
+    }
+
+    #[test]
+    fn item_can_convert_to_json_object() {
+        let item = Item::new()
+            .with_field("title", Value::String("hello".to_string()))
+            .with_field("published", Value::Bool(true));
+
+        assert_eq!(
+            item.to_json(),
+            serde_json::json!({
+                "published": true,
+                "title": "hello"
+            })
+        );
     }
 }

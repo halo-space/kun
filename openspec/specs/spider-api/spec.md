@@ -70,6 +70,27 @@
 - When 某个字段缺失或类型不匹配导致校验失败
 - Then 系统返回 parse error，而不是静默丢弃当前输出
 
+#### Scenario: Optional validation only applies when configured and present
+
+- Given 代码爬虫或 DSL 只为部分字段声明了共享 validation
+- When 某个未声明 validation 的字段不存在，或某条非 `required` 的 validation 对应字段不存在
+- Then 系统跳过该字段的 validation
+- And 不会因为缺失字段去触发额外的类型、长度或枚举错误
+
+#### Scenario: Conditional validation can gate required and optional rules
+
+- Given 代码爬虫或 DSL 为共享 validation 声明了条件约束
+- When 它使用 `with_when_exists(...)`、`with_when_equals(...)` 或 `with_required_when_equals(...)` 这类条件规则
+- Then 系统只在条件命中时执行对应 validation
+- And 条件未命中时，该 validation 视为 skipped，而不是自动通过或自动报错
+
+#### Scenario: Validation supports explicit text list and object constraints
+
+- Given 代码爬虫或 DSL 需要校验文本长度、列表长度或对象字段数量
+- When 它使用 `with_min_length(...)`、`with_max_items(...)`、`with_required_fields([...])` 这类共享 validation 规则
+- Then 系统按对应值类型执行显式约束
+- And 规则名与实际校验语义保持一致，而不是全部混用为泛化的 `min/max`
+
 ### Requirement: Request 支持 HTTP 与 browser 执行模式
 
 库必须通过统一的 `Request` 类型描述外发工作，并支持 `mode = http | browser`。
@@ -136,6 +157,13 @@
 - Then browser downloader 至少按 session id 串行化实际浏览器执行
 - And 不同 session id 之间仍可继续并发
 
+#### Scenario: Browser route remains a rendering downloader
+
+- Given 一个 browser 请求用于抓取动态页面内容
+- When browser downloader 执行该请求
+- Then 它聚焦于导航、等待页面就绪和返回最终 HTML
+- And 框架不把点击、滚动、脚本执行这类页面动作作为公开共享 request 配置继续扩展
+
 ### Requirement: Request 建模核心请求级能力
 
 库必须在统一的 `Request` 类型上建模 timeout、proxy、session 以及 request 级 cookies/follow 继承语义，而不是把这些能力散落成互不对齐的入口。
@@ -198,12 +226,13 @@
 - Then `Response.body` 保留原始字节
 - And `Response.text` 由 `Response.body` 解码得到，而不是来自独立来源
 
-#### Scenario: Response text respects declared charset before UTF-8 fallback
+#### Scenario: Response text respects declared charset before apparent encoding and UTF-8 fallback
 
 - Given 响应头或文档声明了 `charset`
 - When 框架从 `Response.body` 派生 `Response.text`
 - Then 它优先使用声明编码进行解码
-- And 如果没有可用编码声明，则回退为 UTF-8 lossy 解码
+- And 如果没有可用编码声明，则先尝试 apparent encoding 猜测
+- And 当无法依赖声明编码时，最终仍可回退为 UTF-8 lossy 解码
 
 ### Requirement: Response 提供内建解析辅助方法
 
@@ -214,3 +243,24 @@
 - Given 一个已经解码出文本内容的响应
 - When 用户调用 `css`、`xpath`、`json`、`xml`、`regex`、`ai` 或 `feed`
 - Then 这些辅助方法都以响应 text 作为输入源
+
+#### Scenario: Query transforms can resolve relative URLs against a base URL
+
+- Given 用户从响应里提取到相对链接文本
+- When 它对 `ValueQuery` 调用 `resolve_url(base_url)`
+- Then 系统把相对 URL 解析成绝对 URL
+- And 如果输入是空字符串、非字符串或 base URL 无效，则显式返回 parse error
+
+#### Scenario: Query transforms can parse embedded JSON text into structured values
+
+- Given 用户从页面脚本或属性里提取到 JSON 文本
+- When 它对 `ValueQuery` 调用 `parse_json()`
+- Then 系统把 JSON 文本解析成结构化值
+- And 用户可以继续对结果调用 `field(...)`、`index(...)` 等链式读取方法
+
+#### Scenario: Query transforms can slice split and deduplicate result lists
+
+- Given 用户从响应里提取到多值结果或分隔字符串
+- When 它对 `ValueQuery` 调用 `skip(...)`、`take(...)`、`last()`、`split(...)` 或 `dedup()`
+- Then 系统按声明顺序处理结果集
+- And 不会隐式改变其它未声明的 query 语义

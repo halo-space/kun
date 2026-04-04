@@ -23,7 +23,7 @@
 - [x] 3.2 明确 retry、delayed task、inflight task 在 task identity 下的行为。
 - [x] 3.3 校验 scheduler 在“同 URL 不同 meta/body/method”场景下的正确性。
 - [x] 3.4 同步 `openspec/specs/runtime-engine/spec.md` 与 scheduler 测试。
-- [x] 3.5 明确当前 scheduler 的 memory-only 边界，并规划 durable scheduler/state store 的最小接口或实现方向。
+- [x] 3.5 明确当前 scheduler 的 memory-only 边界，并规划 durable scheduler / checkpoint 持久化 的最小接口或实现方向。
 
 ## 4. Cookies / Proxy / HTTP 真实能力
 
@@ -44,21 +44,21 @@
 
 ## 6. Parser 缺口补齐
 
-当前暂缓：HTML XPath 目前没有稳定好用的底层库方案，`ocr` 也暂无可落地实现；这组任务先不纳入当前实现范围。
+当前暂缓：HTML XPath 目前没有稳定好用的底层库方案，`ocr` 也暂无可落地实现；这组任务继续保留为 deferred，不纳入本轮实现范围。
 
 - [ ] 6.1 补齐 HTML XPath 能力，或明确提供稳定的 HTML XPath 替代实现。
 - [ ] 6.2 为 `ocr` selector_type 补真正 parser/runtime 支持，或从 schema 中移除占位能力。
 - [ ] 6.3 规划 parse 后处理能力：多选择器兜底、normalize、类型转换、结构化校验。
-  - 当前已补最小 query transform：`fallback(...)`、`fallback_many(...)`、`field(...)`、`index(...)`、`flatten()`、`compact()`、`first_non_empty()`、`join(...)`、`replace(...)`、`normalize_whitespace()`、`parse_number()`、`parse_bool()`。
+  - 当前已补一组更完整的 query transform：`fallback(...)`、`fallback_many(...)`、`field(...)`、`index(...)`、`flatten()`、`compact()`、`trim()`、`first_non_empty()`、`skip(...)`、`take(...)`、`last()`、`dedup()`、`join(...)`、`split(...)`、`replace(...)`、`normalize_whitespace()`、`parse_number()`、`parse_bool()`、`parse_json()`、`parse_datetime()`、`parse_datetime_with_format(...)`。
   - 当前也已补最小 query 级断言：`require_non_empty()`、`require_one()`；更完整的多选择器策略与结构化后处理仍待统一收口。
 - [x] 6.4 同步 `README.md`、`TODO.md` 与 parser 测试。
 
-## 7. Pipeline Item 处理能力
+## 7. Pipeline / Store Item 链路
 
-- [x] 7.1 将当前轻量 `Pipeline` 收口为唯一的 item 处理/输出链路，移除独立 `ItemOutput` / `sink` 运行时概念。
-- [x] 7.2 提供最小内置 pipeline 输出能力：补齐 `pipeline::Memory`，并以 pipeline 方式承载持久化扩展点。
-- [x] 7.3 明确 pipeline 错误与 item 丢弃的运行时语义。
-- [x] 7.4 同步 `openspec/specs/runtime-engine/spec.md` 与 pipeline 输出测试。
+- [x] 7.1 将当前轻量 `Pipeline` 收口为唯一的 item 处理链路，并把最终持久化/投递沉到独立 `Store` 边界。
+- [x] 7.2 提供最小内置 store 能力，并让 engine 走 `pipeline -> store` 语义。
+- [x] 7.3 明确 pipeline 丢弃、pipeline 错误与 store 错误的运行时语义。
+- [x] 7.4 同步 `openspec/specs/runtime-engine/spec.md` 与 pipeline/store 测试。
 
 ## 8. Plugin 扩展边界
 
@@ -97,3 +97,57 @@
 - [x] 12.1 明确 `Response.body` 保存原始字节，`Response.text` 是从 `body` 解码得到的字符串视图，而不是单独维护另一份来源。
 - [x] 12.2 为 `Response` 构造路径补统一的文本解码逻辑，优先使用 BOM、`Content-Type charset` 与文档声明，再回退 UTF-8 lossy。
 - [x] 12.3 为 HTTP 下载链路补编码回归测试，并同步 `openspec/specs/spider-api/spec.md`、`README.md`、`TODO.md`。
+
+## 13. Browser 渲染下载边界
+
+- [x] 13.1 明确 browser request 保持“渲染型下载器”定位，聚焦导航、等待页面就绪与最终 HTML 获取，不继续公开点击、滚动、脚本执行这类页面动作配置。
+- [x] 13.2 明确 browser 与现有 `wait_for`、timeout、session 之间的执行顺序和失败语义。
+- [x] 13.3 为 browser 渲染下载边界补单元测试或契约测试，并同步 `README.md`、`docs/capabilities.md` 与 `openspec/specs/spider-api/spec.md`。
+
+## 14. Durable Scheduler 与任务排序
+
+- [x] 14.1 为 `Task` 增加 priority / depth 这类通用调度元数据，并明确 memory scheduler 的取任务顺序。
+- [x] 14.2 提供内置 durable scheduler checkpoint 持久化，至少支持基于磁盘文件的快照持久化与恢复。
+  - 当前已在磁盘文件之外补内置 `scheduler::checkpoint::Redis`，用于基于 Redis 的 scheduler checkpoint 持久化与恢复；如果调用方需要其它后端，可以自行实现 `scheduler::checkpoint::Persist`。
+- [x] 14.3 如果可行，提供内置的 persisted memory scheduler 包装层，让 enqueue / complete / requeue 后自动落盘。
+- [x] 14.3.1 当前也已补直接基于 Redis 的 `scheduler::Redis`，用于真正的 durable scheduler 后端，而不只是 checkpoint 持久化；如果调用方需要其它 scheduler 后端，可以自行实现 `scheduler::Scheduler`。
+- [x] 14.4 同步 `README.md`、`docs/capabilities.md`、`openspec/specs/runtime-engine/spec.md` 与 scheduler 测试。
+
+## 15. Parser / Validation 语义继续收口
+
+- [x] 15.1 在现有 query transform 基础上补更常用的后处理能力，例如 URL 拼接、日期时间解析、结构化 map/filter 或其它代码爬虫直接需要的转换。
+  - 当前已补 `resolve_url(base_url)`，用于把相对链接解析成绝对 URL，并对空串、非字符串与无效 base URL 显式报错。
+  - 当前也已补 `parse_datetime()` 与 `parse_datetime_with_format(...)`，用于把常见日期时间文本收口成规范化字符串，并支持显式 `strptime` 格式。
+  - 当前还已补 `trim()`、`skip(...)`、`take(...)`、`last()`、`dedup()`、`split(...)` 与 `parse_json()`，用于更常见的结果切片、字符串拆分和嵌入 JSON 提取链路。
+- [x] 15.2 为共享 `Validation` 补更完整的规则语义，例如列表/对象级约束、字段转换后的再校验或可配置失败策略。
+  - 当前已补显式文本/列表/对象约束：`with_min_length(...)`、`with_max_length(...)`、`with_min_items(...)`、`with_max_items(...)`、`with_min_fields(...)`、`with_max_fields(...)`、`with_required_fields([...])`。
+  - 当前也已补 `ValidationTransform` 链式转换：`Trim`、`NormalizeWhitespace`、`ParseNumber`、`ParseBool`、`ParseDatetime`，支持字段值先收口再走最终类型与规则校验。
+  - 当前也已补 `with_object_validations([...])`、`with_each_validations([...])` 与 `validate_fields_report()` / `validate_item_report()`，用于嵌套对象/列表成员规则与 collect-all 错误报告。
+  - 当前也已补 `with_all_of([...])`、`with_any_of([...])`、`with_one_of([...])`、`with_mutually_exclusive([...])` 与 `Validation::root()`，用于跨字段组合约束与顶层作用域校验。
+  - 当前也已补最小条件约束：`with_when_exists(...)`、`with_when_missing(...)`、`with_when_equals(...)`、`with_when_not_equals(...)` 与 `with_required_when_*`，用于按条件启用 optional/required 校验。
+- [x] 15.3 同步 `README.md`、`TODO.md`、`docs/capabilities.md` 与 parser / validation 测试。
+
+## 16. 内置 Store 输出与外部投递
+
+- [x] 16.1 在 `parse -> item -> pipeline -> store` 模型上补内置 SQLite store 能力。
+- [x] 16.2 明确 PostgreSQL 不再作为内置 store 维护，统一走用户自定义 `Store` 扩展。
+- [x] 16.3 明确内置数据库 store 的建表、字段映射、错误语义与最小示例。
+  - 当前 SQLite 已明确：自动建表、不自动清空旧数据、每条 item 保留完整 `item_json`、显式字段列类型映射，以及类型不匹配时显式报错。
+  - PostgreSQL 这类外部系统当前统一建议通过自定义 `Store` 接入，而不是继续扩展内置分支。
+- [x] 16.4 明确 store 作为统一最终输出/投递边界，后续 API 推送、Redis、Kafka 与其它文件输出都继续挂在这条线上，而不是再拆独立 sink runtime。
+  - 当前已补最小 `store::Webhook`，用于把完整 item JSON 推送到 HTTP endpoint。
+  - 当前也已补内置 `store::Redis`，支持把完整 item JSON 通过 `SADD` 写入目标 set。
+  - 当前也已补内置 `store::Kafka`，支持把完整 item JSON 作为消息 value 写入目标 topic。
+  - 更多文件 sink 继续沿用同一条 store 扩展边界。
+- [x] 16.5 同步 `openspec/specs/runtime-engine/spec.md`、`README.md`、`docs/capabilities.md` 与相关测试。
+  - 当前也已明确 `Store::batch_write(...)` 语义：engine 会对同一次输出里保留下来的 items 优先走批量写入；默认实现回退为逐条 `write(...)`，内置 `Memory`、`File`、`Redis`、`Sqlite` 已补原生批量路径。
+
+## 17. Runtime 观测与抓取策略
+
+- [x] 17.1 提供最小 stats / metrics 能力，至少能统计请求、响应、错误、重试、item、pipeline 丢弃等核心计数。
+  - 当前已提供 `Engine::stats()`，返回最小 `stats::Snapshot`，包含 `request_count`、`response_count`、`error_count`、`retry_count`、`item_count` 与 `pipeline_drop_count` 六个累计计数。
+- [x] 17.2 提供最小 robots.txt 抓取策略能力，并明确默认行为与可配置边界。
+  - 当前已提供 `Settings::with_robots_obey(true)` 与 `Settings::with_robots_user_agent(...)`；引擎会按 origin 内存缓存 `robots.txt`，支持最小 `User-agent` / `Allow` / `Disallow` 前缀语义，并在下载前跳过不允许的请求。
+- [ ] 17.3 提供最小 HTTP cache / conditional request 能力，至少支持 ETag / Last-Modified 语义。
+  - 当前调整为 `P3`：放到第三期再做，本轮优先继续补请求/下载/响应主链与其它更核心的底层能力。
+- [ ] 17.4 同步 `README.md`、`docs/capabilities.md`、相关 specs 与测试。

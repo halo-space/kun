@@ -16,8 +16,7 @@ use jiff::SignedDuration;
 ///     .retry_times(3)
 ///     .retry_http_codes(vec![500, 502, 503]);
 ///
-/// let engine = Engine::new(scheduler, http, browser)
-///     .with_settings(settings);
+/// let engine = Engine::new().with_settings(settings);
 /// ```
 #[derive(Debug, Clone)]
 pub struct Settings {
@@ -31,6 +30,8 @@ pub struct Settings {
     pub middlewares: MiddlewareMap,
     pub runtime_override: Option<RuntimeConfig>,
     pub connection_pool_size: usize,
+    pub robots_obey: bool,
+    pub robots_user_agent: Option<String>,
     pub openai_api_key: Option<String>,
     pub openai_base_url: Option<String>,
     pub openai_model: String,
@@ -49,6 +50,8 @@ impl Default for Settings {
             middlewares: MiddlewareMap::new(),
             runtime_override: None,
             connection_pool_size: 100,
+            robots_obey: false,
+            robots_user_agent: None,
             openai_api_key: std::env::var("OPENAI_API_KEY").ok(),
             openai_base_url: std::env::var("OPENAI_BASE_URL").ok(),
             openai_model: std::env::var("OPENAI_MODEL")
@@ -117,6 +120,16 @@ impl Settings {
         self
     }
 
+    pub fn with_robots_obey(mut self, obey: bool) -> Self {
+        self.robots_obey = obey;
+        self
+    }
+
+    pub fn with_robots_user_agent(mut self, user_agent: impl Into<String>) -> Self {
+        self.robots_user_agent = Some(user_agent.into());
+        self
+    }
+
     pub fn with_openai_api_key(mut self, key: impl Into<String>) -> Self {
         self.openai_api_key = Some(key.into());
         self
@@ -165,6 +178,12 @@ impl Settings {
             retry,
             dedup,
         }
+    }
+
+    pub(crate) fn resolved_robots_user_agent(&self, spider_name: &str) -> String {
+        self.robots_user_agent
+            .clone()
+            .unwrap_or_else(|| spider_name.to_string())
     }
 }
 

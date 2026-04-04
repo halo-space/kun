@@ -1,5 +1,19 @@
 use crate::{error::SpiderError, value::Value};
+use jiff::{
+    Timestamp, Zoned,
+    civil::{Date, DateTime},
+};
 use std::collections::BTreeMap;
+use url::Url;
+
+const KNOWN_CIVIL_DATETIME_FORMATS: &[&str] = &[
+    "%F %H:%M:%S",
+    "%F %H:%M",
+    "%Y/%m/%d %H:%M:%S",
+    "%Y/%m/%d %H:%M",
+];
+
+const KNOWN_CIVIL_DATE_FORMATS: &[&str] = &["%Y/%m/%d", "%Y.%m.%d"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Kind {
@@ -150,6 +164,16 @@ impl ValueQuery {
         self
     }
 
+    pub fn trim(mut self) -> Self {
+        self.trim = false;
+        self.values = self
+            .values
+            .into_iter()
+            .map(|value| map_query_value_strings(value, &|text| text.trim().to_string()))
+            .collect();
+        self
+    }
+
     pub fn first_non_empty(mut self) -> Self {
         let trim = self.trim;
         self.values = self
@@ -236,6 +260,34 @@ impl ValueQuery {
         self
     }
 
+    pub fn skip(mut self, count: usize) -> Self {
+        self.values = self.values.into_iter().skip(count).collect();
+        self
+    }
+
+    pub fn take(mut self, limit: usize) -> Self {
+        self.values.truncate(limit);
+        self
+    }
+
+    pub fn last(mut self) -> Self {
+        self.values = self.values.pop().into_iter().collect();
+        self
+    }
+
+    pub fn dedup(mut self) -> Self {
+        let mut unique_values = Vec::with_capacity(self.values.len());
+
+        for value in self.values {
+            if !unique_values.iter().any(|existing| existing == &value) {
+                unique_values.push(value);
+            }
+        }
+
+        self.values = unique_values;
+        self
+    }
+
     pub fn normalize_whitespace(mut self) -> Self {
         self.trim = false;
         self.values = self
@@ -244,6 +296,30 @@ impl ValueQuery {
             .map(|value| map_query_value_strings(value, &normalize_whitespace_text))
             .collect();
         self
+    }
+
+    pub fn split(mut self, delimiter: impl AsRef<str>) -> Result<Self, SpiderError> {
+        let source = self.source.clone();
+        let trim = self.trim;
+        let delimiter = delimiter.as_ref().to_string();
+        if delimiter.is_empty() {
+            return Err(SpiderError::parse(format!(
+                "query {source} split delimiter cannot be empty"
+            )));
+        }
+
+        self.kind = Kind::Text;
+        self.trim = false;
+        self.values = self
+            .values
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| split_query_value_string(value, &source, index, trim, &delimiter))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+        Ok(self)
     }
 
     pub fn replace(mut self, from: impl AsRef<str>, to: impl AsRef<str>) -> Self {
@@ -258,6 +334,27 @@ impl ValueQuery {
             .map(|value| map_query_value_strings(value, &transform))
             .collect();
         self
+    }
+
+    pub fn resolve_url(mut self, base_url: impl AsRef<str>) -> Result<Self, SpiderError> {
+        let source = self.source.clone();
+        let trim = self.trim;
+        let base_url_text = base_url.as_ref().to_string();
+        let base_url = Url::parse(&base_url_text).map_err(|error| {
+            SpiderError::parse(format!(
+                "query {source} cannot resolve URLs against invalid base {base_url_text:?}: {error}"
+            ))
+        })?;
+
+        self.kind = Kind::Text;
+        self.trim = false;
+        self.values = self
+            .values
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| resolve_query_value_url(value, &base_url, &source, index, trim))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(self)
     }
 
     pub fn parse_number(mut self) -> Result<Self, SpiderError> {
@@ -282,6 +379,54 @@ impl ValueQuery {
             .into_iter()
             .enumerate()
             .map(|(index, value)| parse_query_value_bool(value, &source, index))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(self)
+    }
+
+    pub fn parse_json(mut self) -> Result<Self, SpiderError> {
+        let source = self.source.clone();
+        let trim = self.trim;
+        self.kind = Kind::Structured;
+        self.trim = false;
+        self.values = self
+            .values
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| parse_query_value_json(value, &source, index, trim))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(self)
+    }
+
+    pub fn parse_datetime(mut self) -> Result<Self, SpiderError> {
+        let source = self.source.clone();
+        let trim = self.trim;
+        self.kind = Kind::Text;
+        self.trim = false;
+        self.values = self
+            .values
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| parse_query_value_datetime(value, &source, index, trim))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(self)
+    }
+
+    pub fn parse_datetime_with_format(
+        mut self,
+        format: impl AsRef<str>,
+    ) -> Result<Self, SpiderError> {
+        let source = self.source.clone();
+        let trim = self.trim;
+        let format = format.as_ref().to_string();
+        self.kind = Kind::Text;
+        self.trim = false;
+        self.values = self
+            .values
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                parse_query_value_datetime_with_format(value, &source, index, trim, &format)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(self)
     }
@@ -451,6 +596,42 @@ fn parse_query_value_bool(value: Value, source: &str, index: usize) -> Result<Va
     }
 }
 
+fn resolve_query_value_url(
+    value: Value,
+    base_url: &Url,
+    source: &str,
+    index: usize,
+    trim: bool,
+) -> Result<Value, SpiderError> {
+    let Value::String(text) = value else {
+        return Err(SpiderError::parse(format!(
+            "failed to resolve query value from {source}[{index}] as URL: expected string, got {}",
+            value_type_name(&value)
+        )));
+    };
+
+    let candidate = trim_text(&text, trim);
+    if candidate.is_empty() {
+        return Err(SpiderError::parse(format!(
+            "failed to resolve query value from {source}[{index}] as URL: empty string"
+        )));
+    }
+
+    if let Ok(url) = Url::parse(&candidate) {
+        return Ok(Value::String(url.to_string()));
+    }
+
+    base_url
+        .join(&candidate)
+        .map(|url| Value::String(url.to_string()))
+        .map_err(|error| {
+            SpiderError::parse(format!(
+                "failed to resolve query value from {source}[{index}] against base {:?}: {error}",
+                base_url.as_str()
+            ))
+        })
+}
+
 fn parse_bool_text(text: &str) -> Option<bool> {
     if text.eq_ignore_ascii_case("true") || text == "1" {
         Some(true)
@@ -459,6 +640,164 @@ fn parse_bool_text(text: &str) -> Option<bool> {
     } else {
         None
     }
+}
+
+fn split_query_value_string(
+    value: Value,
+    source: &str,
+    index: usize,
+    trim: bool,
+    delimiter: &str,
+) -> Result<Vec<Value>, SpiderError> {
+    let text = match value {
+        Value::String(text) => text,
+        other => {
+            return Err(SpiderError::parse(format!(
+                "failed to split query value from {source}[{index}]: expected string, got {}",
+                value_type_name(&other)
+            )));
+        }
+    };
+
+    let candidate = trim_text(&text, trim);
+    Ok(candidate
+        .split(delimiter)
+        .map(|part| Value::String(trim_text(part, trim)))
+        .collect())
+}
+
+fn parse_query_value_json(
+    value: Value,
+    source: &str,
+    index: usize,
+    trim: bool,
+) -> Result<Value, SpiderError> {
+    let text = match value {
+        Value::String(text) => text,
+        other => return Ok(other),
+    };
+
+    let candidate = trim_text(&text, trim);
+    if candidate.is_empty() {
+        return Err(SpiderError::parse(format!(
+            "failed to parse query value from {source}[{index}] as json: empty string"
+        )));
+    }
+
+    serde_json::from_str::<serde_json::Value>(&candidate)
+        .map(Value::from)
+        .map_err(|error| {
+            SpiderError::parse(format!(
+                "failed to parse query value from {source}[{index}] as json: {error}"
+            ))
+        })
+}
+
+fn parse_query_value_datetime(
+    value: Value,
+    source: &str,
+    index: usize,
+    trim: bool,
+) -> Result<Value, SpiderError> {
+    let Value::String(text) = value else {
+        return Err(SpiderError::parse(format!(
+            "failed to parse query value from {source}[{index}] as datetime: expected string, got {}",
+            value_type_name(&value)
+        )));
+    };
+
+    let candidate = trim_text(&text, trim);
+    if candidate.is_empty() {
+        return Err(SpiderError::parse(format!(
+            "failed to parse query value from {source}[{index}] as datetime: empty string"
+        )));
+    }
+
+    parse_datetime_text(&candidate)
+        .map(Value::String)
+        .map_err(|message| {
+            SpiderError::parse(format!(
+                "failed to parse query value from {source}[{index}] as datetime: {message}"
+            ))
+        })
+}
+
+fn parse_query_value_datetime_with_format(
+    value: Value,
+    source: &str,
+    index: usize,
+    trim: bool,
+    format: &str,
+) -> Result<Value, SpiderError> {
+    let Value::String(text) = value else {
+        return Err(SpiderError::parse(format!(
+            "failed to parse query value from {source}[{index}] as datetime with format {format:?}: expected string, got {}",
+            value_type_name(&value)
+        )));
+    };
+
+    let candidate = trim_text(&text, trim);
+    if candidate.is_empty() {
+        return Err(SpiderError::parse(format!(
+            "failed to parse query value from {source}[{index}] as datetime with format {format:?}: empty string"
+        )));
+    }
+
+    parse_datetime_text_with_format(&candidate, format)
+        .map(Value::String)
+        .map_err(|message| {
+            SpiderError::parse(format!(
+                "failed to parse query value from {source}[{index}] as datetime with format {format:?}: {message}"
+            ))
+        })
+}
+
+fn parse_datetime_text(text: &str) -> Result<String, String> {
+    if let Ok(timestamp) = text.parse::<Timestamp>() {
+        return Ok(timestamp.to_string());
+    }
+
+    if let Ok(zoned) = text.parse::<Zoned>() {
+        return Ok(zoned.timestamp().to_string());
+    }
+
+    if let Ok(datetime) = text.parse::<DateTime>() {
+        return Ok(datetime.to_string());
+    }
+
+    if let Ok(date) = text.parse::<Date>() {
+        return Ok(date.to_string());
+    }
+
+    for format in KNOWN_CIVIL_DATETIME_FORMATS {
+        if let Ok(datetime) = DateTime::strptime(format, text) {
+            return Ok(datetime.to_string());
+        }
+    }
+
+    for format in KNOWN_CIVIL_DATE_FORMATS {
+        if let Ok(date) = Date::strptime(format, text) {
+            return Ok(date.to_string());
+        }
+    }
+
+    Err(format!("unsupported datetime format, got {text:?}"))
+}
+
+fn parse_datetime_text_with_format(text: &str, format: &str) -> Result<String, String> {
+    if let Ok(zoned) = Zoned::strptime(format, text) {
+        return Ok(zoned.timestamp().to_string());
+    }
+
+    if let Ok(datetime) = DateTime::strptime(format, text) {
+        return Ok(datetime.to_string());
+    }
+
+    if let Ok(date) = Date::strptime(format, text) {
+        return Ok(date.to_string());
+    }
+
+    Err(format!("input did not match format {format:?}"))
 }
 
 fn value_type_name(value: &Value) -> &'static str {
@@ -551,6 +890,36 @@ mod tests {
         assert_eq!(
             query.compact().all(),
             vec!["A".to_string(), "B".to_string()]
+        );
+    }
+
+    #[test]
+    fn value_query_trim_trims_nested_string_values() {
+        let query = ValueQuery::new(Kind::Structured, "$.data").with_values(vec![Value::Object(
+            [(
+                "tags".to_string(),
+                Value::Array(vec![
+                    Value::String("  first  ".to_string()),
+                    Value::String(" second ".to_string()),
+                ]),
+            )]
+            .into_iter()
+            .collect(),
+        )]);
+
+        assert_eq!(
+            query.trim().value(),
+            Some(Value::Object(
+                [(
+                    "tags".to_string(),
+                    Value::Array(vec![
+                        Value::String("first".to_string()),
+                        Value::String("second".to_string()),
+                    ]),
+                )]
+                .into_iter()
+                .collect()
+            ))
         );
     }
 
@@ -701,6 +1070,38 @@ mod tests {
     }
 
     #[test]
+    fn value_query_skip_take_and_last_slice_results_in_order() {
+        let query = ValueQuery::new(Kind::Text, "$.items").with_values(vec![
+            Value::String("first".to_string()),
+            Value::String("second".to_string()),
+            Value::String("third".to_string()),
+            Value::String("fourth".to_string()),
+        ]);
+
+        assert_eq!(
+            query.clone().skip(1).take(2).all(),
+            vec!["second".to_string(), "third".to_string()]
+        );
+        assert_eq!(query.last().one().as_deref(), Some("fourth"));
+    }
+
+    #[test]
+    fn value_query_dedup_preserves_first_occurrence_order() {
+        let query = ValueQuery::new(Kind::Text, "$.items").with_values(vec![
+            Value::String("alpha".to_string()),
+            Value::String("beta".to_string()),
+            Value::String("alpha".to_string()),
+            Value::String("gamma".to_string()),
+            Value::String("beta".to_string()),
+        ]);
+
+        assert_eq!(
+            query.dedup().all(),
+            vec!["alpha".to_string(), "beta".to_string(), "gamma".to_string()]
+        );
+    }
+
+    #[test]
     fn value_query_flatten_expands_top_level_arrays() {
         let query =
             ValueQuery::new(Kind::Structured, "$.items").with_values(vec![Value::Array(vec![
@@ -745,6 +1146,116 @@ mod tests {
         assert_eq!(
             query.replace("<br>", "\n").one().as_deref(),
             Some("line1\nline2\nline3")
+        );
+    }
+
+    #[test]
+    fn value_query_split_breaks_string_values_into_segments() {
+        let query = ValueQuery::new(Kind::Text, "meta.keywords").with_values(vec![Value::String(
+            " news, politics , economy ".to_string(),
+        )]);
+
+        assert_eq!(
+            query.split(",").unwrap().all(),
+            vec![
+                "news".to_string(),
+                "politics".to_string(),
+                "economy".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn value_query_split_rejects_non_string_values() {
+        let query = ValueQuery::new(Kind::Structured, "$.keywords")
+            .with_values(vec![Value::Array(vec![Value::String("news".to_string())])]);
+
+        assert_eq!(
+            query.split(",").unwrap_err(),
+            SpiderError::parse(
+                "failed to split query value from $.keywords[0]: expected string, got array"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn value_query_resolve_url_joins_relative_strings_against_base() {
+        let query = ValueQuery::new(Kind::Attribute, "a::attr(href)")
+            .with_values(vec![Value::String(" /2026/03/detail.html ".to_string())]);
+
+        assert_eq!(
+            query
+                .resolve_url("https://ep.shxwcb.com/2026/03/period.xml")
+                .unwrap()
+                .one()
+                .as_deref(),
+            Some("https://ep.shxwcb.com/2026/03/detail.html")
+        );
+    }
+
+    #[test]
+    fn value_query_resolve_url_keeps_absolute_urls() {
+        let query =
+            ValueQuery::new(Kind::Attribute, "a::attr(href)").with_values(vec![Value::String(
+                "https://example.com/news/1".to_string(),
+            )]);
+
+        assert_eq!(
+            query
+                .resolve_url("https://ep.shxwcb.com/2026/03/period.xml")
+                .unwrap()
+                .one()
+                .as_deref(),
+            Some("https://example.com/news/1")
+        );
+    }
+
+    #[test]
+    fn value_query_resolve_url_returns_error_for_invalid_base_url() {
+        let query = ValueQuery::new(Kind::Attribute, "a::attr(href)")
+            .with_values(vec![Value::String("/detail".to_string())]);
+
+        assert_eq!(
+            query.resolve_url("::bad-base::").unwrap_err(),
+            SpiderError::parse(
+                "query a::attr(href) cannot resolve URLs against invalid base \"::bad-base::\": relative URL without a base"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn value_query_resolve_url_returns_error_for_empty_string() {
+        let query = ValueQuery::new(Kind::Attribute, "a::attr(href)")
+            .with_values(vec![Value::String("   ".to_string())]);
+
+        assert_eq!(
+            query
+                .resolve_url("https://ep.shxwcb.com/2026/03/period.xml")
+                .unwrap_err(),
+            SpiderError::parse(
+                "failed to resolve query value from a::attr(href)[0] as URL: empty string"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn value_query_resolve_url_returns_error_for_non_string_values() {
+        let query =
+            ValueQuery::new(Kind::Structured, "$.links").with_values(vec![Value::Array(vec![
+                Value::String("/detail".to_string()),
+            ])]);
+
+        assert_eq!(
+            query
+                .resolve_url("https://ep.shxwcb.com/2026/03/period.xml")
+                .unwrap_err(),
+            SpiderError::parse(
+                "failed to resolve query value from $.links[0] as URL: expected string, got array"
+                    .to_string()
+            )
         );
     }
 
@@ -840,6 +1351,118 @@ mod tests {
             query.parse_bool().unwrap_err(),
             SpiderError::parse(
                 "failed to parse query value from $.published[0] as bool: expected string or bool, got object"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn value_query_parse_json_parses_embedded_json_text() {
+        let query =
+            ValueQuery::new(Kind::Text, "script#__NEXT_DATA__").with_values(vec![Value::String(
+                r#"{"article":{"title":"Kun","tags":["rust","crawler"]}}"#.to_string(),
+            )]);
+
+        assert_eq!(
+            query
+                .parse_json()
+                .unwrap()
+                .field("article")
+                .field("title")
+                .one()
+                .as_deref(),
+            Some("Kun")
+        );
+    }
+
+    #[test]
+    fn value_query_parse_json_keeps_existing_structured_values() {
+        let query =
+            ValueQuery::new(Kind::Structured, "$.payload").with_values(vec![Value::Object(
+                [("title".to_string(), Value::String("Kun".to_string()))]
+                    .into_iter()
+                    .collect(),
+            )]);
+
+        assert_eq!(
+            query.parse_json().unwrap().field("title").one().as_deref(),
+            Some("Kun")
+        );
+    }
+
+    #[test]
+    fn value_query_parse_json_returns_error_for_invalid_json_text() {
+        let query = ValueQuery::new(Kind::Text, "script.data")
+            .with_values(vec![Value::String("{not-json}".to_string())]);
+
+        assert_eq!(
+            query.parse_json().unwrap_err(),
+            SpiderError::parse(
+                "failed to parse query value from script.data[0] as json: key must be a string at line 1 column 2"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn value_query_parse_datetime_normalizes_rfc3339_timestamp_to_utc() {
+        let query = ValueQuery::new(Kind::Text, "$.published_at")
+            .with_values(vec![Value::String("2026-04-01T08:30:45+08:00".to_string())]);
+
+        assert_eq!(
+            query.parse_datetime().unwrap().value(),
+            Some(Value::String("2026-04-01T00:30:45Z".to_string()))
+        );
+    }
+
+    #[test]
+    fn value_query_parse_datetime_accepts_common_spaced_datetime_format() {
+        let query = ValueQuery::new(Kind::Text, "$.published_at")
+            .with_values(vec![Value::String(" 2026-04-01 08:30 ".to_string())]);
+
+        assert_eq!(
+            query.parse_datetime().unwrap().value(),
+            Some(Value::String("2026-04-01T08:30:00".to_string()))
+        );
+    }
+
+    #[test]
+    fn value_query_parse_datetime_with_format_accepts_custom_layout() {
+        let query = ValueQuery::new(Kind::Text, "$.published_at")
+            .with_values(vec![Value::String("2026/04/01 08:30".to_string())]);
+
+        assert_eq!(
+            query
+                .parse_datetime_with_format("%Y/%m/%d %H:%M")
+                .unwrap()
+                .value(),
+            Some(Value::String("2026-04-01T08:30:00".to_string()))
+        );
+    }
+
+    #[test]
+    fn value_query_parse_datetime_returns_error_for_invalid_string() {
+        let query = ValueQuery::new(Kind::Text, "$.published_at")
+            .with_values(vec![Value::String("tomorrow morning maybe".to_string())]);
+
+        assert_eq!(
+            query.parse_datetime().unwrap_err(),
+            SpiderError::parse(
+                "failed to parse query value from $.published_at[0] as datetime: unsupported datetime format, got \"tomorrow morning maybe\""
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn value_query_parse_datetime_returns_error_for_non_string_values() {
+        let query = ValueQuery::new(Kind::Structured, "$.published_at")
+            .with_values(vec![Value::Number(1_775_004_645.0)]);
+
+        assert_eq!(
+            query.parse_datetime().unwrap_err(),
+            SpiderError::parse(
+                "failed to parse query value from $.published_at[0] as datetime: expected string, got number"
                     .to_string()
             )
         );

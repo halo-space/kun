@@ -17,7 +17,7 @@
 - `src/response/follow.rs`
   - 后续补齐 follow 派生语义时会扩展
 - `src/engine.rs`
-  - 后续补齐共享 validate、输出策略、错误分类时会扩展
+  - 后续补齐共享 validate、pipeline/store 策略、错误分类时会扩展
 - `src/scheduler/*`
   - 后续补齐 task identity、ack/nack 语义时会修改
 - `src/middleware/*`
@@ -25,9 +25,17 @@
 - `src/download/*`
   - 后续补齐 HTTP timeout / proxy / cookie jar / browser 真正能力边界
 - `src/parser/*`
-  - 后续补齐 HTML XPath、OCR、parse 后处理
+  - 当前优先补齐 parse 后处理、结构化转换与 validation 语义；HTML XPath 与 OCR 继续暂缓
 - `src/pipeline.rs`
-  - 后续在单一 pipeline 模型上补齐 item 输出与持久化能力
+  - 后续继续收口 item 处理与过滤语义
+- `src/store.rs`
+  - 后续补齐 SQLite / Webhook / Redis / Kafka 等最终持久化与投递能力
+- `src/scheduler/*`
+  - 后续补 durable scheduler checkpoint、task priority/depth 与恢复语义
+- `src/download/*`
+  - 后续继续收口 browser 渲染下载边界，以及 robots/cache 等 runtime 级下载能力
+- `src/engine.rs`
+  - 后续补 stats / metrics 等基础运行时观测能力
 - `src/plugins/*`
   - 后续补齐除 middleware 外的扩展边界时会扩展
 - `src/rules/*`
@@ -41,8 +49,10 @@
 
 - Runtime / middleware 影响：
   - `validate`、`proxy`、`cookies`、item 输出策略等能力应视情况进入统一 runtime / middleware / engine 链路，而不是停留在 DSL 私有字段。
+- 能力优先级：
+  - 当前优先实现非 `rules` 的共享底层能力，顺序为 browser 渲染下载边界、durable scheduler、parser/validation 语义、pipeline/store item 链路、以及 runtime 的 stats / robots / cache。
 - 对外 API 影响：
-  - request/follow、scheduler identity、browser 边界、pipeline item 处理语义都可能产生 API 或行为收紧，但会按小步任务推进，不一次性大改。
+  - request/follow、scheduler identity、browser 边界、pipeline/store item 链路语义都可能产生 API 或行为收紧，但会按小步任务推进，不一次性大改。
 - Plugin 或 DSL 影响：
   - DSL 继续只做共享能力的配置化入口。
   - plugin 体系当前只把 `middleware` 作为已支持的 engine 装配点。
@@ -56,3 +66,4 @@
   - 再修改 `src/` 代码
   - 最后运行针对性的 `cargo test` / `cargo check --examples`
 - 对已有行为边界可能变化的模块，优先补单元测试，再补实现。
+- 对当前明确暂缓的 HTML XPath 与 OCR，只在文档和任务台账中保留 deferred 边界，不在本轮实现中投入。

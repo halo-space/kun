@@ -4,7 +4,8 @@ pub mod follow;
 use crate::parser::{AiQuery, CssQuery, FeedQuery, JsonQuery, RegexQuery, XPathQuery, XmlQuery};
 use crate::request::{Headers, Metadata, Request};
 use certificate::CertificateInfo;
-use encoding_rs::{Encoding, UTF_8};
+use chardetng::EncodingDetector;
+use encoding_rs::Encoding;
 use follow::build_follow_request;
 use regex::Regex as PatternRegex;
 use std::net::IpAddr;
@@ -35,7 +36,13 @@ fn response_text_encoding(headers: &Headers, body: &[u8]) -> (&'static Encoding,
         return (encoding, 0);
     }
 
-    (UTF_8, 0)
+    (apparent_encoding(body), 0)
+}
+
+fn apparent_encoding(body: &[u8]) -> &'static Encoding {
+    let mut detector = EncodingDetector::new();
+    detector.feed(body, true);
+    detector.guess(None, true)
 }
 
 fn charset_from_headers(headers: &Headers) -> Option<String> {
@@ -304,6 +311,17 @@ mod tests {
 
         assert_eq!(response.body, body);
         assert_eq!(response.text, html);
+    }
+
+    #[test]
+    fn response_text_uses_apparent_encoding_when_no_charset_is_declared() {
+        let text = "中文页面中文页面中文页面中文页面中文页面，kun 抓取测试。";
+        let body = encode_text("gbk", text);
+
+        let response = Response::new("https://example.com", 200, Headers::new(), body.clone());
+
+        assert_eq!(response.body, body);
+        assert_eq!(response.text, text);
     }
 
     #[test]

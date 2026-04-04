@@ -18,7 +18,6 @@
 //!
 //! Run with: `cargo run --example plugins_demo`
 
-use halo_spider::download::{Browser, Http};
 use halo_spider::engine::Engine;
 use halo_spider::engine::context::EngineContext;
 use halo_spider::engine::flow::Flow;
@@ -29,7 +28,6 @@ use halo_spider::middleware::traits::Middleware;
 use halo_spider::middleware::{Config, Stage};
 use halo_spider::plugins::{PluginManifest, PluginRegistry, load_plugin_manifest};
 use halo_spider::response::Response;
-use halo_spider::scheduler::Memory;
 use halo_spider::settings::Settings;
 use halo_spider::spider::{Output, Spider};
 use halo_spider::value::Value;
@@ -329,7 +327,7 @@ async fn main() {
         );
 
     // Step 4: build the engine, register factories, then load plugins
-    let engine = Engine::new(Memory::default(), Http::default(), Browser)
+    let engine = Engine::new()
         .with_settings(settings)
         // Factory keys must match the manifest `name` values.
         .register_middleware("custom_signature", |options| {

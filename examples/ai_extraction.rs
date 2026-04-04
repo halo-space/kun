@@ -46,7 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let http = Http::new();
     let browser = Browser;
 
-    let mut engine = Engine::new(scheduler, http, browser).with_settings(settings);
+    let mut engine = Engine::from_parts(scheduler, http, browser).with_settings(settings);
 
     engine.run(&AiSpider).await?;
 

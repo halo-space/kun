@@ -5,13 +5,15 @@ use crate::value::Value;
 use browser::Config as BrowserConfig;
 use http::Config as HttpConfig;
 use jiff::SignedDuration;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt::{Display, Formatter};
 
 pub type Metadata = BTreeMap<String, Value>;
 pub type Headers = BTreeMap<String, Vec<String>>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum RequestMode {
     #[default]
     Http,
@@ -45,12 +47,12 @@ impl TryFrom<&str> for RequestMode {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RuntimeOverride {
     pub values: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallbackTarget {
     pub name: String,
 }
@@ -61,7 +63,7 @@ impl CallbackTarget {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProxyConfig {
     pub url: String,
 }
@@ -72,7 +74,7 @@ impl ProxyConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionConfig {
     pub id: String,
 }
@@ -83,7 +85,7 @@ impl SessionConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Request {
     pub url: String,
     pub mode: RequestMode,
@@ -91,6 +93,7 @@ pub struct Request {
     pub headers: Headers,
     pub body: Option<Vec<u8>>,
     pub cookies: BTreeMap<String, String>,
+    #[serde(default, with = "option_signed_duration_millis")]
     pub timeout: Option<SignedDuration>,
     pub proxy: Option<ProxyConfig>,
     pub session: Option<SessionConfig>,
@@ -298,10 +301,37 @@ fn non_negative_duration(duration: SignedDuration) -> SignedDuration {
     }
 }
 
+mod option_signed_duration_millis {
+    use jiff::SignedDuration;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(value: &Option<SignedDuration>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            Some(duration) => {
+                let millis =
+                    i64::try_from(duration.as_millis()).map_err(serde::ser::Error::custom)?;
+                serializer.serialize_some(&millis)
+            }
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<SignedDuration>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Option::<i64>::deserialize(deserializer).map(|value| value.map(SignedDuration::from_millis))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::request::browser::{Driver, Engine};
+    use crate::value::Value;
     use jiff::SignedDuration;
 
     #[test]
@@ -424,6 +454,58 @@ mod tests {
                 .http
                 .as_ref()
                 .is_some_and(|http| http.query.is_empty())
+        );
+    }
+
+    #[test]
+    fn request_round_trips_through_serde_for_scheduler_state() {
+        let request = Request::browser("https://example.com/render")
+            .with_method("POST")
+            .with_body("payload")
+            .with_header("x-trace", "abc")
+            .with_cookie("sid", "cookie-1")
+            .with_timeout(SignedDuration::from_secs(5))
+            .with_proxy("http://127.0.0.1:8080")
+            .with_session("shared-browser")
+            .with_meta("page", Value::Number(2.0))
+            .with_callback("parse_detail")
+            .with_browser(
+                BrowserConfig::default()
+                    .with_driver(Driver::Playwright)
+                    .with_engine(Engine::Chromium)
+                    .with_stealth(true)
+                    .with_fingerprint_profile("desktop_zh_cn")
+                    .with_wait_for("#app"),
+            );
+
+        let encoded = serde_json::to_vec(&request).expect("request should serialize");
+        let decoded: Request =
+            serde_json::from_slice(&encoded).expect("request should deserialize");
+
+        assert_eq!(decoded.url, "https://example.com/render");
+        assert_eq!(decoded.mode, RequestMode::Browser);
+        assert_eq!(decoded.method, "POST");
+        assert_eq!(decoded.body, Some(b"payload".to_vec()));
+        assert_eq!(decoded.timeout, Some(SignedDuration::from_secs(5)));
+        assert_eq!(
+            decoded.proxy,
+            Some(ProxyConfig::new("http://127.0.0.1:8080"))
+        );
+        assert_eq!(decoded.session, Some(SessionConfig::new("shared-browser")));
+        assert_eq!(decoded.meta.get("page"), Some(&Value::Number(2.0)));
+        assert_eq!(
+            decoded
+                .callback
+                .as_ref()
+                .map(|callback| callback.name.as_str()),
+            Some("parse_detail")
+        );
+        assert_eq!(
+            decoded
+                .browser
+                .as_ref()
+                .and_then(|config| config.wait_for.as_deref()),
+            Some("#app")
         );
     }
 }

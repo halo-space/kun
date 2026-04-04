@@ -67,6 +67,42 @@ pub struct RuntimeConfig { }
 
 ## 可扩展性原则
 
+### 异步优先
+
+所有涉及能力执行、I/O、运行时调度或可能阻塞链路的功能，默认都要设计为异步接口。
+
+#### 适用范围
+
+- downloader 的 `fetch`
+- spider / callback 的解析入口
+- pipeline 的 `open / process / close`
+- middleware、plugin、runtime 组装后真正参与执行的 hook
+- 后续新增的存储、浏览器、网络、AI、调度恢复等能力接口
+
+#### 原则
+
+- 能力接口默认优先 `async`
+- 不要先做同步版本，再在外层包一层 `spawn_blocking` 或临时桥接
+- 如果是纯数据构造、builder、getter、纯值转换这类不涉及等待或阻塞的辅助方法，保持同步即可
+- 如果某个能力暂时只能同步实现，需要在设计或文档里明确说明边界，而不是默认把同步接口扩散成公开约定
+
+#### ✅ 推荐
+
+```rust
+#[async_trait::async_trait]
+pub trait Pipeline {
+    async fn process(&self, item: &mut Item, spider_name: &str) -> Result<bool, SpiderError>;
+}
+```
+
+#### ❌ 不推荐
+
+```rust
+pub trait Pipeline {
+    fn process(&self, item: &mut Item, spider_name: &str) -> Result<bool, SpiderError>;
+}
+```
+
 ### 集中配置
 
 所有运行时配置应集中在 `Settings` 中，而不是分散在各个组件的构造函数中：

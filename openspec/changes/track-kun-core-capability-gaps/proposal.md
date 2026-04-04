@@ -23,23 +23,24 @@
   - `src/download/*`
   - `src/parser/*`
   - `src/pipeline.rs`
+  - `src/store.rs`
   - `src/plugins/*`
   - `src/rules/*`
 - 预期带来哪些用户可见结果：
   - 明确哪些能力已经属于共享底层能力，哪些还只是 DSL 字段或占位实现
-  - 为后续按优先级补齐 `validate`、request/follow、scheduler identity、cookies/proxy、browser、parser、output/plugin 等能力提供正式任务清单
+  - 为后续按优先级补齐 `validate`、request/follow、scheduler identity、cookies/proxy、browser、parser、store/plugin 等能力提供正式任务清单
   - 保证后续实现工作以 `src/` 的真实底层能力为核心，而不是继续围绕 DSL 表层配置扩散
 
 ## 非目标
 
 - 这次 change 不重做 DSL 配置面设计。
-- 这次 change 不一次性实现所有缺口能力。
-- 这次 change 不新增一批新的对外示例来覆盖所有模块。
+- 这次 change 不优先围绕 `rules` / DSL 表层配置扩展能力。
 - 这次 change 不把现有架构整体推翻重写，而是在当前 `Spider / Request / Engine / Response / runtime / middleware` 结构上逐步补齐。
+- HTML XPath 与 OCR 当前继续暂缓，不作为本轮能力补齐重点。
 
 ## 风险
 
 - 是否存在兼容性或迁移风险：
   - 存在。后续在补齐 request/follow、scheduler identity、browser 行为和 validate 共享能力时，可能需要收紧部分当前较宽松或占位的行为。
 - 是否存在 runtime、middleware 或 plugin 相关风险：
-  - 存在。`cookies`、`proxy`、`output`、`plugin kind` 等能力如果直接补实现，容易与当前 middleware/plugin 边界重新耦合，因此需要分阶段推进并逐步验证。
+  - 存在。`cookies`、`proxy`、`store`、`plugin kind` 等能力如果直接补实现，容易与当前 middleware/plugin 边界重新耦合，因此需要分阶段推进并逐步验证。

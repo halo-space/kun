@@ -85,7 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let http = Http::new().with_pool_size(50);
     let browser = Browser;
 
-    let mut engine = Engine::new(scheduler, http, browser).with_settings(settings);
+    let mut engine = Engine::from_parts(scheduler, http, browser).with_settings(settings);
 
     engine.run(&PeriodConcurrencySpider).await?;
 

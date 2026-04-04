@@ -21,12 +21,30 @@
 - **WHEN** DSL step 的运行时校验失败，或代码爬虫直接调用共享 validation API 校验失败
 - **THEN** 系统返回显式 parse error，而不是静默丢弃 item 或 request
 
+#### Scenario: Optional validations are skipped unless they are explicitly required
+
+- **WHEN** 代码爬虫或 DSL 只为部分字段声明共享 validation，且某条非 `required` 的 validation 对应字段不存在
+- **THEN** 系统跳过该字段的 validation，而不是继续执行类型、长度或枚举规则
+- **AND** 组合约束中的可选字段不会因为被跳过而自动视为通过
+
+#### Scenario: Conditional validations gate runtime checks explicitly
+
+- **WHEN** 代码爬虫或 DSL 对共享 `Validation` 使用 `with_when_exists(...)`、`with_when_equals(...)` 或 `with_required_when_*` 这类条件规则
+- **THEN** 系统只在条件命中时执行对应 validation
+- **AND** 条件未命中时，该 validation 视为 skipped，而不是自动通过或自动失败
+
 #### Scenario: Shared validation supports field paths
 
 - **WHEN** 代码爬虫或 DSL 对 `Validation.field` 使用 `meta.title`、`authors[0].name`、`tags[]`、`articles[].title` 这类字段路径
 - **THEN** 系统按对象路径、数组索引或数组展开解析目标值
 - **AND** 对数组展开路径按每个解析值逐个执行同一套 validation 规则
 - **AND** 校验失败时优先返回具体路径，例如 `articles[1].title`
+
+#### Scenario: Shared validation exposes explicit text list and object rules
+
+- **WHEN** 代码爬虫或 DSL 对共享 `Validation` 使用 `with_min_length(...)`、`with_max_items(...)`、`with_required_fields([...])` 这类规则
+- **THEN** 系统按文本、列表、对象的对应语义执行校验
+- **AND** 规则名与实际行为保持一致，而不是继续全部复用为泛化的 `min/max`
 
 ### Requirement: Follow Request Derivation Must Preserve Shared Request Semantics
 
@@ -109,11 +127,12 @@
 - **THEN** `Response.body` 保留原始字节
 - **AND** `Response.text` 由 `Response.body` 解码得到，而不是维护独立来源
 
-#### Scenario: Response text respects declared charset before UTF-8 fallback
+#### Scenario: Response text respects declared charset before apparent encoding and UTF-8 fallback
 
 - **WHEN** 响应头或文档声明了 `charset`
 - **THEN** `Response.text` 优先按声明编码解码 `Response.body`
-- **AND** 当没有可用编码声明时，系统回退为 UTF-8 lossy 解码
+- **AND** 当没有可用编码声明时，系统先尝试 apparent encoding 猜测
+- **AND** 最终仍可回退为 UTF-8 lossy 解码
 
 #### Scenario: HTML XPath behavior is explicit and testable
 
@@ -124,3 +143,21 @@
 
 - **WHEN** 规则 schema 或解析能力暴露了 OCR 相关 selector/type
 - **THEN** 该能力必须有对应的运行时实现，或从公开 schema 中移除
+
+#### Scenario: Query transforms can resolve relative URLs against a base URL
+
+- **WHEN** 用户对 `ValueQuery` 调用 `resolve_url(base_url)`
+- **THEN** 系统把相对 URL 解析成绝对 URL
+- **AND** 如果输入是空字符串、非字符串或 base URL 无效，则显式返回 parse error
+
+#### Scenario: Query transforms can parse embedded JSON text into structured values
+
+- **WHEN** 用户对脚本内容或其它 JSON 文本结果调用 `parse_json()`
+- **THEN** 系统把文本解析成结构化值
+- **AND** 后续可以继续链式调用 `field(...)`、`index(...)` 等结构化读取方法
+
+#### Scenario: Query transforms can slice split and deduplicate result lists
+
+- **WHEN** 用户对 `ValueQuery` 调用 `skip(...)`、`take(...)`、`last()`、`split(...)` 或 `dedup()`
+- **THEN** 系统按声明顺序处理结果集
+- **AND** 这些后处理仍属于同一条共享 parser 能力链路

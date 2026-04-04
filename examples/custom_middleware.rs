@@ -13,7 +13,6 @@
 //! 运行：cargo run --example custom_middleware
 //! 按 Ctrl+C 优雅退出
 
-use halo_spider::download::{Browser, Http};
 use halo_spider::engine::Engine;
 use halo_spider::engine::context::EngineContext;
 use halo_spider::engine::flow::Flow;
@@ -23,7 +22,6 @@ use halo_spider::item::Item;
 use halo_spider::middleware::traits::Middleware;
 use halo_spider::middleware::{Config, Stage};
 use halo_spider::response::Response;
-use halo_spider::scheduler::Memory;
 use halo_spider::settings::Settings;
 use halo_spider::spider::{Output, Spider};
 use halo_spider::value::Value;
@@ -229,7 +227,7 @@ async fn main() {
         },
     );
 
-    let mut engine = Engine::new(Memory::default(), Http::default(), Browser)
+    let mut engine = Engine::new()
         .with_settings(settings)
         // 方式1：直接注册中间件实例 —— UserAgent
         .add_middleware(

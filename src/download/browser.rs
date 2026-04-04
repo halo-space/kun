@@ -98,6 +98,19 @@ fn validate_browser_request_contract(
     config: &BrowserConfig,
 ) -> Result<(), SpiderError> {
     resolve_fingerprint_profile(config).map(|_| ())?;
+    validate_browser_wait_for(config)?;
+
+    Ok(())
+}
+
+fn validate_browser_wait_for(config: &BrowserConfig) -> Result<(), SpiderError> {
+    if let Some(selector) = &config.wait_for
+        && selector.trim().is_empty()
+    {
+        return Err(SpiderError::download(
+            "browser wait_for requires a non-empty selector",
+        ));
+    }
 
     Ok(())
 }
@@ -433,8 +446,9 @@ async fn fetch_with_playwright_inner(
             .await
             .map_err(map_playwright_error)?;
 
+        let frame = page.main_frame().await.map_err(map_playwright_error)?;
+
         if let Some(selector) = &config.wait_for {
-            let frame = page.main_frame().await.map_err(map_playwright_error)?;
             wait_for_selector(&frame, selector, request.timeout).await?;
         }
 
@@ -876,6 +890,42 @@ mod tests {
         );
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn browser_request_contract_allows_wait_for_selector() {
+        let request = Request::browser("https://example.com")
+            .with_browser(BrowserConfig::default().with_wait_for(".result"));
+
+        let result = validate_browser_request_contract(
+            &request,
+            request
+                .browser
+                .as_ref()
+                .expect("browser config should exist"),
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn browser_request_contract_rejects_empty_wait_for_selector() {
+        let request = Request::browser("https://example.com")
+            .with_browser(BrowserConfig::default().with_wait_for("   "));
+
+        let error = validate_browser_request_contract(
+            &request,
+            request
+                .browser
+                .as_ref()
+                .expect("browser config should exist"),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            SpiderError::download("browser wait_for requires a non-empty selector")
+        );
     }
 
     #[test]

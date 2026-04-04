@@ -278,12 +278,18 @@ fn parse_validation(value: &Value) -> Result<Validation, SpiderError> {
     Ok(Validation {
         field,
         value_type,
+        transforms: Vec::new(),
+        conditions: Vec::new(),
+        object_validations: Vec::new(),
+        each_validations: Vec::new(),
+        groups: Vec::new(),
         rule: ValidationRule {
             required,
             regex,
             min,
             max,
             enum_values,
+            ..ValidationRule::default()
         },
     })
 }

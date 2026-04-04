@@ -31,11 +31,14 @@ use crate::middleware::Stage;
 #[cfg(test)]
 use crate::request::RequestMode;
 
-pub struct Engine<S, H, B, P = ()> {
+pub struct Engine<S, H, B, P = (), St = crate::store::File> {
     pub scheduler: S,
     pub http: H,
     pub browser: B,
     pub pipeline: P,
+    pub store: St,
+    robots: Arc<crate::robots::Robot>,
+    stats: Arc<crate::stats::Tracker>,
     pub settings: Settings,
     pub middleware: Chain,
     pub plugins: Registry,
@@ -53,12 +56,19 @@ where
     H: Downloader,
     B: Downloader,
 {
-    pub fn new(scheduler: S, http: H, browser: B) -> Self {
+    /// Build an engine from fully explicit core parts.
+    ///
+    /// This is the lowest-level constructor for callers that want to replace
+    /// the default scheduler or downloaders.
+    pub fn from_parts(scheduler: S, http: H, browser: B) -> Self {
         Self {
             scheduler,
             http,
             browser,
             pipeline: (),
+            store: crate::store::File::default(),
+            robots: Arc::new(crate::robots::Robot::default()),
+            stats: Arc::new(crate::stats::Tracker::default()),
             settings: Settings::default(),
             middleware: Chain::default(),
             plugins: Registry::new(),
@@ -68,29 +78,120 @@ where
     }
 }
 
-impl<S, H, B, P> Engine<S, H, B, P>
+impl Engine<crate::scheduler::Memory, crate::download::Http, crate::download::Browser>
+where
+    crate::download::Http: Downloader,
+    crate::download::Browser: Downloader,
+{
+    /// Build the zero-config default engine.
+    ///
+    /// Defaults:
+    /// - scheduler: `scheduler::Memory`
+    /// - http downloader: `download::Http`
+    /// - browser downloader: `download::Browser`
+    /// - store: `store::File`
+    pub fn new() -> Self {
+        Self::from_parts(
+            crate::scheduler::Memory::default(),
+            crate::download::Http::default(),
+            crate::download::Browser::default(),
+        )
+    }
+}
+
+impl Default for Engine<crate::scheduler::Memory, crate::download::Http, crate::download::Browser>
+where
+    crate::download::Http: Downloader,
+    crate::download::Browser: Downloader,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<H, B> Engine<crate::scheduler::Memory, H, B>
+where
+    H: Downloader,
+    B: Downloader,
+{
+    /// Build an engine with the default memory scheduler and custom
+    /// downloaders.
+    pub fn with_downloaders(http: H, browser: B) -> Self {
+        Self::from_parts(crate::scheduler::Memory::default(), http, browser)
+    }
+}
+
+impl<S, H, B, P, St> Engine<S, H, B, P, St>
 where
     S: Scheduler,
     H: Downloader,
     B: Downloader,
     P: crate::pipeline::Pipeline,
+    St: crate::store::Store,
 {
     pub fn with_settings(mut self, settings: Settings) -> Self {
         self.settings = settings;
         self
     }
 
+    /// Replace the middleware chain while keeping the current engine
+    /// configuration.
     pub fn with_middleware(mut self, middleware: Chain) -> Self {
         self.middleware = middleware;
         self
     }
 
-    pub fn with_pipeline<P2: crate::pipeline::Pipeline>(self, pipeline: P2) -> Engine<S, H, B, P2> {
+    /// Replace the scheduler while keeping the current engine configuration.
+    pub fn with_scheduler<S2: Scheduler>(self, scheduler: S2) -> Engine<S2, H, B, P, St> {
+        Engine {
+            scheduler,
+            http: self.http,
+            browser: self.browser,
+            pipeline: self.pipeline,
+            store: self.store,
+            robots: self.robots,
+            stats: self.stats,
+            settings: self.settings,
+            middleware: self.middleware,
+            plugins: self.plugins,
+            prepared: self.prepared,
+            shutdown: self.shutdown,
+        }
+    }
+
+    /// Replace the item pipeline while keeping the current engine
+    /// configuration.
+    pub fn with_pipeline<P2: crate::pipeline::Pipeline>(
+        self,
+        pipeline: P2,
+    ) -> Engine<S, H, B, P2, St> {
         Engine {
             scheduler: self.scheduler,
             http: self.http,
             browser: self.browser,
             pipeline,
+            store: self.store,
+            robots: self.robots,
+            stats: self.stats,
+            settings: self.settings,
+            middleware: self.middleware,
+            plugins: self.plugins,
+            prepared: self.prepared,
+            shutdown: self.shutdown,
+        }
+    }
+
+    /// Replace the final item store while keeping the current engine
+    /// configuration.
+    pub fn with_store<St2: crate::store::Store>(self, store: St2) -> Engine<S, H, B, P, St2> {
+        Engine {
+            scheduler: self.scheduler,
+            http: self.http,
+            browser: self.browser,
+            pipeline: self.pipeline,
+            store,
+            robots: self.robots,
+            stats: self.stats,
             settings: self.settings,
             middleware: self.middleware,
             plugins: self.plugins,
@@ -161,7 +262,7 @@ where
     /// let mut registry = PluginRegistry::new();
     /// registry.register_all(manifests)?;
     ///
-    /// let engine = Engine::new(scheduler, http, browser)
+    /// let engine = Engine::from_parts(scheduler, http, browser)
     ///     .register_middleware("custom_signature", |opts| {
     ///         Ok(Box::new(CustomSignatureMiddleware::new(opts)))
     ///     })
@@ -223,6 +324,11 @@ where
         }
     }
 
+    /// Return a cumulative runtime stats snapshot for this engine instance.
+    pub fn stats(&self) -> crate::stats::Snapshot {
+        self.stats.snapshot()
+    }
+
     /// Run the engine continuously until a stop signal is received.
     ///
     /// Concurrent downloads are controlled by:
@@ -247,6 +353,7 @@ where
         }
 
         self.pipeline.open(spider_name).await?;
+        self.store.open(spider_name).await?;
 
         let compiled = match spider.rules() {
             Some(config) => {
@@ -302,6 +409,9 @@ where
         let http = &self.http;
         let browser = &self.browser;
         let pipeline = &self.pipeline;
+        let store = &self.store;
+        let robots = &self.robots;
+        let stats = &self.stats;
         let engine_chain = &self.middleware;
         let step_chains = &step_middlewares;
         let allowed_domains = &allowed_domains;
@@ -322,6 +432,7 @@ where
                         &mut outputs,
                         &mut round,
                         spider_name,
+                        stats.as_ref(),
                     )
                     .await?;
                 }
@@ -352,6 +463,10 @@ where
                     http,
                     browser,
                     pipeline,
+                    store,
+                    robots,
+                    settings: &self.settings,
+                    stats,
                     engine_chain,
                     step_chain,
                     spider,
@@ -393,11 +508,13 @@ where
                     &mut outputs,
                     &mut round,
                     spider_name,
+                    stats.as_ref(),
                 )
                 .await?;
             }
         }
 
+        self.store.close(spider_name).await?;
         self.pipeline.close(spider_name).await?;
 
         let total_items: usize = outputs.iter().map(|o| o.items.len()).sum();
@@ -405,6 +522,11 @@ where
             spider = spider_name,
             rounds = round,
             total_items,
+            request_count = stats.snapshot().request_count,
+            response_count = stats.snapshot().response_count,
+            error_count = stats.snapshot().error_count,
+            retry_count = stats.snapshot().retry_count,
+            pipeline_drop_count = stats.snapshot().pipeline_drop_count,
             "engine stopped"
         );
 
@@ -446,6 +568,70 @@ where
         }
 
         Ok(out)
+    }
+}
+
+impl<H, B, P, St> Engine<crate::scheduler::Memory, H, B, P, St>
+where
+    H: Downloader,
+    B: Downloader,
+    P: crate::pipeline::Pipeline,
+    St: crate::store::Store,
+{
+    /// Attach checkpoint persistence to the current default memory scheduler.
+    ///
+    /// This keeps in-memory scheduling semantics, but saves every state change
+    /// through the provided `scheduler::checkpoint::Persist` backend.
+    pub fn with_checkpoint<Persist>(
+        self,
+        persist: Persist,
+    ) -> Engine<crate::scheduler::checkpoint::Memory<Persist>, H, B, P, St>
+    where
+        Persist: crate::scheduler::checkpoint::Persist,
+    {
+        let scheduler = crate::scheduler::checkpoint::Memory::from_parts(self.scheduler, persist);
+
+        Engine {
+            scheduler,
+            http: self.http,
+            browser: self.browser,
+            pipeline: self.pipeline,
+            store: self.store,
+            robots: self.robots,
+            stats: self.stats,
+            settings: self.settings,
+            middleware: self.middleware,
+            plugins: self.plugins,
+            prepared: self.prepared,
+            shutdown: self.shutdown,
+        }
+    }
+
+    /// Restore the default memory scheduler from checkpoint persistence and
+    /// attach the same persistence backend for future updates.
+    pub async fn load_checkpoint<Persist>(
+        self,
+        persist: Persist,
+    ) -> Result<Engine<crate::scheduler::checkpoint::Memory<Persist>, H, B, P, St>, SpiderError>
+    where
+        Persist: crate::scheduler::checkpoint::Persist,
+    {
+        let scheduler = crate::scheduler::checkpoint::Memory::load(persist).await?;
+
+        Ok(Engine {
+            scheduler,
+            http: self.http,
+            browser: self.browser,
+            pipeline: self.pipeline,
+            store: self.store,
+            robots: self.robots,
+            stats: self.stats,
+            settings: self.settings,
+            middleware: self.middleware,
+            plugins: self.plugins,
+            prepared: self.prepared,
+            shutdown: self.shutdown,
+        })
     }
 }
 
@@ -528,12 +714,13 @@ fn step_middlewares(compiled: Option<&Compiled>, step_id: &str) -> crate::middle
 }
 
 #[cfg(test)]
-impl<S, H, B, P> Engine<S, H, B, P>
+impl<S, H, B, P, St> Engine<S, H, B, P, St>
 where
     S: Scheduler,
     H: Downloader,
     B: Downloader,
     P: crate::pipeline::Pipeline,
+    St: crate::store::Store,
 {
     async fn execute_once(&mut self) -> Result<Option<crate::response::Response>, SpiderError> {
         let Some(task) = self.scheduler.take_ready().await? else {
@@ -559,14 +746,19 @@ where
             }
         }
 
+        self.stats.record_request();
         let response = match context.request.mode {
             RequestMode::Http => self.http.fetch(&context.request).await,
             RequestMode::Browser => self.browser.fetch(&context.request).await,
         };
 
         let response = match response {
-            Ok(r) => r,
+            Ok(r) => {
+                self.stats.record_response();
+                r
+            }
             Err(e) => {
+                self.stats.record_error();
                 self.scheduler.requeue(&task_id).await?;
                 return Err(e);
             }
@@ -600,6 +792,8 @@ where
     ) -> Result<Option<crate::spider::Output>, SpiderError> {
         if !self.prepared {
             *step_chains = self.build_step_middlewares(compiled)?;
+            self.pipeline.open(spider.name()).await?;
+            self.store.open(spider.name()).await?;
             self.prepared = true;
         }
 
@@ -616,6 +810,10 @@ where
             http: &self.http,
             browser: &self.browser,
             pipeline: &self.pipeline,
+            store: &self.store,
+            robots: &self.robots,
+            settings: &self.settings,
+            stats: &self.stats,
             engine_chain: &self.middleware,
             step_chain,
             spider,
@@ -640,6 +838,7 @@ where
                 }))
             }
             TaskOutcome::Retry(retry_task) => {
+                self.stats.record_retry();
                 self.scheduler.enqueue(*retry_task).await?;
                 self.scheduler.complete(&task_id).await?;
                 Ok(None)
@@ -649,6 +848,7 @@ where
                 Ok(None)
             }
             TaskOutcome::Error(e) => {
+                self.stats.record_error();
                 self.scheduler.requeue(&task_id).await?;
                 Err(e)
             }
@@ -667,9 +867,12 @@ mod tests {
     use crate::plugins::{PluginManifest, PluginRegistry};
     use crate::request::Request;
     use crate::response::Response;
+    use crate::scheduler::checkpoint::{Checkpoint, Persist};
     use crate::scheduler::memory::Memory;
     use crate::scheduler::{Scheduler, Task};
     use crate::spider::{Output as SpiderOutput, Spider};
+    use crate::stats::Snapshot as StatsSnapshot;
+    use crate::store::Memory as MemoryStore;
     use crate::value::Value;
     use jiff::SignedDuration;
     use std::collections::BTreeMap;
@@ -683,7 +886,7 @@ mod tests {
         let mut scheduler = Memory::default();
         block_on(scheduler.enqueue(Task::new(Request::new("https://example.com")))).unwrap();
 
-        let mut engine = Engine::new(scheduler, StubHttp, StubBrowser);
+        let mut engine = Engine::from_parts(scheduler, StubHttp, StubBrowser);
         let response = block_on(engine.execute_once()).unwrap().unwrap();
 
         assert_eq!(response.url, "https://example.com");
@@ -696,11 +899,76 @@ mod tests {
         block_on(scheduler.enqueue(Task::new(Request::browser("https://example.com/browser"))))
             .unwrap();
 
-        let mut engine = Engine::new(scheduler, StubHttp, StubBrowser);
+        let mut engine = Engine::from_parts(scheduler, StubHttp, StubBrowser);
         let response = block_on(engine.execute_once()).unwrap().unwrap();
 
         assert_eq!(response.url, "https://example.com/browser");
         assert_eq!(response.protocol.as_deref(), Some("browser"));
+    }
+
+    #[test]
+    fn engine_with_downloaders_uses_default_memory_scheduler() {
+        let mut engine = Engine::with_downloaders(StubHttp, StubBrowser);
+        block_on(engine.scheduler.enqueue(Task::new(Request::new(
+            "https://example.com/default-engine",
+        ))))
+        .unwrap();
+
+        let response = block_on(engine.execute_once()).unwrap().unwrap();
+
+        assert_eq!(response.url, "https://example.com/default-engine");
+    }
+
+    #[test]
+    fn engine_default_is_zero_config_memory_engine() {
+        let engine = Engine::default();
+
+        assert!(!block_on(engine.scheduler.has_pending()).unwrap());
+    }
+
+    #[test]
+    fn engine_with_checkpoint_wraps_default_memory_scheduler() {
+        let persist = TestCheckpointPersist::default();
+        let mut engine =
+            Engine::with_downloaders(StubHttp, StubBrowser).with_checkpoint(persist.clone());
+
+        block_on(
+            engine
+                .scheduler
+                .enqueue(Task::new(Request::new("https://example.com/checkpoint"))),
+        )
+        .unwrap();
+
+        let checkpoint = block_on(persist.load()).unwrap();
+
+        assert_eq!(checkpoint.ready.len(), 1);
+        assert_eq!(
+            checkpoint.ready[0].request.url,
+            "https://example.com/checkpoint"
+        );
+    }
+
+    #[test]
+    fn engine_load_checkpoint_restores_memory_scheduler_from_persist() {
+        let persist = TestCheckpointPersist::default();
+
+        block_on(persist.save(&Checkpoint {
+            ready: vec![Task::new(Request::new("https://example.com/restored"))],
+            delayed: Vec::new(),
+            inflight: Vec::new(),
+        }))
+        .unwrap();
+
+        let engine = block_on(
+            Engine::with_downloaders(StubHttp, StubBrowser).load_checkpoint(persist.clone()),
+        )
+        .unwrap();
+
+        assert_eq!(engine.scheduler.counts().ready, 1);
+        assert_eq!(
+            engine.scheduler.checkpoint().ready[0].request.url,
+            "https://example.com/restored"
+        );
     }
 
     #[test]
@@ -721,7 +989,8 @@ mod tests {
             Box::new(RecordMiddleware { log: log.clone() }),
         );
 
-        let mut engine = Engine::new(scheduler, StubHttp, StubBrowser).with_middleware(middleware);
+        let mut engine =
+            Engine::from_parts(scheduler, StubHttp, StubBrowser).with_middleware(middleware);
         block_on(engine.execute_once()).unwrap();
 
         assert_eq!(
@@ -742,7 +1011,8 @@ mod tests {
             })
             .unwrap();
 
-        let result = Engine::new(Memory::default(), StubHttp, StubBrowser).load_plugins(&registry);
+        let result =
+            Engine::from_parts(Memory::default(), StubHttp, StubBrowser).load_plugins(&registry);
         assert!(result.is_err());
         let error = result.err().unwrap();
 
@@ -759,8 +1029,9 @@ mod tests {
         let mut scheduler = Memory::default();
         block_on(scheduler.enqueue(Task::new(Request::new("https://example.com")))).unwrap();
 
-        let mut engine =
-            Engine::new(scheduler, HtmlHttp, StubBrowser).with_settings(runtime_settings());
+        let mut engine = Engine::from_parts(scheduler, HtmlHttp, StubBrowser)
+            .with_settings(runtime_settings())
+            .with_store(MemoryStore::default());
         let mut step_chains = BTreeMap::new();
         block_on(engine.execute_spider_once(&SimpleSpider("runtime"), None, &mut step_chains))
             .unwrap()
@@ -801,8 +1072,9 @@ mod tests {
             fetches: fetches.clone(),
             statuses: vec![200, 200],
         };
-        let mut engine =
-            Engine::new(scheduler, downloader, StubBrowser).with_settings(dedup_settings());
+        let mut engine = Engine::from_parts(scheduler, downloader, StubBrowser)
+            .with_settings(dedup_settings())
+            .with_store(MemoryStore::default());
         let mut step_chains = BTreeMap::new();
 
         let first =
@@ -827,8 +1099,9 @@ mod tests {
             fetches: fetches.clone(),
             statuses: vec![500, 200],
         };
-        let mut engine =
-            Engine::new(scheduler, downloader, StubBrowser).with_settings(retry_settings());
+        let mut engine = Engine::from_parts(scheduler, downloader, StubBrowser)
+            .with_settings(retry_settings())
+            .with_store(MemoryStore::default());
         let mut step_chains = BTreeMap::new();
 
         let first =
@@ -854,8 +1127,9 @@ mod tests {
             fetches: fetches.clone(),
             statuses: vec![500, 200],
         };
-        let mut engine =
-            Engine::new(scheduler, downloader, StubBrowser).with_settings(retry_backoff_settings());
+        let mut engine = Engine::from_parts(scheduler, downloader, StubBrowser)
+            .with_settings(retry_backoff_settings())
+            .with_store(MemoryStore::default());
         let mut step_chains = BTreeMap::new();
 
         let first = block_on(engine.execute_spider_once(
@@ -897,8 +1171,9 @@ mod tests {
             fetches: fetches.clone(),
             statuses: vec![200, 200],
         };
-        let mut engine =
-            Engine::new(scheduler, downloader, StubBrowser).with_settings(interval_settings());
+        let mut engine = Engine::from_parts(scheduler, downloader, StubBrowser)
+            .with_settings(interval_settings())
+            .with_store(MemoryStore::default());
         let mut step_chains = BTreeMap::new();
 
         let first =
@@ -929,8 +1204,9 @@ mod tests {
             fetches: fetches.clone(),
             statuses: vec![200, 200],
         };
-        let mut engine =
-            Engine::new(scheduler, downloader, StubBrowser).with_settings(rate_limit_settings());
+        let mut engine = Engine::from_parts(scheduler, downloader, StubBrowser)
+            .with_settings(rate_limit_settings())
+            .with_store(MemoryStore::default());
         let mut step_chains = BTreeMap::new();
 
         let first = block_on(engine.execute_spider_once(
@@ -952,13 +1228,13 @@ mod tests {
     }
 
     #[test]
-    fn engine_pipeline_memory_keeps_and_stores_items() {
+    fn engine_pipeline_keeps_items_and_memory_store_writes_them() {
         let mut scheduler = Memory::default();
         block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/item")))).unwrap();
 
-        let pipeline = crate::pipeline::Memory::default();
+        let store = MemoryStore::default();
         let mut engine =
-            Engine::new(scheduler, StubHttp, StubBrowser).with_pipeline(pipeline.clone());
+            Engine::from_parts(scheduler, StubHttp, StubBrowser).with_store(store.clone());
         let mut step_chains = BTreeMap::new();
 
         let output = block_on(engine.execute_spider_once(&ItemSpider, None, &mut step_chains))
@@ -969,7 +1245,35 @@ mod tests {
             vec![crate::item::Item::new().with_field("title", Value::String("post".to_string()))];
 
         assert_eq!(output.items, expected);
-        assert_eq!(pipeline.items(), expected);
+        assert_eq!(store.items(), expected);
+        assert_eq!(
+            engine.stats(),
+            StatsSnapshot {
+                request_count: 1,
+                response_count: 1,
+                error_count: 0,
+                retry_count: 0,
+                item_count: 1,
+                pipeline_drop_count: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn engine_store_prefers_batch_write_for_kept_items() {
+        let mut scheduler = Memory::default();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/item")))).unwrap();
+
+        let store = BatchOnlyStore::default();
+        let mut engine =
+            Engine::from_parts(scheduler, StubHttp, StubBrowser).with_store(store.clone());
+        let mut step_chains = BTreeMap::new();
+
+        let output = block_on(engine.execute_spider_once(&ItemSpider, None, &mut step_chains))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(output.items, store.items());
     }
 
     #[test]
@@ -977,7 +1281,9 @@ mod tests {
         let mut scheduler = Memory::default();
         block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/item")))).unwrap();
 
-        let mut engine = Engine::new(scheduler, StubHttp, StubBrowser).with_pipeline(DropPipeline);
+        let mut engine = Engine::from_parts(scheduler, StubHttp, StubBrowser)
+            .with_pipeline(DropPipeline)
+            .with_store(MemoryStore::default());
         let mut step_chains = BTreeMap::new();
 
         let output = block_on(engine.execute_spider_once(&ItemSpider, None, &mut step_chains))
@@ -985,6 +1291,17 @@ mod tests {
             .unwrap();
 
         assert!(output.items.is_empty());
+        assert_eq!(
+            engine.stats(),
+            StatsSnapshot {
+                request_count: 1,
+                response_count: 1,
+                error_count: 0,
+                retry_count: 0,
+                item_count: 0,
+                pipeline_drop_count: 1,
+            }
+        );
     }
 
     #[test]
@@ -992,13 +1309,105 @@ mod tests {
         let mut scheduler = Memory::default();
         block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/item")))).unwrap();
 
-        let mut engine = Engine::new(scheduler, StubHttp, StubBrowser).with_pipeline(FailPipeline);
+        let mut engine = Engine::from_parts(scheduler, StubHttp, StubBrowser)
+            .with_pipeline(FailPipeline)
+            .with_store(MemoryStore::default());
         let mut step_chains = BTreeMap::new();
 
         let error =
             block_on(engine.execute_spider_once(&ItemSpider, None, &mut step_chains)).unwrap_err();
 
         assert!(error.to_string().contains("pipeline failed"));
+        assert_eq!(
+            engine.stats(),
+            StatsSnapshot {
+                request_count: 1,
+                response_count: 1,
+                error_count: 1,
+                retry_count: 0,
+                item_count: 0,
+                pipeline_drop_count: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn engine_stats_track_retries_across_attempts() {
+        let mut scheduler = Memory::default();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/retry")))).unwrap();
+
+        let downloader = CountHttp {
+            fetches: Arc::new(Mutex::new(0usize)),
+            statuses: vec![500, 200],
+        };
+        let mut engine = Engine::from_parts(scheduler, downloader, StubBrowser)
+            .with_settings(retry_settings())
+            .with_store(MemoryStore::default());
+        let mut step_chains = BTreeMap::new();
+
+        let first =
+            block_on(engine.execute_spider_once(&SimpleSpider("retry"), None, &mut step_chains))
+                .unwrap();
+        let second =
+            block_on(engine.execute_spider_once(&SimpleSpider("retry"), None, &mut step_chains))
+                .unwrap();
+
+        assert!(first.is_none());
+        assert!(second.is_some());
+        assert_eq!(
+            engine.stats(),
+            StatsSnapshot {
+                request_count: 2,
+                response_count: 2,
+                error_count: 0,
+                retry_count: 1,
+                item_count: 0,
+                pipeline_drop_count: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn engine_skips_disallowed_request_when_robots_obey_is_enabled() {
+        let mut scheduler = Memory::default();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/private/page"))))
+            .unwrap();
+
+        let fetches = Arc::new(Mutex::new(0usize));
+        let downloader = CountHttp {
+            fetches: fetches.clone(),
+            statuses: vec![200],
+        };
+        let mut engine = Engine::from_parts(scheduler, downloader, StubBrowser)
+            .with_settings(
+                Settings::default()
+                    .with_robots_obey(true)
+                    .with_robots_user_agent("kun-bot"),
+            )
+            .with_store(MemoryStore::default());
+        block_on(engine.robots.seed_from_body(
+            "https://example.com/private/page",
+            "User-agent: kun-bot\nDisallow: /private\n",
+        ));
+
+        let mut step_chains = BTreeMap::new();
+        let output =
+            block_on(engine.execute_spider_once(&SimpleSpider("robots"), None, &mut step_chains))
+                .unwrap();
+
+        assert!(output.is_none());
+        assert_eq!(*fetches.lock().unwrap(), 0);
+        assert_eq!(
+            engine.stats(),
+            StatsSnapshot {
+                request_count: 0,
+                response_count: 0,
+                error_count: 0,
+                retry_count: 0,
+                item_count: 0,
+                pipeline_drop_count: 0,
+            }
+        );
     }
 
     fn block_on<F: Future>(future: F) -> F::Output {
@@ -1134,6 +1543,38 @@ mod tests {
 
     struct DropPipeline;
 
+    #[derive(Clone, Default)]
+    struct BatchOnlyStore {
+        items: Arc<Mutex<Vec<crate::item::Item>>>,
+    }
+
+    impl BatchOnlyStore {
+        fn items(&self) -> Vec<crate::item::Item> {
+            self.items.lock().unwrap().clone()
+        }
+    }
+
+    impl crate::store::Store for BatchOnlyStore {
+        async fn write(
+            &self,
+            _item: &crate::item::Item,
+            _spider_name: &str,
+        ) -> Result<(), SpiderError> {
+            Err(SpiderError::engine(
+                "engine should prefer batch_write over write for final store delivery",
+            ))
+        }
+
+        async fn batch_write(
+            &self,
+            items: &[crate::item::Item],
+            _spider_name: &str,
+        ) -> Result<(), SpiderError> {
+            self.items.lock().unwrap().extend(items.iter().cloned());
+            Ok(())
+        }
+    }
+
     impl Pipeline for DropPipeline {
         async fn process(
             &self,
@@ -1153,6 +1594,22 @@ mod tests {
             _spider_name: &str,
         ) -> Result<bool, SpiderError> {
             Err(SpiderError::engine("pipeline failed"))
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct TestCheckpointPersist {
+        checkpoint: Arc<Mutex<Checkpoint>>,
+    }
+
+    impl Persist for TestCheckpointPersist {
+        async fn load(&self) -> Result<Checkpoint, SpiderError> {
+            Ok(self.checkpoint.lock().unwrap().clone())
+        }
+
+        async fn save(&self, checkpoint: &Checkpoint) -> Result<(), SpiderError> {
+            *self.checkpoint.lock().unwrap() = checkpoint.clone();
+            Ok(())
         }
     }
 

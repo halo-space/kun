@@ -1,6 +1,8 @@
+use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Driver {
     #[default]
     Playwright,
@@ -31,7 +33,8 @@ impl TryFrom<&str> for Driver {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum Engine {
     #[default]
     Chromium,
@@ -68,7 +71,7 @@ impl TryFrom<&str> for Engine {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Viewport {
     pub width: u32,
     pub height: u32,
@@ -83,7 +86,7 @@ impl Default for Viewport {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     pub driver: Driver,
     pub engine: Engine,
@@ -158,6 +161,7 @@ mod tests {
         assert!(config.headless);
         assert!(!config.stealth);
         assert_eq!(config.fingerprint_profile, None);
+        assert_eq!(config.wait_for, None);
     }
 
     #[test]
@@ -165,10 +169,12 @@ mod tests {
         let config = Config::default()
             .with_engine(Engine::Firefox)
             .with_stealth(true)
-            .with_fingerprint_profile("desktop_zh_cn");
+            .with_fingerprint_profile("desktop_zh_cn")
+            .with_wait_for("#app");
 
         assert_eq!(config.engine, Engine::Firefox);
         assert!(config.stealth);
         assert_eq!(config.fingerprint_profile.as_deref(), Some("desktop_zh_cn"));
+        assert_eq!(config.wait_for.as_deref(), Some("#app"));
     }
 }

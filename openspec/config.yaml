@@ -15,6 +15,7 @@ context: |
   - 对外公开模块统一从 src/lib.rs 导出
   - Spider 负责解析逻辑与 rules 来源声明
   - Settings 与 Engine 负责运行时、并发与 middleware 调度
+  - 所有涉及 I/O、运行时调度、下载、解析执行、pipeline 处理或其它可能阻塞链路的能力接口默认采用 async；仅纯数据构造、builder、getter 与纯值转换保留同步
   - OpenSpec 文档应描述当前真实实现，不应写成脱离代码现状的理想设计
 rules:
   proposal:

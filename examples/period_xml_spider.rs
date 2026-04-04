@@ -8,12 +8,10 @@
 //!
 //! 运行：cargo run --example period_xml_spider
 
-use halo_spider::download::{Browser, Http};
 use halo_spider::engine::Engine;
 use halo_spider::error::SpiderError;
 use halo_spider::item::Item;
 use halo_spider::response::Response;
-use halo_spider::scheduler::Memory;
 use halo_spider::settings::Settings;
 use halo_spider::spider::{Output, Spider};
 use halo_spider::value::Value;
@@ -165,8 +163,7 @@ async fn main() {
         .with_idle_timeout(SignedDuration::from_secs(10));
 
     let spider = PeriodSpider;
-    let mut engine =
-        Engine::new(Memory::default(), Http::default(), Browser).with_settings(settings);
+    let mut engine = Engine::new().with_settings(settings);
 
     match engine.run(&spider).await {
         Ok(_) => println!("\n=== Crawl Complete ==="),

@@ -1,6 +1,7 @@
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub enum Value {
     #[default]
     Null,
@@ -12,6 +13,24 @@ pub enum Value {
 }
 
 impl Value {
+    pub fn to_json(&self) -> serde_json::Value {
+        match self {
+            Self::Null => serde_json::Value::Null,
+            Self::Bool(value) => serde_json::Value::Bool(*value),
+            Self::Number(value) => serde_json::Value::from(*value),
+            Self::String(value) => serde_json::Value::String(value.clone()),
+            Self::Array(values) => {
+                serde_json::Value::Array(values.iter().map(Self::to_json).collect())
+            }
+            Self::Object(values) => serde_json::Value::Object(
+                values
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.to_json()))
+                    .collect(),
+            ),
+        }
+    }
+
     pub fn as_object(&self) -> Option<&BTreeMap<String, Value>> {
         match self {
             Self::Object(value) => Some(value),
@@ -65,5 +84,17 @@ impl From<serde_json::Value> for Value {
                     .collect(),
             ),
         }
+    }
+}
+
+impl From<&Value> for serde_json::Value {
+    fn from(value: &Value) -> Self {
+        value.to_json()
+    }
+}
+
+impl From<Value> for serde_json::Value {
+    fn from(value: Value) -> Self {
+        value.to_json()
     }
 }

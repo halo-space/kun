@@ -16,6 +16,7 @@ pub(super) async fn apply_task_run<S: Scheduler>(
     outputs: &mut Vec<SpiderOutput>,
     round: &mut usize,
     spider_name: &str,
+    stats: &crate::stats::Tracker,
 ) -> Result<(), SpiderError> {
     let task_id = run.task_id;
     let url = run.url;
@@ -42,6 +43,7 @@ pub(super) async fn apply_task_run<S: Scheduler>(
             });
         }
         TaskOutcome::Retry(retry_task) => {
+            stats.record_retry();
             scheduler.enqueue(*retry_task).await?;
             scheduler.complete(&task_id).await?;
         }
@@ -49,6 +51,7 @@ pub(super) async fn apply_task_run<S: Scheduler>(
             scheduler.complete(&task_id).await?;
         }
         TaskOutcome::Error(error) => {
+            stats.record_error();
             tracing::error!(spider = spider_name, url = url.as_str(), error = %error, "task failed");
             scheduler.requeue(&task_id).await?;
         }
@@ -80,10 +83,14 @@ impl TaskRunReservation {
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct TaskExecutor<'a, H, B, P, Sp> {
+pub(super) struct TaskExecutor<'a, H, B, P, St, Sp> {
     pub(super) http: &'a H,
     pub(super) browser: &'a B,
     pub(super) pipeline: &'a P,
+    pub(super) store: &'a St,
+    pub(super) robots: &'a crate::robots::Robot,
+    pub(super) settings: &'a crate::settings::Settings,
+    pub(super) stats: &'a crate::stats::Tracker,
     pub(super) engine_chain: &'a Chain,
     pub(super) step_chain: &'a Chain,
     pub(super) spider: &'a Sp,
@@ -92,11 +99,12 @@ pub(super) struct TaskExecutor<'a, H, B, P, Sp> {
     pub(super) spider_name: &'a str,
 }
 
-impl<'a, H, B, P, Sp> TaskExecutor<'a, H, B, P, Sp>
+impl<'a, H, B, P, St, Sp> TaskExecutor<'a, H, B, P, St, Sp>
 where
     H: Downloader,
     B: Downloader,
     P: crate::pipeline::Pipeline,
+    St: crate::store::Store,
     Sp: Spider,
 {
     pub(super) async fn run_with_reservation(self, reservation: TaskRunReservation) -> TaskRun {
@@ -144,13 +152,37 @@ where
             Err(error) => return TaskOutcome::Error(error),
         }
 
+        if self.settings.robots_obey {
+            let user_agent = self.settings.resolved_robots_user_agent(self.spider_name);
+            match self
+                .robots
+                .is_allowed(&context.request, user_agent.as_str())
+                .await
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::info!(
+                        spider = self.spider_name,
+                        url = context.request.url.as_str(),
+                        "request blocked by robots.txt"
+                    );
+                    return TaskOutcome::Drop;
+                }
+                Err(error) => return TaskOutcome::Error(error),
+            }
+        }
+
+        self.stats.record_request();
         let response = match context.request.mode {
             RequestMode::Http => self.http.fetch(&context.request).await,
             RequestMode::Browser => self.browser.fetch(&context.request).await,
         };
 
         let response = match response {
-            Ok(response) => response,
+            Ok(response) => {
+                self.stats.record_response();
+                response
+            }
             Err(error) => {
                 tracing::warn!(url = context.request.url.as_str(), error = %error, "download failed");
                 match run_middleware_exception(
@@ -217,8 +249,11 @@ where
                 let mut kept_items = Vec::with_capacity(output.items.len());
                 for mut item in output.items.drain(..) {
                     match self.pipeline.process(&mut item, self.spider_name).await {
-                        Ok(true) => kept_items.push(item),
+                        Ok(true) => {
+                            kept_items.push(item);
+                        }
                         Ok(false) => {
+                            self.stats.record_pipeline_drop();
                             tracing::debug!(spider = self.spider_name, "pipeline dropped item");
                         }
                         Err(error) => {
@@ -226,6 +261,24 @@ where
                                 spider = self.spider_name,
                                 error = %error,
                                 "pipeline failed while processing item"
+                            );
+                            return TaskOutcome::Error(error);
+                        }
+                    }
+                }
+
+                if !kept_items.is_empty() {
+                    match self.store.batch_write(&kept_items, self.spider_name).await {
+                        Ok(()) => {
+                            for _ in &kept_items {
+                                self.stats.record_item();
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                spider = self.spider_name,
+                                error = %error,
+                                "store failed while batch writing items"
                             );
                             return TaskOutcome::Error(error);
                         }
