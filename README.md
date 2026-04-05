@@ -41,6 +41,7 @@ README 这里只保留总览；模块级细节统一放到 [docs/capabilities.md
 - `Engine::new()` 默认使用 `store::File::default()`，结果会写到 `output/<spider_name>.jsonl`
 - `Engine::default()` 等价于 `Engine::new()`
 - `Engine::stats()` 已提供累计运行时计数快照：除了 `request_count`、`response_count`、`error_count`、`retry_count`、`item_count`、`pipeline_drop_count`，现在也包含 `dedup_reject_count`、`robots_disallow_count`、`robots_delay_count`、`http_cache_hit_count`、`http_cache_revalidate_count`、`http_cache_store_count`、`http_cache_miss_count` 与 `store_error_count`
+- 已提供最小 `signals / extensions`：可以通过 `Engine::with_signal_listener(...)` 监听 `spider_opened`、`spider_closed`、`request_scheduled`、`response_received`、`item_scraped`、`spider_error` 这些 runtime 事件；也可以通过 `Engine::with_extension(...)` 挂更语义化的扩展，内置 `extensions::Summary`
 - 已提供更完整一版 `robots.txt` 策略：`Settings::with_robots_obey(true)` 开启后，会按 origin 缓存 `robots.txt`，并在下载前处理 `Allow` / `Disallow`、`Crawl-delay`、`Request-rate`、更完整的 `User-agent group` 匹配，以及 `* / $` wildcard 规则；其中 `Request-rate` 当前按 `window / requests` 的均匀间隔最小 delay 解释，如果同时声明 `Crawl-delay` 与 `Request-rate`，则取更严格的 delay；`robots::Robot::sitemaps(...)` 也可读取声明的 sitemap URL；默认 cache backend 是 `robots::cache::Memory`，也可以通过 `robots::Memory::with_cache(...)` 替换为 `robots::cache::File` 或自定义实现；`robots::cache::File::default()` 的路径是 `output/robots-cache.json`；`robots::Memory` 当前默认按 `24h` 的 `cache_ttl` 复用 policy，过期后会尝试刷新，刷新失败时优先回退旧缓存；如果当前 origin 没有可用缓存且 `robots.txt` 临时不可用，默认按 `robots::UnavailablePolicy::AllowAll` 继续 fail-open，并对这类临时不可用结果按默认 `60s` 的 retry delay 做短暂退避，避免每个请求都重复抓取 `robots.txt`；调用方也可以显式切到 `DisallowAll`、覆盖 retry delay，或关闭这层退避；如果再打开 `Settings::with_robots_sitemap_seeds(true)`，引擎启动时会把 robots 里声明的 sitemap / sitemapindex，包括常见的 `.xml.gz` 压缩 sitemap，一并解析成新的种子请求，并继承 start request 的共享请求能力；默认 `priority / depth` 仍是 `0 / 0`，但现在也可以通过 `with_robots_sitemap_seed_priority(...)` 和 `with_robots_sitemap_seed_depth(...)` 显式覆盖
 - 已提供最小 `AutoThrottle`：`Settings::with_auto_throttle(true)` 开启后，会按 origin 基于延迟、错误和目标并发动态调整下一次下载间隔；此时 `download_delay` 表示初始/最小 delay，`with_auto_throttle_max_delay(...)` 表示最大 delay
 - 已提供一版更完整的 `HTTP cache / conditional request`：默认还是内存 backend，也已支持内置 `middleware::http_cache::File` 持久化 backend；`Settings::with_http_cache(true)` 开启后，同一 HTTP `GET` 请求会基于已缓存的 `ETag / Last-Modified` 自动补 `If-None-Match / If-Modified-Since`；命中 `304 Not Modified` 时，在 `response` 策略下会回填缓存 body，并给 `Response.flags` 增加 `http_cache`；当前也支持 `ttl` 和 `validators / response` 两种缓存策略
@@ -49,7 +50,7 @@ README 这里只保留总览；模块级细节统一放到 [docs/capabilities.md
 
 当前仍待补齐的底层能力：
 
-- 和 Scrapy 更完整的代码爬虫体验相比，当前优先继续补的缺口主要是：更高阶的 `robots.txt` / 站点策略，以及 `signals / extensions` 这一层
+- 和 Scrapy 更完整的代码爬虫体验相比，当前优先继续补的缺口主要是：更高阶的 `robots.txt` / 站点策略
 - 共享 validation 已支持字段路径解析与逐值校验（例如 `meta.title`、`authors[0].name`、`tags[]`、`articles[].title`），也已补显式文本/列表/对象约束（例如 `with_min_length(...)`、`with_min_items(...)`、`with_required_fields(...)`）、`ValidationTransform` 链式转换后再校验（例如 `trim`、`normalize_whitespace`、`parse_number`、`parse_bool`、`parse_datetime`）、对象子规则/列表成员子规则、`any_of / all_of / one_of / mutually_exclusive` 这类组合约束、`when_exists / when_missing / when_equals / when_not_equals` 这类条件约束，以及 `validate_fields_report()` 这种 collect-all 报告能力；validation 语义是显式启用的，只有传入的规则才会执行，字段缺失时也只有 `required` 或显式 `required_when_*` 条件命中时才报错，其它规则默认跳过；更高阶的运行时失败策略映射和更复杂的派生条件还没统一
 - 当前 item 链路已经明确为 `parse -> item -> pipeline -> store`；这一轮已补 `store::File` 的 rotate / format 选项，以及 `store::Webhook` 的 retry/backoff 与 `store::Kafka` 的 key / headers；更高阶外部系统语义仍建议继续走自定义 `Store`
 - 当前 stats 仍是 engine 进程内累计快照；现在已经补了细粒度计数，并提供 `Engine::with_stats_reporter(...)` 作为最小观测钩子，但还没有直接内置 Prometheus / OpenTelemetry exporter
@@ -130,6 +131,8 @@ let settings = Settings::default()
 如果要连 `scheduler` 一起自定义，再用 `Engine::from_parts(scheduler, http, browser)`。
 如果要替换默认去重实现，再继续链 `.with_dedup(...)`。
 如果要替换默认 robots policy，再继续链 `.with_robots(...)`。
+如果要监听 runtime 事件，再继续链 `.with_signal_listener(...)`。
+如果要挂扩展，再继续链 `.with_extension(...)`。
 
 - `Engine::new()` 默认就是 `scheduler::Memory + download::Http + download::Browser + dedup::Memory + robots::Memory`
 - `Engine::default()` 与 `Engine::new()` 等价，只是更偏 Rust trait 风格
@@ -143,6 +146,8 @@ let settings = Settings::default()
 - 如果你想保留框架接线、但替换 dedup 算法，可以显式用 `.with_dedup(...)`
 - 如果你是手动往引擎里塞 request，优先用 `engine.enqueue(request).await?`；直接调 `engine.scheduler.enqueue(...)` 属于低层 escape hatch，会绕过 dedup 组件
 - `robots` 是否启用和使用哪个 user-agent 仍由 `Settings::with_robots_obey(...)` / `Settings::with_robots_user_agent(...)` 控制；`.with_robots(...)` 负责替换具体 robots policy 实现
+- 如果你想拿到最原始的 runtime 事件流，可以显式用 `.with_signal_listener(...)`
+- 如果你想挂语义更清楚的运行时扩展，可以显式用 `.with_extension(...)`；它底层复用同一条 signal bus
 - `checkpoint` 本身没有单独的 runtime 默认值；只有你显式启用 checkpoint 时，默认内置后端才是 `scheduler::checkpoint::File::default()`，路径是 `output/scheduler-checkpoint.json`
 - 如果你想要“内存调度 + 文件 checkpoint”的便捷组合，可以直接用 `scheduler::checkpoint::Memory::default()`
 - 如果你要从默认 checkpoint 文件恢复到 memory scheduler，使用 `scheduler::checkpoint::Memory::load_default().await?`
@@ -235,7 +240,10 @@ let engine = Engine::new()
     .load_checkpoint(scheduler::checkpoint::File::default())
     .await?;
 
-// 14. 如果要自定义全部底层组件，用 from_parts(...)
+// 14. 如果要挂最小 runtime extension，可以直接复用内置 Summary
+let engine = Engine::new().with_extension(halo_spider::extensions::Summary);
+
+// 15. 如果要自定义全部底层组件，用 from_parts(...)
 let engine = Engine::from_parts(
     scheduler::Redis::new("redis://127.0.0.1:6379", "kun:scheduler"),
     Http::default(),

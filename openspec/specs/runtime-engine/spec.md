@@ -380,6 +380,30 @@
 - Then 引擎继续保留 `engine.stats()` 作为主读取 API
 - And 每次累计计数更新时都会把对应 event 与最新 snapshot 推给这个 reporter
 
+### Requirement: Engine exposes minimal signals and extensions
+
+库必须提供最小 runtime signal bus，让调用方可以监听生命周期与执行事件，并在同一条边界上挂扩展。
+
+#### Scenario: Caller can register a signal listener explicitly
+
+- Given 调用方通过 `Engine::with_signal_listener(...)` 注册自定义 listener
+- When 引擎运行 spider 生命周期与任务执行链路
+- Then 这个 listener 会收到对应的 runtime signals
+
+#### Scenario: Extension uses the same signal bus
+
+- Given 调用方通过 `Engine::with_extension(...)` 注册扩展
+- When 引擎发出 runtime signals
+- Then 这个 extension 会收到和 signal listener 相同的事件流
+- And `with_extension(...)` 不会引入另一套独立 runtime
+
+#### Scenario: Engine emits the minimal built-in signal set
+
+- Given 引擎执行 spider 生命周期、request 调度、response 处理、item 写入或错误路径
+- When 调用方监听 runtime signals
+- Then 当前最小信号集合至少包含 `spider_opened`、`spider_closed`、`request_scheduled`、`response_received`、`item_scraped` 与 `spider_error`
+- And `spider_closed` 会携带最终 `stats::Snapshot`
+
 ### Requirement: Engine supports a minimal robots.txt crawl policy
 
 库必须提供最小 `robots.txt` 抓取策略，并明确默认行为与当前受限边界。

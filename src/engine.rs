@@ -42,6 +42,7 @@ pub struct Engine<S, H, B, D = crate::dedup::Memory, P = (), St = crate::store::
     pub store: St,
     robots: Arc<dyn crate::robots::Robot>,
     stats: Arc<crate::stats::Tracker>,
+    signals: Arc<crate::signals::Bus>,
     pub settings: Settings,
     pub middleware: Chain,
     pub plugins: Registry,
@@ -73,6 +74,7 @@ where
             store: crate::store::File::default(),
             robots: Arc::new(crate::robots::Memory::default()),
             stats: Arc::new(crate::stats::Tracker::default()),
+            signals: Arc::new(crate::signals::Bus::default()),
             settings: Settings::default(),
             middleware: Chain::default(),
             plugins: Registry::new(),
@@ -164,6 +166,7 @@ where
             store: self.store,
             robots: self.robots,
             stats: self.stats,
+            signals: self.signals,
             settings: self.settings,
             middleware: self.middleware,
             plugins: self.plugins,
@@ -184,6 +187,7 @@ where
             store: self.store,
             robots: self.robots,
             stats: self.stats,
+            signals: self.signals,
             settings: self.settings,
             middleware: self.middleware,
             plugins: self.plugins,
@@ -204,6 +208,7 @@ where
             store: self.store,
             robots: self.robots,
             stats: self.stats,
+            signals: self.signals,
             settings: self.settings,
             middleware: self.middleware,
             plugins: self.plugins,
@@ -224,6 +229,7 @@ where
             store: self.store,
             robots: self.robots,
             stats: self.stats,
+            signals: self.signals,
             settings: self.settings,
             middleware: self.middleware,
             plugins: self.plugins,
@@ -247,6 +253,7 @@ where
             store: self.store,
             robots: self.robots,
             stats: self.stats,
+            signals: self.signals,
             settings: self.settings,
             middleware: self.middleware,
             plugins: self.plugins,
@@ -274,6 +281,7 @@ where
             store,
             robots: self.robots,
             stats: self.stats,
+            signals: self.signals,
             settings: self.settings,
             middleware: self.middleware,
             plugins: self.plugins,
@@ -331,14 +339,22 @@ where
     /// Enqueue one request through the engine's dedup component before it
     /// reaches the scheduler.
     pub async fn enqueue(&mut self, request: crate::request::Request) -> Result<bool, SpiderError> {
-        enqueue_request(
+        let enqueued = enqueue_request(
             &mut self.scheduler,
             &mut self.dedup,
-            request,
+            request.clone(),
             &[],
             Some(self.stats.as_ref()),
         )
-        .await
+        .await?;
+
+        if enqueued {
+            self.signals
+                .emit(crate::signals::Signal::request_scheduled("manual", request))
+                .await;
+        }
+
+        Ok(enqueued)
     }
 
     /// Register a lightweight runtime stats reporter.
@@ -348,6 +364,18 @@ where
     pub fn with_stats_reporter(self, reporter: impl crate::stats::Reporter + 'static) -> Self {
         self.stats.add_reporter(Arc::new(reporter));
         self
+    }
+
+    /// Register an async signal listener for engine lifecycle and runtime
+    /// events.
+    pub fn with_signal_listener(self, listener: impl crate::signals::Listener + 'static) -> Self {
+        self.signals.add_listener(Arc::new(listener));
+        self
+    }
+
+    /// Register an extension through the engine signal bus.
+    pub fn with_extension(self, extension: impl crate::extensions::Extension + 'static) -> Self {
+        self.with_signal_listener(extension)
     }
 
     /// Load plugin manifests and verify that every declared middleware plugin
@@ -447,7 +475,7 @@ where
         );
 
         for request in &start_requests {
-            enqueue_request(
+            let enqueued = enqueue_request(
                 &mut self.scheduler,
                 &mut self.dedup,
                 request.clone(),
@@ -455,6 +483,15 @@ where
                 Some(self.stats.as_ref()),
             )
             .await?;
+
+            if enqueued {
+                self.signals
+                    .emit(crate::signals::Signal::request_scheduled(
+                        spider.name(),
+                        request.clone(),
+                    ))
+                    .await;
+            }
         }
 
         if !self.settings.robots_sitemap_seeds {
@@ -581,11 +618,10 @@ where
                     continue;
                 };
 
-                let sitemap_seed_task = build_robots_sitemap_seed_task(
-                    &representative_request,
-                    resolved,
-                    &self.settings,
-                );
+                let sitemap_seed_request =
+                    build_robots_sitemap_seed_request(&representative_request, resolved);
+                let sitemap_seed_task =
+                    build_robots_sitemap_seed_task(sitemap_seed_request.clone(), &self.settings);
 
                 if enqueue_task(
                     &mut self.scheduler,
@@ -597,6 +633,12 @@ where
                 .await?
                 {
                     seed_count += 1;
+                    self.signals
+                        .emit(crate::signals::Signal::request_scheduled(
+                            spider_name,
+                            sitemap_seed_request,
+                        ))
+                        .await;
                 }
             }
         }
@@ -635,6 +677,9 @@ where
 
         self.pipeline.open(spider_name).await?;
         self.store.open(spider_name).await?;
+        self.signals
+            .emit(crate::signals::Signal::spider_opened(spider_name))
+            .await;
 
         let compiled = match spider.rules() {
             Some(config) => {
@@ -686,6 +731,7 @@ where
         let store = &self.store;
         let robots = self.robots.as_ref();
         let stats = self.stats.clone();
+        let signals = self.signals.clone();
         let engine_chain = &self.middleware;
         let step_chains = &step_middlewares;
         let allowed_domains = &allowed_domains;
@@ -708,6 +754,7 @@ where
                         &mut round,
                         spider_name,
                         stats.as_ref(),
+                        signals.as_ref(),
                     )
                     .await?;
                 }
@@ -743,6 +790,7 @@ where
                     robots,
                     settings: &self.settings,
                     stats: stats.clone(),
+                    signals: signals.clone(),
                     engine_chain,
                     step_chain,
                     spider,
@@ -786,6 +834,7 @@ where
                     &mut round,
                     spider_name,
                     stats.as_ref(),
+                    signals.as_ref(),
                 )
                 .await?;
             }
@@ -793,6 +842,12 @@ where
 
         self.store.close(spider_name).await?;
         self.pipeline.close(spider_name).await?;
+        self.signals
+            .emit(crate::signals::Signal::spider_closed(
+                spider_name,
+                stats.snapshot(),
+            ))
+            .await;
 
         let total_items: usize = outputs.iter().map(|o| o.items.len()).sum();
         tracing::info!(
@@ -852,8 +907,12 @@ fn build_robots_sitemap_fetch_request(parent: &Request, url: String) -> Request 
     Request::from_parent_for_follow(parent, url).with_mode(RequestMode::Http)
 }
 
-fn build_robots_sitemap_seed_task(parent: &Request, url: String, settings: &Settings) -> Task {
-    Task::new(Request::from_parent_for_follow(parent, url))
+fn build_robots_sitemap_seed_request(parent: &Request, url: String) -> Request {
+    Request::from_parent_for_follow(parent, url)
+}
+
+fn build_robots_sitemap_seed_task(request: Request, settings: &Settings) -> Task {
+    Task::new(request)
         .with_priority(settings.robots_sitemap_seed_priority)
         .with_depth(settings.robots_sitemap_seed_depth)
 }
@@ -888,6 +947,7 @@ where
             store: self.store,
             robots: self.robots,
             stats: self.stats,
+            signals: self.signals,
             settings: self.settings,
             middleware: self.middleware,
             plugins: self.plugins,
@@ -916,6 +976,7 @@ where
             store: self.store,
             robots: self.robots,
             stats: self.stats,
+            signals: self.signals,
             settings: self.settings,
             middleware: self.middleware,
             plugins: self.plugins,
@@ -1135,6 +1196,7 @@ where
             robots: self.robots.as_ref(),
             settings: &self.settings,
             stats: self.stats.clone(),
+            signals: self.signals.clone(),
             engine_chain: &self.middleware,
             step_chain,
             spider,
@@ -1148,7 +1210,7 @@ where
         match outcome {
             TaskOutcome::Success(output) => {
                 for follow in &output.follows {
-                    enqueue_request(
+                    let enqueued = enqueue_request(
                         &mut self.scheduler,
                         &mut self.dedup,
                         follow.clone(),
@@ -1156,6 +1218,15 @@ where
                         Some(self.stats.as_ref()),
                     )
                     .await?;
+
+                    if enqueued {
+                        self.signals
+                            .emit(crate::signals::Signal::request_scheduled(
+                                spider.name(),
+                                follow.clone(),
+                            ))
+                            .await;
+                    }
                 }
                 self.scheduler.complete(&lease).await?;
                 Ok(Some(crate::spider::Output {
@@ -1165,7 +1236,14 @@ where
             }
             TaskOutcome::Retry(retry_task) => {
                 self.stats.record_retry();
+                let request = retry_task.request.clone();
                 self.scheduler.enqueue(*retry_task).await?;
+                self.signals
+                    .emit(crate::signals::Signal::request_scheduled(
+                        spider.name(),
+                        request,
+                    ))
+                    .await;
                 self.scheduler.complete(&lease).await?;
                 Ok(None)
             }
@@ -1198,6 +1276,7 @@ mod tests {
     use crate::scheduler::checkpoint::{Checkpoint, Persist};
     use crate::scheduler::memory::Memory;
     use crate::scheduler::{Scheduler, Task};
+    use crate::signals::{Kind as SignalKind, Listener as SignalListener, Signal};
     use crate::spider::{Failure, Output as SpiderOutput, Spider};
     use crate::stats::Snapshot as StatsSnapshot;
     use crate::stats::{Event as StatsEvent, Reporter as StatsReporter};
@@ -2152,6 +2231,120 @@ mod tests {
     }
 
     #[test]
+    fn engine_with_signal_listener_receives_request_response_item_signals() {
+        let listener = RecordingSignalListener::default();
+        let recorded_events = listener.events.clone();
+        let recorded_urls = listener.request_urls.clone();
+        let recorded_titles = listener.item_titles.clone();
+
+        let mut engine = Engine::from_parts(Memory::default(), StubHttp, StubBrowser)
+            .with_store(MemoryStore::default())
+            .with_signal_listener(listener);
+
+        block_on(engine.enqueue(Request::new("https://example.com/item"))).unwrap();
+
+        let mut step_chains = BTreeMap::new();
+        block_on(engine.execute_spider_once(&ItemSpider, None, &mut step_chains)).unwrap();
+
+        assert_eq!(
+            recorded_events.lock().unwrap().clone(),
+            vec![
+                SignalKind::RequestScheduled,
+                SignalKind::ResponseReceived,
+                SignalKind::ItemScraped,
+            ]
+        );
+        assert_eq!(
+            recorded_urls.lock().unwrap().clone(),
+            vec!["https://example.com/item".to_string()]
+        );
+        assert_eq!(
+            recorded_titles.lock().unwrap().clone(),
+            vec!["post".to_string()]
+        );
+    }
+
+    #[test]
+    fn engine_with_signal_listener_receives_spider_error_signal() {
+        let listener = RecordingSignalListener::default();
+        let recorded_events = listener.events.clone();
+        let recorded_errors = listener.errors.clone();
+
+        let mut engine = Engine::from_parts(Memory::default(), StubHttp, StubBrowser)
+            .with_store(MemoryStore::default())
+            .with_signal_listener(listener);
+
+        block_on(engine.enqueue(Request::new("https://example.com/error"))).unwrap();
+
+        let mut step_chains = BTreeMap::new();
+        let error = block_on(engine.execute_spider_once(&FailingSpider, None, &mut step_chains))
+            .unwrap_err();
+
+        assert_eq!(error, SpiderError::parse("parse failed"));
+        assert_eq!(
+            recorded_events.lock().unwrap().clone(),
+            vec![
+                SignalKind::RequestScheduled,
+                SignalKind::ResponseReceived,
+                SignalKind::SpiderError,
+            ]
+        );
+        assert_eq!(
+            recorded_errors.lock().unwrap().clone(),
+            vec!["parse error: parse failed".to_string()]
+        );
+    }
+
+    #[test]
+    fn engine_with_extension_registers_extension_on_signal_bus() {
+        let extension = RecordingExtension::default();
+        let recorded_events = extension.events.clone();
+
+        let mut engine = Engine::from_parts(Memory::default(), StubHttp, StubBrowser)
+            .with_store(MemoryStore::default())
+            .with_extension(extension);
+
+        block_on(engine.enqueue(Request::new("https://example.com/item"))).unwrap();
+
+        let mut step_chains = BTreeMap::new();
+        block_on(engine.execute_spider_once(&ItemSpider, None, &mut step_chains)).unwrap();
+
+        assert_eq!(
+            recorded_events.lock().unwrap().clone(),
+            vec![
+                SignalKind::RequestScheduled,
+                SignalKind::ResponseReceived,
+                SignalKind::ItemScraped,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn engine_run_emits_spider_opened_and_closed_signals() {
+        let listener = RecordingSignalListener::default();
+        let recorded_events = listener.events.clone();
+
+        let mut engine = Engine::from_parts(Memory::default(), StubHttp, StubBrowser)
+            .with_store(MemoryStore::default())
+            .with_signal_listener(listener)
+            .with_settings(Settings::default().with_idle_timeout(SignedDuration::from_millis(5)));
+
+        let shutdown = engine.shutdown_handle();
+        tokio::spawn(async move {
+            tokio::time::sleep(to_std_duration(SignedDuration::from_millis(20)).unwrap()).await;
+            shutdown.stop();
+        });
+
+        let outputs = engine.run(&IdleSpider).await.unwrap();
+
+        assert!(outputs.is_empty());
+        assert_eq!(
+            recorded_events.lock().unwrap().clone(),
+            vec![SignalKind::SpiderOpened, SignalKind::SpiderClosed]
+        );
+    }
+
+    #[test]
     fn engine_stats_track_retries_across_attempts() {
         let scheduler = Memory::default();
         block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/retry")))).unwrap();
@@ -2958,6 +3151,26 @@ mod tests {
         }
     }
 
+    struct FailingSpider;
+
+    impl Spider for FailingSpider {
+        fn name(&self) -> &str {
+            "failing_spider"
+        }
+
+        async fn parse(&self, _response: &Response) -> Result<SpiderOutput, SpiderError> {
+            Err(SpiderError::parse("parse failed"))
+        }
+    }
+
+    struct IdleSpider;
+
+    impl Spider for IdleSpider {
+        fn name(&self) -> &str {
+            "idle_spider"
+        }
+    }
+
     struct ResponseInspectSpider;
 
     impl Spider for ResponseInspectSpider {
@@ -2991,6 +3204,53 @@ mod tests {
     impl StatsReporter for RecordingReporter {
         fn report(&self, event: StatsEvent, snapshot: StatsSnapshot) {
             self.events.lock().unwrap().push((event, snapshot));
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingSignalListener {
+        events: Arc<Mutex<Vec<SignalKind>>>,
+        request_urls: Arc<Mutex<Vec<String>>>,
+        item_titles: Arc<Mutex<Vec<String>>>,
+        errors: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl SignalListener for RecordingSignalListener {
+        fn on_signal<'a>(&'a self, signal: &'a Signal) -> BoxFuture<'a, ()> {
+            Box::pin(async move {
+                self.events.lock().unwrap().push(signal.kind());
+
+                match signal {
+                    Signal::RequestScheduled(signal) => {
+                        self.request_urls
+                            .lock()
+                            .unwrap()
+                            .push(signal.request.url.clone());
+                    }
+                    Signal::ItemScraped(signal) => {
+                        if let Some(Value::String(title)) = signal.item.get("title") {
+                            self.item_titles.lock().unwrap().push(title.clone());
+                        }
+                    }
+                    Signal::SpiderError(signal) => {
+                        self.errors.lock().unwrap().push(signal.error.to_string());
+                    }
+                    _ => {}
+                }
+            })
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingExtension {
+        events: Arc<Mutex<Vec<SignalKind>>>,
+    }
+
+    impl crate::extensions::Extension for RecordingExtension {
+        fn on_signal<'a>(&'a self, signal: &'a Signal) -> BoxFuture<'a, ()> {
+            Box::pin(async move {
+                self.events.lock().unwrap().push(signal.kind());
+            })
         }
     }
 

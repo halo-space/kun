@@ -17,8 +17,6 @@ README 负责总览，这里负责把每个模块现在到底能做什么、还�
 
 - `robots.txt` 这层虽然已经补到 `Crawl-delay`、`Request-rate`、wildcard / group、持久化 cache、`cache_ttl` 刷新与可选 sitemap 自动种子，但更高阶站点策略还没补完
 
-`signals / extensions` 这一层当前已经明确后置，不作为这一轮底层能力实现范围。其它缺口已经继续落到 OpenSpec 的任务台账里，后续会按优先级往下补。
-
 ## Request
 
 `Request` 是统一的执行单元。
@@ -522,6 +520,38 @@ let engine = Engine::new().with_dedup(MethodUrlDedup {
 - 还没有内置 Prometheus、OpenTelemetry 或其它 exporter
 - `Engine::stats()` 仍然是主读取 API；`with_stats_reporter(...)` 只是为后续 exporter 预留的最小接线点
 - 如果需要 durable scheduler 的运行时观测，优先读 `scheduler::Redis::snapshot()` 或 `scheduler::Redis::namespace_snapshots_with_prefix(...)`；如果需要单个 engine 生命周期累计计数，再读 `Engine::stats()`
+
+## Signals / Extensions
+
+当前 `engine` 已提供最小 `signals / extensions` 边界。
+
+- 如果你想拿到最原始的 runtime 事件流，用 `Engine::with_signal_listener(...)`
+- 如果你想挂更语义化的扩展，用 `Engine::with_extension(...)`
+- `with_extension(...)` 底层复用同一条 signal bus，不会额外引入另一套 runtime
+- 当前内置信号类型包括：`spider_opened`、`spider_closed`、`request_scheduled`、`response_received`、`item_scraped`、`spider_error`
+- `spider_closed` 会携带最终 `stats::Snapshot`
+- `spider_error` 会携带 `request`、可选 `response` 与显式 `SpiderError`
+- 当前内置扩展示例是 `extensions::Summary`，会在 `spider_closed` 时输出一份最终统计摘要
+
+最小用法：
+
+```rust
+use halo_spider::engine::Engine;
+use halo_spider::extensions;
+
+let engine = Engine::new().with_extension(extensions::Summary);
+```
+
+如果你要自定义：
+
+- 实现 `signals::Listener`，再挂到 `.with_signal_listener(...)`
+- 或实现 `extensions::Extension`，再挂到 `.with_extension(...)`
+
+当前边界也要明确：
+
+- 这是一条 engine 内部 runtime hook，不是新的 plugin registry
+- 当前也还没有按 signal kind 做过滤订阅、持久化事件总线或跨进程分发
+- plugin 自动装载能力仍然只落在 `middleware` kind
 
 ## Robots
 

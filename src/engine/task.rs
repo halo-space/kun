@@ -4,6 +4,7 @@ use crate::engine::flow::Flow;
 use crate::error::SpiderError;
 use crate::middleware::{Chain, Stage};
 use crate::request::{Request, RequestMode};
+use crate::response::Response;
 use crate::rules::Compiled;
 use crate::scheduler::{Scheduler, Task, TaskId, TaskLease};
 use crate::spider::{Failure, Output as SpiderOutput, Spider};
@@ -68,6 +69,7 @@ pub(super) async fn apply_task_run<S, D>(
     round: &mut usize,
     spider_name: &str,
     stats: &crate::stats::Tracker,
+    signals: &crate::signals::Bus,
 ) -> Result<(), SpiderError>
 where
     S: Scheduler,
@@ -87,7 +89,7 @@ where
                 round,
             );
             for follow in &output.follows {
-                enqueue_request(
+                let enqueued = enqueue_request(
                     scheduler,
                     dedup,
                     follow.clone(),
@@ -95,6 +97,15 @@ where
                     Some(stats),
                 )
                 .await?;
+
+                if enqueued {
+                    signals
+                        .emit(crate::signals::Signal::request_scheduled(
+                            spider_name,
+                            follow.clone(),
+                        ))
+                        .await;
+                }
             }
             resolve_scheduler_transition(
                 scheduler.complete(&lease),
@@ -112,7 +123,14 @@ where
         }
         TaskOutcome::Retry(retry_task) => {
             stats.record_retry();
+            let request = retry_task.request.clone();
             scheduler.enqueue(*retry_task).await?;
+            signals
+                .emit(crate::signals::Signal::request_scheduled(
+                    spider_name,
+                    request,
+                ))
+                .await;
             resolve_scheduler_transition(
                 scheduler.complete(&lease),
                 &lease,
@@ -222,6 +240,7 @@ pub(super) struct TaskExecutor<'a, S, H, B, P, St, Sp> {
     pub(super) robots: &'a dyn crate::robots::Robot,
     pub(super) settings: &'a crate::settings::Settings,
     pub(super) stats: Arc<crate::stats::Tracker>,
+    pub(super) signals: Arc<crate::signals::Bus>,
     pub(super) engine_chain: &'a Chain,
     pub(super) step_chain: &'a Chain,
     pub(super) spider: &'a Sp,
@@ -239,7 +258,38 @@ where
     St: crate::store::Store,
     Sp: Spider,
 {
-    async fn process_spider_output(self, mut output: SpiderOutput) -> TaskOutcome {
+    async fn error_outcome(
+        &self,
+        request: &Request,
+        response: Option<Response>,
+        error: SpiderError,
+    ) -> TaskOutcome {
+        self.signals
+            .emit(crate::signals::Signal::spider_error(
+                self.spider_name,
+                request.clone(),
+                response,
+                error.clone(),
+            ))
+            .await;
+        TaskOutcome::Error(error)
+    }
+
+    async fn error_outcome_from_context(
+        &self,
+        context: &EngineContext,
+        error: SpiderError,
+    ) -> TaskOutcome {
+        self.error_outcome(&context.request, context.response.clone(), error)
+            .await
+    }
+
+    async fn process_spider_output(
+        self,
+        mut output: SpiderOutput,
+        request: &Request,
+        response: Option<Response>,
+    ) -> TaskOutcome {
         let mut kept_items = Vec::with_capacity(output.items.len());
         for mut item in output.items.drain(..) {
             match self.pipeline.process(&mut item, self.spider_name).await {
@@ -256,7 +306,7 @@ where
                         error = %error,
                         "pipeline failed while processing item"
                     );
-                    return TaskOutcome::Error(error);
+                    return self.error_outcome(request, response.clone(), error).await;
                 }
             }
         }
@@ -264,8 +314,14 @@ where
         if !kept_items.is_empty() {
             match self.store.batch_write(&kept_items, self.spider_name).await {
                 Ok(()) => {
-                    for _ in &kept_items {
+                    for item in &kept_items {
                         self.stats.record_item();
+                        self.signals
+                            .emit(crate::signals::Signal::item_scraped(
+                                self.spider_name,
+                                item.clone(),
+                            ))
+                            .await;
                     }
                 }
                 Err(error) => {
@@ -275,7 +331,7 @@ where
                         error = %error,
                         "store failed while batch writing items"
                     );
-                    return TaskOutcome::Error(error);
+                    return self.error_outcome(request, response.clone(), error).await;
                 }
             }
         }
@@ -295,7 +351,7 @@ where
 
     async fn run_errback(self, context: &EngineContext, error: SpiderError) -> TaskOutcome {
         let Some(errback) = context.request.errback.as_ref() else {
-            return TaskOutcome::Error(error);
+            return self.error_outcome_from_context(context, error).await;
         };
 
         tracing::info!(
@@ -308,8 +364,14 @@ where
         let failure = Failure::new(context.request.clone(), context.response.clone(), error);
 
         match self.spider.handle_error(&errback.name, &failure).await {
-            Ok(output) => self.process_spider_output(output).await,
-            Err(errback_error) => TaskOutcome::Error(errback_error),
+            Ok(output) => {
+                self.process_spider_output(output, &context.request, context.response.clone())
+                    .await
+            }
+            Err(errback_error) => {
+                self.error_outcome_from_context(context, errback_error)
+                    .await
+            }
         }
     }
 
@@ -329,7 +391,13 @@ where
             let _domain_permit_guard = match domain_semaphore.acquire().await {
                 Ok(permit) => permit,
                 Err(_) => {
-                    return TaskOutcome::Error(SpiderError::engine("domain semaphore closed"));
+                    return self
+                        .error_outcome(
+                            &request,
+                            None,
+                            SpiderError::engine("domain semaphore closed"),
+                        )
+                        .await;
                 }
             };
 
@@ -360,7 +428,7 @@ where
         {
             Ok(Flow::Continue) => {}
             Ok(flow) => return map_flow_to_task_outcome(flow, &context),
-            Err(error) => return TaskOutcome::Error(error),
+            Err(error) => return self.error_outcome_from_context(&context, error).await,
         }
 
         if self.settings.robots_obey {
@@ -397,7 +465,7 @@ where
                         &context,
                     );
                 }
-                Err(error) => return TaskOutcome::Error(error),
+                Err(error) => return self.error_outcome_from_context(&context, error).await,
             }
         }
 
@@ -425,7 +493,11 @@ where
                 {
                     Ok(Flow::Continue) => return self.run_errback(&context, error).await,
                     Ok(flow) => return map_flow_to_task_outcome(flow, &context),
-                    Err(middleware_error) => return TaskOutcome::Error(middleware_error),
+                    Err(middleware_error) => {
+                        return self
+                            .error_outcome_from_context(&context, middleware_error)
+                            .await;
+                    }
                 }
             }
         };
@@ -442,10 +514,16 @@ where
         {
             Ok(Flow::Continue) => {}
             Ok(flow) => return map_flow_to_task_outcome(flow, &context),
-            Err(error) => return TaskOutcome::Error(error),
+            Err(error) => return self.error_outcome_from_context(&context, error).await,
         }
 
         let response = context.response.clone().unwrap_or(response);
+        self.signals
+            .emit(crate::signals::Signal::response_received(
+                self.spider_name,
+                response.clone(),
+            ))
+            .await;
 
         match run_middleware_request(
             self.engine_chain,
@@ -457,7 +535,7 @@ where
         {
             Ok(Flow::Continue) => {}
             Ok(flow) => return map_flow_to_task_outcome(flow, &context),
-            Err(error) => return TaskOutcome::Error(error),
+            Err(error) => return self.error_outcome_from_context(&context, error).await,
         }
 
         let output = self.spider.dispatch(&response, self.compiled).await;
@@ -474,10 +552,11 @@ where
                 {
                     Ok(Flow::Continue) => {}
                     Ok(flow) => return map_flow_to_task_outcome(flow, &context),
-                    Err(error) => return TaskOutcome::Error(error),
+                    Err(error) => return self.error_outcome_from_context(&context, error).await,
                 }
 
-                self.process_spider_output(output).await
+                self.process_spider_output(output, &context.request, context.response.clone())
+                    .await
             }
             Err(error) => {
                 tracing::error!(
@@ -497,7 +576,10 @@ where
                 {
                     Ok(Flow::Continue) => self.run_errback(&context, error).await,
                     Ok(flow) => map_flow_to_task_outcome(flow, &context),
-                    Err(middleware_error) => TaskOutcome::Error(middleware_error),
+                    Err(middleware_error) => {
+                        self.error_outcome_from_context(&context, middleware_error)
+                            .await
+                    }
                 }
             }
         }

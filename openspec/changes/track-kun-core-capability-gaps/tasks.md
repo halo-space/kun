@@ -173,7 +173,8 @@
 ## 21. 对齐 Scrapy 剩余核心缺口
 
 - [x] 21.1 为 `Request` 补齐 `errback` 与 `kwargs` 这类回调失败路由和回调上下文能力，并明确 `follow()` / 子请求的继承与重置语义。
-- [ ] 21.2 `signals / extensions` 当前后置，不作为这一轮底层能力实现范围。
+- [x] 21.2 为 engine 提供最小 `signals / extensions` 能力，并明确它们是 runtime hook，而不是另一套独立执行链。
+  - 当前已提供 `Engine::with_signal_listener(...)` 与 `Engine::with_extension(...)`；最小 signals 集合包括 `spider_opened`、`spider_closed`、`request_scheduled`、`response_received`、`item_scraped` 与 `spider_error`；`extensions::Summary` 作为最小内置扩展示例复用同一条 signal bus。
 - [x] 21.3 提供最小自适应限速能力，对齐 Scrapy `AutoThrottle` 的核心场景，至少明确基于延迟、错误和并发反馈的动态 download delay 语义。
 - [x] 21.4 在最小 robots 基础上继续补更完整语义，至少评估 `Crawl-delay`、`Sitemap` 与更完整 wildcard / group 匹配规则。
 
@@ -182,7 +183,7 @@
 当前建议优先顺序：
 
 - `22 -> 25 -> 23 -> 24 -> 28 -> 26 -> 27 -> 29`
-- `6.1 / 6.2 / 9.x / 21.2` 继续按既定决策后置，不纳入这一轮主线实现
+- `6.1 / 6.2 / 9.x` 继续按既定决策后置，不纳入这一轮主线实现
 
 ## 22. P0 Robots 持久化与自动种子
 
