@@ -56,7 +56,7 @@
 - Plugin 或 DSL 影响：
   - DSL 继续只做共享能力的配置化入口。
   - plugin 体系当前只把 `middleware` 作为已支持的 engine 装配点。
-  - `rules`、`provider`、`storage` 目前只保留为 manifest 命名空间；在对应底层运行时 owner 尚未稳定前，不开放新的 engine plugin kind。
+  - plugin manifest 的已知 kind 要直接对齐稳定组件 owner；当前候选 owner 收口为 `store`、`scheduler`、`dedup`、`robots`、`http`、`browser`，但在真正开放装配前仍只作为命名空间，不开放新的 engine plugin kind。
 
 ## 验证方式
 

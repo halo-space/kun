@@ -110,7 +110,7 @@ mod tests {
         let checkpoint = Checkpoint {
             ready: vec![Task::new(Request::new("https://example.com/ready")).with_priority(5)],
             delayed: vec![
-                Task::with_delay_ms(Request::new("https://example.com/delayed"), 50).with_depth(2),
+                Task::with_delay(Request::new("https://example.com/delayed"), 50).with_depth(2),
             ],
             inflight: vec![Task::new(Request::new("https://example.com/inflight"))],
         };

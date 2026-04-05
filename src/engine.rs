@@ -3,24 +3,27 @@ pub mod flow;
 mod task;
 
 use crate::download::traits::Downloader;
-use crate::engine::task::{TaskExecutor, TaskRun, TaskRunReservation, apply_task_run};
+use crate::engine::task::{
+    TaskExecutor, TaskRun, TaskRunReservation, apply_task_run, enqueue_request,
+};
 use crate::error::SpiderError;
 use crate::middleware::{Chain, Config, Registry, build as build_middleware};
 use crate::plugins::types::{
-    PluginKind, engine_reserved_plugin_kind_names, engine_supported_plugin_kind_names,
+    PluginKind, engine_deferred_plugin_kind_names, engine_supported_plugin_kind_names,
 };
 use crate::rules::Compiled;
 use crate::runtime::compile::{compile as compile_runtime, merge as merge_middleware};
 use crate::runtime::{Config as RuntimeConfig, merge as merge_runtime};
-use crate::scheduler::{Scheduler, Task};
+use crate::scheduler::Scheduler;
 use crate::settings::Settings;
 use crate::spider::{Output as SpiderOutput, Spider};
 use futures::stream::{FuturesUnordered, StreamExt};
 use jiff::SignedDuration;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use url::Url;
 
 #[cfg(test)]
 use crate::engine::context::EngineContext;
@@ -31,13 +34,14 @@ use crate::middleware::Stage;
 #[cfg(test)]
 use crate::request::RequestMode;
 
-pub struct Engine<S, H, B, P = (), St = crate::store::File> {
+pub struct Engine<S, H, B, D = crate::dedup::Memory, P = (), St = crate::store::File> {
     pub scheduler: S,
     pub http: H,
     pub browser: B,
+    pub dedup: D,
     pub pipeline: P,
     pub store: St,
-    robots: Arc<crate::robots::Robot>,
+    robots: Arc<dyn crate::robots::Robot>,
     stats: Arc<crate::stats::Tracker>,
     pub settings: Settings,
     pub middleware: Chain,
@@ -65,9 +69,10 @@ where
             scheduler,
             http,
             browser,
+            dedup: crate::dedup::Memory::default(),
             pipeline: (),
             store: crate::store::File::default(),
-            robots: Arc::new(crate::robots::Robot::default()),
+            robots: Arc::new(crate::robots::Memory::default()),
             stats: Arc::new(crate::stats::Tracker::default()),
             settings: Settings::default(),
             middleware: Chain::default(),
@@ -89,6 +94,8 @@ where
     /// - scheduler: `scheduler::Memory`
     /// - http downloader: `download::Http`
     /// - browser downloader: `download::Browser`
+    /// - dedup: `dedup::Memory`
+    /// - robots: `robots::Memory`
     /// - store: `store::File`
     pub fn new() -> Self {
         Self::from_parts(
@@ -116,16 +123,22 @@ where
 {
     /// Build an engine with the default memory scheduler and custom
     /// downloaders.
+    ///
+    /// This is a convenience constructor for the common case of keeping the
+    /// default scheduler while replacing both downloader components together.
+    /// If you only need to replace one downloader, prefer `Engine::new()
+    /// .with_http(...)` or `Engine::new().with_browser(...)`.
     pub fn with_downloaders(http: H, browser: B) -> Self {
         Self::from_parts(crate::scheduler::Memory::default(), http, browser)
     }
 }
 
-impl<S, H, B, P, St> Engine<S, H, B, P, St>
+impl<S, H, B, D, P, St> Engine<S, H, B, D, P, St>
 where
     S: Scheduler,
     H: Downloader,
     B: Downloader,
+    D: crate::dedup::Dedup,
     P: crate::pipeline::Pipeline,
     St: crate::store::Store,
 {
@@ -142,11 +155,72 @@ where
     }
 
     /// Replace the scheduler while keeping the current engine configuration.
-    pub fn with_scheduler<S2: Scheduler>(self, scheduler: S2) -> Engine<S2, H, B, P, St> {
+    pub fn with_scheduler<S2: Scheduler>(self, scheduler: S2) -> Engine<S2, H, B, D, P, St> {
         Engine {
             scheduler,
             http: self.http,
             browser: self.browser,
+            dedup: self.dedup,
+            pipeline: self.pipeline,
+            store: self.store,
+            robots: self.robots,
+            stats: self.stats,
+            settings: self.settings,
+            middleware: self.middleware,
+            plugins: self.plugins,
+            prepared: self.prepared,
+            shutdown: self.shutdown,
+        }
+    }
+
+    /// Replace only the HTTP downloader while keeping the current engine
+    /// configuration.
+    pub fn with_http<H2: Downloader>(self, http: H2) -> Engine<S, H2, B, D, P, St> {
+        Engine {
+            scheduler: self.scheduler,
+            http,
+            browser: self.browser,
+            dedup: self.dedup,
+            pipeline: self.pipeline,
+            store: self.store,
+            robots: self.robots,
+            stats: self.stats,
+            settings: self.settings,
+            middleware: self.middleware,
+            plugins: self.plugins,
+            prepared: self.prepared,
+            shutdown: self.shutdown,
+        }
+    }
+
+    /// Replace only the browser downloader while keeping the current engine
+    /// configuration.
+    pub fn with_browser<B2: Downloader>(self, browser: B2) -> Engine<S, H, B2, D, P, St> {
+        Engine {
+            scheduler: self.scheduler,
+            http: self.http,
+            browser,
+            dedup: self.dedup,
+            pipeline: self.pipeline,
+            store: self.store,
+            robots: self.robots,
+            stats: self.stats,
+            settings: self.settings,
+            middleware: self.middleware,
+            plugins: self.plugins,
+            prepared: self.prepared,
+            shutdown: self.shutdown,
+        }
+    }
+
+    /// Replace the request dedup component while keeping the current engine
+    /// configuration.
+    pub fn with_dedup<D2: crate::dedup::Dedup>(self, dedup: D2) -> Engine<S, H, B, D2, P, St> {
+        Engine {
+            scheduler: self.scheduler,
+            http: self.http,
+            browser: self.browser,
+            dedup,
             pipeline: self.pipeline,
             store: self.store,
             robots: self.robots,
@@ -164,11 +238,12 @@ where
     pub fn with_pipeline<P2: crate::pipeline::Pipeline>(
         self,
         pipeline: P2,
-    ) -> Engine<S, H, B, P2, St> {
+    ) -> Engine<S, H, B, D, P2, St> {
         Engine {
             scheduler: self.scheduler,
             http: self.http,
             browser: self.browser,
+            dedup: self.dedup,
             pipeline,
             store: self.store,
             robots: self.robots,
@@ -181,13 +256,21 @@ where
         }
     }
 
+    /// Replace the robots policy component while keeping the current engine
+    /// configuration.
+    pub fn with_robots(mut self, robots: impl crate::robots::Robot + 'static) -> Self {
+        self.robots = Arc::new(robots);
+        self
+    }
+
     /// Replace the final item store while keeping the current engine
     /// configuration.
-    pub fn with_store<St2: crate::store::Store>(self, store: St2) -> Engine<S, H, B, P, St2> {
+    pub fn with_store<St2: crate::store::Store>(self, store: St2) -> Engine<S, H, B, D, P, St2> {
         Engine {
             scheduler: self.scheduler,
             http: self.http,
             browser: self.browser,
+            dedup: self.dedup,
             pipeline: self.pipeline,
             store,
             robots: self.robots,
@@ -246,13 +329,35 @@ where
         self
     }
 
+    /// Enqueue one request through the engine's dedup component before it
+    /// reaches the scheduler.
+    pub async fn enqueue(&mut self, request: crate::request::Request) -> Result<bool, SpiderError> {
+        enqueue_request(
+            &mut self.scheduler,
+            &mut self.dedup,
+            request,
+            &[],
+            Some(self.stats.as_ref()),
+        )
+        .await
+    }
+
+    /// Register a lightweight runtime stats reporter.
+    ///
+    /// `engine.stats()` remains the primary read API. Reporters are an
+    /// observation hook for streaming counter updates to custom telemetry.
+    pub fn with_stats_reporter(self, reporter: impl crate::stats::Reporter + 'static) -> Self {
+        self.stats.add_reporter(Arc::new(reporter));
+        self
+    }
+
     /// Load plugin manifests and verify that every declared middleware plugin
     /// has a registered factory.
     ///
     /// Before calling this method, register each middleware factory with
-    /// `register_middleware()`. `load_plugins()` currently supports only
-    /// `kind = "middleware"` plugins; other known kinds are kept as
-    /// namespaces only and are not auto-wired by the engine.
+    /// `register_middleware()`. `load_plugins()` currently auto-loads only
+    /// `kind = "middleware"` plugins; other known component kinds are kept as
+    /// explicit future extension points and are not auto-wired by the engine.
     ///
     /// It verifies that every middleware declared in `plugins.toml` has a
     /// matching engine factory and returns an error otherwise.
@@ -282,10 +387,10 @@ where
 
         if !unsupported_manifests.is_empty() {
             return Err(SpiderError::plugin(format!(
-                "engine currently only supports plugin kinds [{}]; unsupported manifests: {}; reserved but not loadable yet: [{}]",
+                "engine currently only auto-loads plugin kinds [{}]; unsupported manifests: {}; known but not auto-loadable yet: [{}]",
                 engine_supported_plugin_kind_names().join(", "),
                 unsupported_manifests.join(", "),
-                engine_reserved_plugin_kind_names().join(", ")
+                engine_deferred_plugin_kind_names().join(", ")
             )));
         }
 
@@ -329,6 +434,182 @@ where
         self.stats.snapshot()
     }
 
+    async fn enqueue_start_requests<Sp: Spider>(
+        &mut self,
+        spider: &Sp,
+        allowed_domains: &[String],
+    ) -> Result<(), SpiderError> {
+        let start_requests: Vec<crate::request::Request> = spider
+            .build_start_urls()
+            .into_iter()
+            .map(crate::request::Request::new)
+            .collect();
+
+        tracing::info!(
+            spider = spider.name(),
+            count = start_requests.len(),
+            "enqueueing start URLs"
+        );
+
+        for request in &start_requests {
+            enqueue_request(
+                &mut self.scheduler,
+                &mut self.dedup,
+                request.clone(),
+                &[],
+                Some(self.stats.as_ref()),
+            )
+            .await?;
+        }
+
+        if !self.settings.robots_sitemap_seeds {
+            return Ok(());
+        }
+
+        self.enqueue_robots_sitemap_seeds(spider.name(), allowed_domains, &start_requests)
+            .await
+    }
+
+    async fn enqueue_robots_sitemap_seeds(
+        &mut self,
+        spider_name: &str,
+        allowed_domains: &[String],
+        start_requests: &[crate::request::Request],
+    ) -> Result<(), SpiderError> {
+        let mut origin_requests = BTreeMap::new();
+        for request in start_requests {
+            let Some(origin) = request_origin(request.url.as_str()) else {
+                continue;
+            };
+            origin_requests
+                .entry(origin)
+                .or_insert_with(|| request.clone());
+        }
+
+        if origin_requests.is_empty() {
+            return Ok(());
+        }
+
+        let mut seen_sitemaps = BTreeSet::new();
+        let mut pending_sitemaps = VecDeque::new();
+
+        for request in origin_requests.values() {
+            match self.robots.sitemaps(request).await {
+                Ok(sitemaps) => {
+                    for sitemap in sitemaps {
+                        let Some(resolved) = resolve_url(request.url.as_str(), sitemap.as_str())
+                        else {
+                            tracing::warn!(
+                                spider = spider_name,
+                                sitemap = sitemap.as_str(),
+                                "skipping invalid sitemap URL declared by robots"
+                            );
+                            continue;
+                        };
+
+                        if seen_sitemaps.insert(resolved.clone()) {
+                            pending_sitemaps.push_back(resolved);
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        spider = spider_name,
+                        url = request.url.as_str(),
+                        error = %error,
+                        "failed to read sitemap URLs from robots"
+                    );
+                }
+            }
+        }
+
+        if pending_sitemaps.is_empty() {
+            return Ok(());
+        }
+
+        let mut seed_count = 0usize;
+
+        while let Some(sitemap_url) = pending_sitemaps.pop_front() {
+            let response = match self
+                .http
+                .fetch(&crate::request::Request::new(sitemap_url.clone()))
+                .await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    tracing::warn!(
+                        spider = spider_name,
+                        sitemap = sitemap_url.as_str(),
+                        error = %error,
+                        "failed to fetch sitemap"
+                    );
+                    continue;
+                }
+            };
+
+            if !(200..300).contains(&response.status) {
+                tracing::warn!(
+                    spider = spider_name,
+                    sitemap = sitemap_url.as_str(),
+                    status = response.status,
+                    "skipping sitemap because fetch did not return success"
+                );
+                continue;
+            }
+
+            let entries = crate::parser::SitemapQuery::new(response.text).entries();
+
+            for nested_sitemap in entries.sitemaps {
+                let Some(resolved) = resolve_url(sitemap_url.as_str(), nested_sitemap.as_str())
+                else {
+                    tracing::warn!(
+                        spider = spider_name,
+                        sitemap = nested_sitemap.as_str(),
+                        parent = sitemap_url.as_str(),
+                        "skipping invalid nested sitemap URL"
+                    );
+                    continue;
+                };
+
+                if seen_sitemaps.insert(resolved.clone()) {
+                    pending_sitemaps.push_back(resolved);
+                }
+            }
+
+            for page_url in entries.urls {
+                let Some(resolved) = resolve_url(sitemap_url.as_str(), page_url.as_str()) else {
+                    tracing::warn!(
+                        spider = spider_name,
+                        url = page_url.as_str(),
+                        sitemap = sitemap_url.as_str(),
+                        "skipping invalid sitemap URL entry"
+                    );
+                    continue;
+                };
+
+                if enqueue_request(
+                    &mut self.scheduler,
+                    &mut self.dedup,
+                    crate::request::Request::new(resolved),
+                    allowed_domains,
+                    Some(self.stats.as_ref()),
+                )
+                .await?
+                {
+                    seed_count += 1;
+                }
+            }
+        }
+
+        tracing::info!(
+            spider = spider_name,
+            count = seed_count,
+            "enqueueing robots sitemap seed URLs"
+        );
+
+        Ok(())
+    }
+
     /// Run the engine continuously until a stop signal is received.
     ///
     /// Concurrent downloads are controlled by:
@@ -365,16 +646,8 @@ where
 
         let step_middlewares = self.build_step_middlewares(compiled.as_ref())?;
 
-        let start_urls = spider.build_start_urls();
-        tracing::info!(
-            spider = spider_name,
-            count = start_urls.len(),
-            "enqueueing start URLs"
-        );
-        for url in start_urls {
-            let request = crate::request::Request::new(url);
-            self.scheduler.enqueue(Task::new(request)).await?;
-        }
+        self.enqueue_start_requests(spider, &allowed_domains)
+            .await?;
 
         let max_concurrent = self.settings.concurrent_requests;
         let per_domain_limit = self.settings.concurrent_requests_per_domain;
@@ -405,13 +678,14 @@ where
         let mut outputs = Vec::new();
         let mut round = 0usize;
 
-        let scheduler = &mut self.scheduler;
+        let scheduler = &self.scheduler;
+        let dedup = &mut self.dedup;
         let http = &self.http;
         let browser = &self.browser;
         let pipeline = &self.pipeline;
         let store = &self.store;
-        let robots = &self.robots;
-        let stats = &self.stats;
+        let robots = self.robots.as_ref();
+        let stats = self.stats.clone();
         let engine_chain = &self.middleware;
         let step_chains = &step_middlewares;
         let allowed_domains = &allowed_domains;
@@ -428,6 +702,7 @@ where
                     apply_task_run(
                         result,
                         scheduler,
+                        dedup,
                         allowed_domains,
                         &mut outputs,
                         &mut round,
@@ -448,7 +723,7 @@ where
                     break;
                 };
 
-                let domain = extract_domain(&task.request.url)
+                let domain = extract_domain(&task.task.request.url)
                     .unwrap_or("unknown")
                     .to_string();
                 let domain_semaphore = domain_semaphores
@@ -456,17 +731,18 @@ where
                     .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(per_domain_limit)))
                     .clone();
 
-                let step_id = step_id_from_request(&task.request);
+                let step_id = step_id_from_request(&task.task.request);
                 let step_chain = step_chains.get(&step_id).unwrap_or(&default_step_chain);
 
                 let task_executor = TaskExecutor {
+                    scheduler,
                     http,
                     browser,
                     pipeline,
                     store,
                     robots,
                     settings: &self.settings,
-                    stats,
+                    stats: stats.clone(),
                     engine_chain,
                     step_chain,
                     spider,
@@ -475,8 +751,8 @@ where
                     spider_name,
                 };
                 let task_run_reservation = TaskRunReservation::new(
-                    task.id.clone(),
-                    task.request,
+                    task.lease,
+                    task.task.request,
                     global_permit_guard,
                     domain_semaphore,
                 );
@@ -490,7 +766,7 @@ where
                 if let Some(idle_timeout_std) = idle_timeout_std {
                     tracing::debug!(
                         spider = spider_name,
-                        idle_ms = idle_timeout.as_millis(),
+                        idle_timeout = idle_timeout.as_millis(),
                         "queue is empty, waiting for new tasks..."
                     );
                     tokio::time::sleep(idle_timeout_std).await;
@@ -504,6 +780,7 @@ where
                 apply_task_run(
                     result,
                     scheduler,
+                    dedup,
                     allowed_domains,
                     &mut outputs,
                     &mut round,
@@ -571,10 +848,11 @@ where
     }
 }
 
-impl<H, B, P, St> Engine<crate::scheduler::Memory, H, B, P, St>
+impl<H, B, D, P, St> Engine<crate::scheduler::Memory, H, B, D, P, St>
 where
     H: Downloader,
     B: Downloader,
+    D: crate::dedup::Dedup,
     P: crate::pipeline::Pipeline,
     St: crate::store::Store,
 {
@@ -585,7 +863,7 @@ where
     pub fn with_checkpoint<Persist>(
         self,
         persist: Persist,
-    ) -> Engine<crate::scheduler::checkpoint::Memory<Persist>, H, B, P, St>
+    ) -> Engine<crate::scheduler::checkpoint::Memory<Persist>, H, B, D, P, St>
     where
         Persist: crate::scheduler::checkpoint::Persist,
     {
@@ -595,6 +873,7 @@ where
             scheduler,
             http: self.http,
             browser: self.browser,
+            dedup: self.dedup,
             pipeline: self.pipeline,
             store: self.store,
             robots: self.robots,
@@ -612,7 +891,7 @@ where
     pub async fn load_checkpoint<Persist>(
         self,
         persist: Persist,
-    ) -> Result<Engine<crate::scheduler::checkpoint::Memory<Persist>, H, B, P, St>, SpiderError>
+    ) -> Result<Engine<crate::scheduler::checkpoint::Memory<Persist>, H, B, D, P, St>, SpiderError>
     where
         Persist: crate::scheduler::checkpoint::Persist,
     {
@@ -622,6 +901,7 @@ where
             scheduler,
             http: self.http,
             browser: self.browser,
+            dedup: self.dedup,
             pipeline: self.pipeline,
             store: self.store,
             robots: self.robots,
@@ -639,6 +919,29 @@ fn extract_domain(url: &str) -> Option<&str> {
     let after_scheme = url.split("://").nth(1)?;
     let host_port = after_scheme.split('/').next()?;
     Some(host_port.split(':').next().unwrap_or(host_port))
+}
+
+fn request_origin(url: &str) -> Option<String> {
+    let parsed = Url::parse(url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+
+    Some(parsed.origin().ascii_serialization())
+}
+
+fn resolve_url(base_url: &str, raw_url: &str) -> Option<String> {
+    let raw_url = raw_url.trim();
+    if raw_url.is_empty() {
+        return None;
+    }
+
+    if let Ok(url) = Url::parse(raw_url) {
+        return Some(url.to_string());
+    }
+
+    let base = Url::parse(base_url).ok()?;
+    base.join(raw_url).ok().map(|url| url.to_string())
 }
 
 fn is_domain_allowed(url: &str, allowed: &[String]) -> bool {
@@ -714,11 +1017,12 @@ fn step_middlewares(compiled: Option<&Compiled>, step_id: &str) -> crate::middle
 }
 
 #[cfg(test)]
-impl<S, H, B, P, St> Engine<S, H, B, P, St>
+impl<S, H, B, D, P, St> Engine<S, H, B, D, P, St>
 where
     S: Scheduler,
     H: Downloader,
     B: Downloader,
+    D: crate::dedup::Dedup,
     P: crate::pipeline::Pipeline,
     St: crate::store::Store,
 {
@@ -726,8 +1030,11 @@ where
         let Some(task) = self.scheduler.take_ready().await? else {
             return Ok(None);
         };
-        let task_id = task.id.clone();
-        let mut context = EngineContext::new(task.request).with_task_id(task_id.clone());
+        let task_id = task.lease.task_id().clone();
+        let mut context = EngineContext::new(task.task.request)
+            .with_task_id(task_id)
+            .with_stats(self.stats.clone());
+        let lease = task.lease;
 
         let default_chain = Chain::default();
         let step_chain = &default_chain;
@@ -737,11 +1044,11 @@ where
         {
             Ok(crate::engine::flow::Flow::Continue) => {}
             Ok(_) => {
-                self.scheduler.complete(&task_id).await?;
+                self.scheduler.complete(&lease).await?;
                 return Ok(None);
             }
             Err(e) => {
-                self.scheduler.requeue(&task_id).await?;
+                self.scheduler.requeue(&lease).await?;
                 return Err(e);
             }
         }
@@ -759,7 +1066,7 @@ where
             }
             Err(e) => {
                 self.stats.record_error();
-                self.scheduler.requeue(&task_id).await?;
+                self.scheduler.requeue(&lease).await?;
                 return Err(e);
             }
         };
@@ -771,16 +1078,18 @@ where
         {
             Ok(crate::engine::flow::Flow::Continue) => {}
             Ok(_) => {
-                self.scheduler.complete(&task_id).await?;
+                self.scheduler.complete(&lease).await?;
                 return Ok(None);
             }
             Err(e) => {
-                self.scheduler.requeue(&task_id).await?;
+                self.scheduler.requeue(&lease).await?;
                 return Err(e);
             }
         }
 
-        self.scheduler.complete(&task_id).await?;
+        let response = context.response.clone().unwrap_or(response);
+
+        self.scheduler.complete(&lease).await?;
         Ok(Some(response))
     }
 
@@ -800,20 +1109,22 @@ where
         let Some(task) = self.scheduler.take_ready().await? else {
             return Ok(None);
         };
-        let task_id = task.id.clone();
+        let task_id = task.lease.task_id().clone();
+        let lease = task.lease.clone();
 
-        let step_id = step_id_from_request(&task.request);
+        let step_id = step_id_from_request(&task.task.request);
         let default_chain = Chain::default();
         let step_chain = step_chains.get(&step_id).unwrap_or(&default_chain);
 
         let task_executor = TaskExecutor {
+            scheduler: &self.scheduler,
             http: &self.http,
             browser: &self.browser,
             pipeline: &self.pipeline,
             store: &self.store,
-            robots: &self.robots,
+            robots: self.robots.as_ref(),
             settings: &self.settings,
-            stats: &self.stats,
+            stats: self.stats.clone(),
             engine_chain: &self.middleware,
             step_chain,
             spider,
@@ -822,16 +1133,21 @@ where
             spider_name: spider.name(),
         };
 
-        let outcome = task_executor.run(task_id.clone(), task.request).await;
+        let outcome = task_executor.run(task_id, task.task.request).await;
 
         match outcome {
             TaskOutcome::Success(output) => {
                 for follow in &output.follows {
-                    if follow.dont_filter || is_domain_allowed(&follow.url, &[]) {
-                        self.scheduler.enqueue(Task::new(follow.clone())).await?;
-                    }
+                    enqueue_request(
+                        &mut self.scheduler,
+                        &mut self.dedup,
+                        follow.clone(),
+                        &[],
+                        Some(self.stats.as_ref()),
+                    )
+                    .await?;
                 }
-                self.scheduler.complete(&task_id).await?;
+                self.scheduler.complete(&lease).await?;
                 Ok(Some(crate::spider::Output {
                     items: output.items,
                     requests: output.follows,
@@ -840,18 +1156,19 @@ where
             TaskOutcome::Retry(retry_task) => {
                 self.stats.record_retry();
                 self.scheduler.enqueue(*retry_task).await?;
-                self.scheduler.complete(&task_id).await?;
+                self.scheduler.complete(&lease).await?;
                 Ok(None)
             }
             TaskOutcome::Drop => {
-                self.scheduler.complete(&task_id).await?;
+                self.scheduler.complete(&lease).await?;
                 Ok(None)
             }
             TaskOutcome::Error(e) => {
                 self.stats.record_error();
-                self.scheduler.requeue(&task_id).await?;
+                self.scheduler.requeue(&lease).await?;
                 Err(e)
             }
+            TaskOutcome::LeaseLost(error) => Err(error),
         }
     }
 }
@@ -861,18 +1178,21 @@ mod tests {
     use super::*;
     use crate::engine::context::EngineContext;
     use crate::engine::flow::Flow;
+    use crate::future::BoxFuture;
     use crate::middleware::Config;
     use crate::middleware::traits::Middleware;
     use crate::pipeline::Pipeline;
     use crate::plugins::{PluginManifest, PluginRegistry};
-    use crate::request::Request;
+    use crate::request::{Headers, Request};
     use crate::response::Response;
     use crate::scheduler::checkpoint::{Checkpoint, Persist};
     use crate::scheduler::memory::Memory;
     use crate::scheduler::{Scheduler, Task};
-    use crate::spider::{Output as SpiderOutput, Spider};
+    use crate::spider::{Failure, Output as SpiderOutput, Spider};
     use crate::stats::Snapshot as StatsSnapshot;
+    use crate::stats::{Event as StatsEvent, Reporter as StatsReporter};
     use crate::store::Memory as MemoryStore;
+    use crate::test_support::redis::spawn_redis_server;
     use crate::value::Value;
     use jiff::SignedDuration;
     use std::collections::BTreeMap;
@@ -883,7 +1203,7 @@ mod tests {
 
     #[test]
     fn engine_executes_http_task_once() {
-        let mut scheduler = Memory::default();
+        let scheduler = Memory::default();
         block_on(scheduler.enqueue(Task::new(Request::new("https://example.com")))).unwrap();
 
         let mut engine = Engine::from_parts(scheduler, StubHttp, StubBrowser);
@@ -895,7 +1215,7 @@ mod tests {
 
     #[test]
     fn engine_executes_browser_task_once() {
-        let mut scheduler = Memory::default();
+        let scheduler = Memory::default();
         block_on(scheduler.enqueue(Task::new(Request::browser("https://example.com/browser"))))
             .unwrap();
 
@@ -920,6 +1240,62 @@ mod tests {
     }
 
     #[test]
+    fn engine_with_downloaders_keeps_default_dedup_behavior() {
+        let fetches = Arc::new(Mutex::new(0usize));
+        let downloader = CountHttp {
+            fetches: fetches.clone(),
+            statuses: vec![200, 200],
+        };
+        let mut engine =
+            Engine::with_downloaders(downloader, StubBrowser).with_store(MemoryStore::default());
+
+        assert!(
+            block_on(engine.enqueue(Request::new("https://example.com/dedup-shortcut"))).unwrap()
+        );
+        assert!(
+            !block_on(engine.enqueue(Request::new("https://example.com/dedup-shortcut"))).unwrap()
+        );
+
+        let mut step_chains = BTreeMap::new();
+        let output = block_on(engine.execute_spider_once(
+            &SimpleSpider("with_downloaders"),
+            None,
+            &mut step_chains,
+        ))
+        .unwrap();
+
+        assert!(output.is_some());
+        assert_eq!(*fetches.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn engine_with_http_replaces_only_http_downloader() {
+        let scheduler = Memory::default();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/http-only"))))
+            .unwrap();
+
+        let mut engine = Engine::from_parts(scheduler, StubHttp, StubBrowser).with_http(AltHttp);
+        let response = block_on(engine.execute_once()).unwrap().unwrap();
+
+        assert_eq!(response.protocol.as_deref(), Some("alt-http"));
+    }
+
+    #[test]
+    fn engine_with_browser_replaces_only_browser_downloader() {
+        let scheduler = Memory::default();
+        block_on(scheduler.enqueue(Task::new(Request::browser(
+            "https://example.com/browser-only",
+        ))))
+        .unwrap();
+
+        let mut engine =
+            Engine::from_parts(scheduler, StubHttp, StubBrowser).with_browser(AltBrowser);
+        let response = block_on(engine.execute_once()).unwrap().unwrap();
+
+        assert_eq!(response.protocol.as_deref(), Some("alt-browser"));
+    }
+
+    #[test]
     fn engine_default_is_zero_config_memory_engine() {
         let engine = Engine::default();
 
@@ -929,7 +1305,7 @@ mod tests {
     #[test]
     fn engine_with_checkpoint_wraps_default_memory_scheduler() {
         let persist = TestCheckpointPersist::default();
-        let mut engine =
+        let engine =
             Engine::with_downloaders(StubHttp, StubBrowser).with_checkpoint(persist.clone());
 
         block_on(
@@ -971,9 +1347,51 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn engine_run_renews_redis_task_leases_while_long_tasks_are_running() {
+        let (url, _commands_rx, server_handle) = spawn_redis_server().await;
+        let namespace = "engine_heartbeat";
+        let scheduler = crate::scheduler::Redis::new(format!("redis://{url}"), namespace)
+            .with_worker_id("engine-worker")
+            .with_lease_timeout(SignedDuration::from_millis(20))
+            .with_heartbeat_interval(SignedDuration::from_millis(10));
+        let mut engine = Engine::from_parts(scheduler, AsyncDelayedHttp { delay: 60 }, StubBrowser)
+            .with_settings(Settings::default().with_idle_timeout(SignedDuration::from_millis(5)))
+            .with_store(MemoryStore::default());
+        let shutdown = engine.shutdown_handle();
+        let observer = crate::scheduler::Redis::new(format!("redis://{url}"), namespace)
+            .with_worker_id("observer")
+            .with_lease_timeout(SignedDuration::from_millis(20));
+        let observer_task = async move {
+            tokio::time::sleep(to_std_duration(SignedDuration::from_millis(30)).unwrap()).await;
+            let checkpoint = observer.checkpoint().await.unwrap();
+
+            assert!(checkpoint.ready.is_empty());
+            assert_eq!(checkpoint.inflight.len(), 1);
+            assert_eq!(
+                checkpoint.inflight[0].request.url,
+                "https://example.com/start"
+            );
+
+            tokio::time::sleep(to_std_duration(SignedDuration::from_millis(80)).unwrap()).await;
+            shutdown.stop();
+            observer
+        };
+        let (run_result, observer) = tokio::join!(engine.run(&StartUrlSpider), observer_task);
+        let outputs = run_result.unwrap();
+        assert_eq!(outputs.len(), 1);
+
+        let final_checkpoint = observer.checkpoint().await.unwrap();
+        assert!(!final_checkpoint.has_pending());
+
+        observer.close().await.unwrap();
+        engine.scheduler.close().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
     #[test]
     fn engine_runs_download_middlewares_around_fetch() {
-        let mut scheduler = Memory::default();
+        let scheduler = Memory::default();
         block_on(scheduler.enqueue(Task::new(Request::new("https://example.com")))).unwrap();
 
         let log = Arc::new(Mutex::new(Vec::new()));
@@ -1000,13 +1418,13 @@ mod tests {
     }
 
     #[test]
-    fn engine_load_plugins_rejects_unsupported_plugin_kinds_explicitly() {
+    fn engine_load_plugins_rejects_deferred_plugin_kinds_explicitly() {
         let mut registry = PluginRegistry::new();
         registry
             .register(PluginManifest {
-                name: "json_storage".to_string(),
-                kind: "storage".to_string(),
-                entry: "plugins_demo::JsonStoragePipeline".to_string(),
+                name: "sqlite".to_string(),
+                kind: "store".to_string(),
+                entry: "plugins_demo::SqliteStore".to_string(),
                 r#override: false,
             })
             .unwrap();
@@ -1019,14 +1437,17 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("only supports plugin kinds [middleware]")
+                .contains("only auto-loads plugin kinds [middleware]")
         );
-        assert!(error.to_string().contains("(storage, json_storage)"));
+        assert!(error.to_string().contains("(store, sqlite)"));
+        assert!(error.to_string().contains(
+            "known but not auto-loadable yet: [store, scheduler, dedup, robots, http, browser]"
+        ));
     }
 
     #[test]
     fn engine_loads_runtime_middlewares_and_applies_explicit_overrides() {
-        let mut scheduler = Memory::default();
+        let scheduler = Memory::default();
         block_on(scheduler.enqueue(Task::new(Request::new("https://example.com")))).unwrap();
 
         let mut engine = Engine::from_parts(scheduler, HtmlHttp, StubBrowser)
@@ -1048,33 +1469,79 @@ mod tests {
         assert!(keys.contains(&"retry_by_error"));
         assert!(keys.contains(&"interval_gate"));
         assert!(keys.contains(&"rate_limit"));
-        assert!(keys.contains(&"dedup"));
+        assert!(!keys.contains(&"dedup"));
+    }
 
-        let dedup = step_chains
+    #[test]
+    fn engine_loads_auto_throttle_from_settings() {
+        let scheduler = Memory::default();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com")))).unwrap();
+
+        let mut engine = Engine::from_parts(scheduler, HtmlHttp, StubBrowser)
+            .with_settings(auto_throttle_settings())
+            .with_store(MemoryStore::default());
+        let mut step_chains = BTreeMap::new();
+        block_on(engine.execute_spider_once(
+            &SimpleSpider("auto_throttle_runtime"),
+            None,
+            &mut step_chains,
+        ))
+        .unwrap()
+        .unwrap();
+
+        let keys = step_chains
             .get("parse")
             .unwrap()
             .entries
             .iter()
-            .find(|entry| entry.key == "dedup")
-            .unwrap();
-        assert!(!dedup.config.enabled);
-        assert_eq!(dedup.config.order, 999);
+            .map(|entry| entry.key.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(keys.contains(&"auto_throttle"));
+        assert!(!keys.contains(&"interval_gate"));
     }
 
     #[test]
-    fn engine_dedups_duplicate_requests_before_fetch() {
-        let mut scheduler = Memory::default();
-        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/dedup")))).unwrap();
-        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/dedup")))).unwrap();
+    fn engine_loads_http_cache_from_settings() {
+        let scheduler = Memory::default();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com")))).unwrap();
 
+        let mut engine = Engine::from_parts(scheduler, HtmlHttp, StubBrowser)
+            .with_settings(http_cache_settings())
+            .with_store(MemoryStore::default());
+        let mut step_chains = BTreeMap::new();
+        block_on(engine.execute_spider_once(
+            &SimpleSpider("http_cache_runtime"),
+            None,
+            &mut step_chains,
+        ))
+        .unwrap()
+        .unwrap();
+
+        let keys = step_chains
+            .get("parse")
+            .unwrap()
+            .entries
+            .iter()
+            .map(|entry| entry.key.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(keys.contains(&"http_cache"));
+    }
+
+    #[test]
+    fn engine_enqueue_dedups_duplicate_requests_before_scheduler() {
         let fetches = Arc::new(Mutex::new(0usize));
         let downloader = CountHttp {
             fetches: fetches.clone(),
             statuses: vec![200, 200],
         };
-        let mut engine = Engine::from_parts(scheduler, downloader, StubBrowser)
-            .with_settings(dedup_settings())
+        let mut engine = Engine::from_parts(Memory::default(), downloader, StubBrowser)
             .with_store(MemoryStore::default());
+
+        assert!(block_on(engine.enqueue(Request::new("https://example.com/dedup"))).unwrap());
+        assert!(!block_on(engine.enqueue(Request::new("https://example.com/dedup"))).unwrap());
+
         let mut step_chains = BTreeMap::new();
 
         let first =
@@ -1087,11 +1554,164 @@ mod tests {
         assert!(first.is_some());
         assert!(second.is_none());
         assert_eq!(*fetches.lock().unwrap(), 1);
+        assert_eq!(
+            engine.stats(),
+            StatsSnapshot {
+                request_count: 1,
+                response_count: 1,
+                dedup_reject_count: 1,
+                ..StatsSnapshot::default()
+            }
+        );
+    }
+
+    #[test]
+    fn engine_with_noop_dedup_accepts_duplicate_requests() {
+        let fetches = Arc::new(Mutex::new(0usize));
+        let downloader = CountHttp {
+            fetches: fetches.clone(),
+            statuses: vec![200, 200],
+        };
+        let mut engine = Engine::from_parts(Memory::default(), downloader, StubBrowser)
+            .with_dedup(crate::dedup::Noop)
+            .with_store(MemoryStore::default());
+
+        assert!(block_on(engine.enqueue(Request::new("https://example.com/dedup"))).unwrap());
+        assert!(block_on(engine.enqueue(Request::new("https://example.com/dedup"))).unwrap());
+
+        let mut step_chains = BTreeMap::new();
+        let first =
+            block_on(engine.execute_spider_once(&SimpleSpider("dedup"), None, &mut step_chains))
+                .unwrap();
+        let second =
+            block_on(engine.execute_spider_once(&SimpleSpider("dedup"), None, &mut step_chains))
+                .unwrap();
+
+        assert!(first.is_some());
+        assert!(second.is_some());
+        assert_eq!(*fetches.lock().unwrap(), 2);
+    }
+
+    #[test]
+    fn engine_with_bloom_dedup_rejects_duplicate_requests() {
+        let fetches = Arc::new(Mutex::new(0usize));
+        let downloader = CountHttp {
+            fetches: fetches.clone(),
+            statuses: vec![200, 200],
+        };
+        let mut engine = Engine::from_parts(Memory::default(), downloader, StubBrowser)
+            .with_dedup(crate::dedup::Bloom::default())
+            .with_store(MemoryStore::default());
+
+        assert!(block_on(engine.enqueue(Request::new("https://example.com/dedup-bloom"))).unwrap());
+        assert!(
+            !block_on(engine.enqueue(Request::new("https://example.com/dedup-bloom"))).unwrap()
+        );
+
+        let mut step_chains = BTreeMap::new();
+        let first = block_on(engine.execute_spider_once(
+            &SimpleSpider("dedup_bloom"),
+            None,
+            &mut step_chains,
+        ))
+        .unwrap();
+        let second = block_on(engine.execute_spider_once(
+            &SimpleSpider("dedup_bloom"),
+            None,
+            &mut step_chains,
+        ))
+        .unwrap();
+
+        assert!(first.is_some());
+        assert!(second.is_none());
+        assert_eq!(*fetches.lock().unwrap(), 1);
+    }
+
+    #[test]
+    fn engine_download_error_dispatches_request_errback() {
+        let scheduler = Memory::default();
+        block_on(
+            scheduler.enqueue(Task::new(
+                Request::new("https://example.com/fail")
+                    .with_kwarg("page", Value::Number(3.0))
+                    .with_errback("handle_failure"),
+            )),
+        )
+        .unwrap();
+
+        let store = MemoryStore::default();
+        let mut engine = Engine::from_parts(scheduler, ErrorHttp, StubBrowser)
+            .with_settings(Settings::default().with_middleware(
+                "retry_by_error",
+                Config {
+                    enabled: false,
+                    stage: Stage::Download,
+                    order: 210,
+                    options: BTreeMap::new(),
+                },
+            ))
+            .with_store(store.clone());
+
+        let mut step_chains = BTreeMap::new();
+        let output = block_on(engine.execute_spider_once(&ErrbackSpider, None, &mut step_chains))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(output.items.len(), 1);
+        assert_eq!(
+            store.items()[0].fields.get("kind"),
+            Some(&Value::String("download".to_string()))
+        );
+        assert_eq!(
+            store.items()[0].fields.get("page"),
+            Some(&Value::Number(3.0))
+        );
+        assert_eq!(
+            store.items()[0].fields.get("has_response"),
+            Some(&Value::Bool(false))
+        );
+    }
+
+    #[test]
+    fn engine_callback_error_dispatches_request_errback_with_response_context() {
+        let scheduler = Memory::default();
+        block_on(
+            scheduler.enqueue(Task::new(
+                Request::new("https://example.com/parse-error")
+                    .with_kwarg("source", Value::String("detail".to_string()))
+                    .with_errback("handle_failure"),
+            )),
+        )
+        .unwrap();
+
+        let store = MemoryStore::default();
+        let mut engine =
+            Engine::from_parts(scheduler, StubHttp, StubBrowser).with_store(store.clone());
+
+        let mut step_chains = BTreeMap::new();
+        let output =
+            block_on(engine.execute_spider_once(&ParseErrorSpider, None, &mut step_chains))
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(output.items.len(), 1);
+        assert_eq!(
+            store.items()[0].fields.get("kind"),
+            Some(&Value::String("parse".to_string()))
+        );
+        assert_eq!(
+            store.items()[0].fields.get("source"),
+            Some(&Value::String("detail".to_string()))
+        );
+        assert_eq!(
+            store.items()[0].fields.get("has_response"),
+            Some(&Value::Bool(true))
+        );
     }
 
     #[test]
     fn engine_retries_on_configured_status() {
-        let mut scheduler = Memory::default();
+        let scheduler = Memory::default();
         block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/retry")))).unwrap();
 
         let fetches = Arc::new(Mutex::new(0usize));
@@ -1118,7 +1738,7 @@ mod tests {
 
     #[test]
     fn engine_respects_retry_backoff_delay() {
-        let mut scheduler = Memory::default();
+        let scheduler = Memory::default();
         block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/retry-backoff"))))
             .unwrap();
 
@@ -1144,7 +1764,7 @@ mod tests {
             &mut step_chains,
         ))
         .unwrap();
-        std::thread::sleep(to_std_duration(SignedDuration::from_millis(15)).unwrap());
+        std::thread::sleep(to_std_duration(SignedDuration::from_millis(30)).unwrap());
         let third = block_on(engine.execute_spider_once(
             &SimpleSpider("retry_backoff"),
             None,
@@ -1160,7 +1780,7 @@ mod tests {
 
     #[test]
     fn engine_respects_interval_gate_delay() {
-        let mut scheduler = Memory::default();
+        let scheduler = Memory::default();
         block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/interval/1"))))
             .unwrap();
         block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/interval/2"))))
@@ -1195,7 +1815,7 @@ mod tests {
 
     #[test]
     fn engine_respects_rate_limit_delay() {
-        let mut scheduler = Memory::default();
+        let scheduler = Memory::default();
         block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/rate/1")))).unwrap();
         block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/rate/2")))).unwrap();
 
@@ -1228,8 +1848,132 @@ mod tests {
     }
 
     #[test]
+    fn engine_respects_auto_throttle_delay() {
+        let scheduler = Memory::default();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/auto/1")))).unwrap();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/auto/2")))).unwrap();
+
+        let fetches = Arc::new(Mutex::new(0usize));
+        let downloader = DelayedCountHttp {
+            fetches: fetches.clone(),
+            statuses: vec![200, 200],
+            delays: vec![12, 0],
+        };
+        let mut engine = Engine::from_parts(scheduler, downloader, StubBrowser)
+            .with_settings(auto_throttle_settings())
+            .with_store(MemoryStore::default());
+        let mut step_chains = BTreeMap::new();
+
+        let first = block_on(engine.execute_spider_once(
+            &SimpleSpider("auto_throttle"),
+            None,
+            &mut step_chains,
+        ))
+        .unwrap();
+        let second = block_on(engine.execute_spider_once(
+            &SimpleSpider("auto_throttle"),
+            None,
+            &mut step_chains,
+        ))
+        .unwrap();
+        let mut third = None;
+
+        for _ in 0..10 {
+            std::thread::sleep(to_std_duration(SignedDuration::from_millis(10)).unwrap());
+            third = block_on(engine.execute_spider_once(
+                &SimpleSpider("auto_throttle"),
+                None,
+                &mut step_chains,
+            ))
+            .unwrap();
+
+            if third.is_some() {
+                break;
+            }
+        }
+
+        assert!(first.is_some());
+        assert!(second.is_none());
+        assert!(third.is_some());
+        assert_eq!(*fetches.lock().unwrap(), 2);
+    }
+
+    #[test]
+    fn engine_http_cache_reuses_cached_response_on_not_modified() {
+        let scheduler = Memory::default();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/cache")))).unwrap();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/cache")))).unwrap();
+
+        let seen_headers = Arc::new(Mutex::new(Vec::<Headers>::new()));
+        let downloader = ConditionalCacheHttp {
+            seen_headers: seen_headers.clone(),
+            fetches: Arc::new(Mutex::new(0)),
+        };
+
+        let mut engine = Engine::from_parts(scheduler, downloader, StubBrowser)
+            .with_settings(http_cache_settings())
+            .with_store(MemoryStore::default());
+        let mut step_chains = BTreeMap::new();
+
+        let first =
+            block_on(engine.execute_spider_once(&ResponseInspectSpider, None, &mut step_chains))
+                .unwrap()
+                .unwrap();
+        let second =
+            block_on(engine.execute_spider_once(&ResponseInspectSpider, None, &mut step_chains))
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(
+            first.items[0].fields.get("status"),
+            Some(&Value::Number(200.0))
+        );
+        assert_eq!(
+            second.items[0].fields.get("status"),
+            Some(&Value::Number(200.0))
+        );
+        assert_eq!(
+            second.items[0].fields.get("text"),
+            Some(&Value::String("cached-body".to_string()))
+        );
+        assert_eq!(
+            second.items[0].fields.get("flags"),
+            Some(&Value::Array(vec![Value::String("http_cache".to_string())]))
+        );
+
+        let headers = seen_headers.lock().unwrap();
+        assert_eq!(
+            headers[1]
+                .get("If-None-Match")
+                .and_then(|values| values.first())
+                .map(String::as_str),
+            Some("v1")
+        );
+        assert_eq!(
+            headers[1]
+                .get("If-Modified-Since")
+                .and_then(|values| values.first())
+                .map(String::as_str),
+            Some("Wed, 21 Oct 2015 07:28:00 GMT")
+        );
+        assert_eq!(
+            engine.stats(),
+            StatsSnapshot {
+                request_count: 2,
+                response_count: 2,
+                item_count: 2,
+                http_cache_hit_count: 1,
+                http_cache_store_count: 1,
+                http_cache_miss_count: 1,
+                http_cache_revalidate_count: 1,
+                ..StatsSnapshot::default()
+            }
+        );
+    }
+
+    #[test]
     fn engine_pipeline_keeps_items_and_memory_store_writes_them() {
-        let mut scheduler = Memory::default();
+        let scheduler = Memory::default();
         block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/item")))).unwrap();
 
         let store = MemoryStore::default();
@@ -1250,18 +1994,16 @@ mod tests {
             engine.stats(),
             StatsSnapshot {
                 request_count: 1,
-                response_count: 1,
-                error_count: 0,
-                retry_count: 0,
                 item_count: 1,
-                pipeline_drop_count: 0,
+                response_count: 1,
+                ..StatsSnapshot::default()
             }
         );
     }
 
     #[test]
     fn engine_store_prefers_batch_write_for_kept_items() {
-        let mut scheduler = Memory::default();
+        let scheduler = Memory::default();
         block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/item")))).unwrap();
 
         let store = BatchOnlyStore::default();
@@ -1278,7 +2020,7 @@ mod tests {
 
     #[test]
     fn engine_pipeline_can_drop_items_explicitly() {
-        let mut scheduler = Memory::default();
+        let scheduler = Memory::default();
         block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/item")))).unwrap();
 
         let mut engine = Engine::from_parts(scheduler, StubHttp, StubBrowser)
@@ -1296,17 +2038,15 @@ mod tests {
             StatsSnapshot {
                 request_count: 1,
                 response_count: 1,
-                error_count: 0,
-                retry_count: 0,
-                item_count: 0,
                 pipeline_drop_count: 1,
+                ..StatsSnapshot::default()
             }
         );
     }
 
     #[test]
     fn engine_pipeline_error_fails_task_explicitly() {
-        let mut scheduler = Memory::default();
+        let scheduler = Memory::default();
         block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/item")))).unwrap();
 
         let mut engine = Engine::from_parts(scheduler, StubHttp, StubBrowser)
@@ -1324,16 +2064,86 @@ mod tests {
                 request_count: 1,
                 response_count: 1,
                 error_count: 1,
-                retry_count: 0,
-                item_count: 0,
-                pipeline_drop_count: 0,
+                ..StatsSnapshot::default()
             }
         );
     }
 
     #[test]
+    fn engine_store_error_increments_stats() {
+        let scheduler = Memory::default();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/item")))).unwrap();
+
+        let mut engine = Engine::from_parts(scheduler, StubHttp, StubBrowser)
+            .with_store(FailStore)
+            .with_pipeline(PassPipeline);
+        let mut step_chains = BTreeMap::new();
+
+        let error =
+            block_on(engine.execute_spider_once(&ItemSpider, None, &mut step_chains)).unwrap_err();
+
+        assert!(error.to_string().contains("store failed"));
+        assert_eq!(
+            engine.stats(),
+            StatsSnapshot {
+                request_count: 1,
+                response_count: 1,
+                error_count: 1,
+                store_error_count: 1,
+                ..StatsSnapshot::default()
+            }
+        );
+    }
+
+    #[test]
+    fn engine_with_stats_reporter_receives_runtime_events() {
+        let scheduler = Memory::default();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/item")))).unwrap();
+
+        let reporter = RecordingReporter::default();
+        let recorded = reporter.events.clone();
+        let mut engine = Engine::from_parts(scheduler, StubHttp, StubBrowser)
+            .with_store(MemoryStore::default())
+            .with_stats_reporter(reporter);
+        let mut step_chains = BTreeMap::new();
+
+        block_on(engine.execute_spider_once(&ItemSpider, None, &mut step_chains)).unwrap();
+
+        let events = recorded.lock().unwrap().clone();
+        assert_eq!(
+            events,
+            vec![
+                (
+                    StatsEvent::Request,
+                    StatsSnapshot {
+                        request_count: 1,
+                        ..StatsSnapshot::default()
+                    },
+                ),
+                (
+                    StatsEvent::Response,
+                    StatsSnapshot {
+                        request_count: 1,
+                        response_count: 1,
+                        ..StatsSnapshot::default()
+                    },
+                ),
+                (
+                    StatsEvent::Item,
+                    StatsSnapshot {
+                        request_count: 1,
+                        response_count: 1,
+                        item_count: 1,
+                        ..StatsSnapshot::default()
+                    },
+                ),
+            ]
+        );
+    }
+
+    #[test]
     fn engine_stats_track_retries_across_attempts() {
-        let mut scheduler = Memory::default();
+        let scheduler = Memory::default();
         block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/retry")))).unwrap();
 
         let downloader = CountHttp {
@@ -1359,17 +2169,15 @@ mod tests {
             StatsSnapshot {
                 request_count: 2,
                 response_count: 2,
-                error_count: 0,
                 retry_count: 1,
-                item_count: 0,
-                pipeline_drop_count: 0,
+                ..StatsSnapshot::default()
             }
         );
     }
 
     #[test]
     fn engine_skips_disallowed_request_when_robots_obey_is_enabled() {
-        let mut scheduler = Memory::default();
+        let scheduler = Memory::default();
         block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/private/page"))))
             .unwrap();
 
@@ -1379,16 +2187,13 @@ mod tests {
             statuses: vec![200],
         };
         let mut engine = Engine::from_parts(scheduler, downloader, StubBrowser)
+            .with_robots(BlockPrivate)
             .with_settings(
                 Settings::default()
                     .with_robots_obey(true)
                     .with_robots_user_agent("kun-bot"),
             )
             .with_store(MemoryStore::default());
-        block_on(engine.robots.seed_from_body(
-            "https://example.com/private/page",
-            "User-agent: kun-bot\nDisallow: /private\n",
-        ));
 
         let mut step_chains = BTreeMap::new();
         let output =
@@ -1400,14 +2205,197 @@ mod tests {
         assert_eq!(
             engine.stats(),
             StatsSnapshot {
-                request_count: 0,
-                response_count: 0,
-                error_count: 0,
-                retry_count: 0,
-                item_count: 0,
-                pipeline_drop_count: 0,
+                robots_disallow_count: 1,
+                ..StatsSnapshot::default()
             }
         );
+    }
+
+    #[test]
+    fn engine_respects_robots_crawl_delay_when_robots_obey_is_enabled() {
+        let robot = crate::robots::Memory::default();
+        block_on(robot.seed_from_body(
+            "https://example.com/news/1",
+            "User-agent: *\nAllow: /\nCrawl-delay: 0.01\n",
+        ));
+
+        let scheduler = Memory::default();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/news/1")))).unwrap();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/news/2")))).unwrap();
+
+        let fetches = Arc::new(Mutex::new(0usize));
+        let downloader = CountHttp {
+            fetches: fetches.clone(),
+            statuses: vec![200, 200],
+        };
+        let mut engine = Engine::from_parts(scheduler, downloader, StubBrowser)
+            .with_robots(robot)
+            .with_settings(
+                Settings::default()
+                    .with_robots_obey(true)
+                    .with_robots_user_agent("kun-bot"),
+            )
+            .with_store(MemoryStore::default());
+
+        let mut step_chains = BTreeMap::new();
+        let first = block_on(engine.execute_spider_once(
+            &SimpleSpider("robots_crawl_delay"),
+            None,
+            &mut step_chains,
+        ))
+        .unwrap();
+        let second = block_on(engine.execute_spider_once(
+            &SimpleSpider("robots_crawl_delay"),
+            None,
+            &mut step_chains,
+        ))
+        .unwrap();
+        std::thread::sleep(to_std_duration(SignedDuration::from_millis(15)).unwrap());
+        let third = block_on(engine.execute_spider_once(
+            &SimpleSpider("robots_crawl_delay"),
+            None,
+            &mut step_chains,
+        ))
+        .unwrap();
+
+        assert!(first.is_some());
+        assert!(second.is_none());
+        assert!(third.is_some());
+        assert_eq!(*fetches.lock().unwrap(), 2);
+        assert_eq!(
+            engine.stats(),
+            StatsSnapshot {
+                request_count: 2,
+                response_count: 2,
+                retry_count: 1,
+                robots_delay_count: 1,
+                ..StatsSnapshot::default()
+            }
+        );
+    }
+
+    #[test]
+    fn engine_enqueues_robots_sitemap_seed_requests_through_dedup() {
+        let mut engine = Engine::from_parts(
+            Memory::default(),
+            SitemapHttp::new([(
+                "https://example.com/sitemap.xml",
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://example.com/start</loc></url>
+  <url><loc>https://example.com/from-sitemap</loc></url>
+</urlset>"#,
+            )]),
+            StubBrowser,
+        )
+        .with_robots(StaticSitemaps::new(["https://example.com/sitemap.xml"]))
+        .with_settings(Settings::default().with_robots_sitemap_seeds(true))
+        .with_store(MemoryStore::default());
+
+        block_on(engine.enqueue_start_requests(&StartUrlSpider, &[])).unwrap();
+
+        let checkpoint = engine.scheduler.checkpoint();
+        let urls = checkpoint
+            .ready
+            .iter()
+            .map(|task| task.request.url.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            urls,
+            vec![
+                "https://example.com/start".to_string(),
+                "https://example.com/from-sitemap".to_string(),
+            ]
+        );
+        assert!(checkpoint.ready.iter().all(|task| task.priority == 0));
+        assert!(checkpoint.ready.iter().all(|task| task.depth == 0));
+    }
+
+    #[test]
+    fn engine_enqueues_nested_robots_sitemaps_as_seed_requests() {
+        let mut engine = Engine::from_parts(
+            Memory::default(),
+            SitemapHttp::new([
+                (
+                    "https://example.com/root.xml",
+                    r#"<?xml version="1.0" encoding="UTF-8"?>
+<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <sitemap><loc>https://example.com/news.xml</loc></sitemap>
+</sitemapindex>"#,
+                ),
+                (
+                    "https://example.com/news.xml",
+                    r#"<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://example.com/news/1</loc></url>
+</urlset>"#,
+                ),
+            ]),
+            StubBrowser,
+        )
+        .with_robots(StaticSitemaps::new(["https://example.com/root.xml"]))
+        .with_settings(Settings::default().with_robots_sitemap_seeds(true))
+        .with_store(MemoryStore::default());
+
+        block_on(engine.enqueue_start_requests(&StartUrlSpider, &[])).unwrap();
+
+        let checkpoint = engine.scheduler.checkpoint();
+        let urls = checkpoint
+            .ready
+            .iter()
+            .map(|task| task.request.url.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            urls,
+            vec![
+                "https://example.com/start".to_string(),
+                "https://example.com/news/1".to_string(),
+            ]
+        );
+    }
+
+    #[derive(Clone, Copy)]
+    struct BlockPrivate;
+
+    impl crate::robots::Robot for BlockPrivate {
+        fn is_allowed<'a>(
+            &'a self,
+            request: &'a Request,
+            _user_agent: &'a str,
+        ) -> BoxFuture<'a, Result<bool, SpiderError>> {
+            Box::pin(async move { Ok(!request.url.contains("/private")) })
+        }
+    }
+
+    struct StaticSitemaps {
+        urls: Vec<String>,
+    }
+
+    impl StaticSitemaps {
+        fn new<const N: usize>(urls: [&str; N]) -> Self {
+            Self {
+                urls: urls.into_iter().map(str::to_string).collect(),
+            }
+        }
+    }
+
+    impl crate::robots::Robot for StaticSitemaps {
+        fn is_allowed<'a>(
+            &'a self,
+            _request: &'a Request,
+            _user_agent: &'a str,
+        ) -> BoxFuture<'a, Result<bool, SpiderError>> {
+            Box::pin(async { Ok(true) })
+        }
+
+        fn sitemaps<'a>(
+            &'a self,
+            _request: &'a Request,
+        ) -> BoxFuture<'a, Result<Vec<String>, SpiderError>> {
+            Box::pin(async move { Ok(self.urls.clone()) })
+        }
     }
 
     fn block_on<F: Future>(future: F) -> F::Output {
@@ -1478,6 +2466,37 @@ mod tests {
         }
     }
 
+    struct AltHttp;
+
+    impl crate::download::traits::Downloader for AltHttp {
+        async fn fetch(&self, request: &Request) -> Result<Response, SpiderError> {
+            let mut response =
+                Response::from_request(request.clone(), 200, Default::default(), Vec::new());
+            response.protocol = Some("alt-http".to_string());
+            Ok(response)
+        }
+    }
+
+    struct AltBrowser;
+
+    impl crate::download::traits::Downloader for AltBrowser {
+        async fn fetch(&self, request: &Request) -> Result<Response, SpiderError> {
+            let mut response =
+                Response::from_request(request.clone(), 200, Default::default(), Vec::new());
+            response.protocol = Some("alt-browser".to_string());
+            response.flags.push("browser".to_string());
+            Ok(response)
+        }
+    }
+
+    struct ErrorHttp;
+
+    impl crate::download::traits::Downloader for ErrorHttp {
+        async fn fetch(&self, _request: &Request) -> Result<Response, SpiderError> {
+            Err(SpiderError::download("network down"))
+        }
+    }
+
     struct HtmlHttp;
 
     impl crate::download::traits::Downloader for HtmlHttp {
@@ -1512,6 +2531,142 @@ mod tests {
         }
     }
 
+    struct SitemapHttp {
+        bodies: BTreeMap<String, String>,
+    }
+
+    impl SitemapHttp {
+        fn new<I, K, V>(entries: I) -> Self
+        where
+            I: IntoIterator<Item = (K, V)>,
+            K: Into<String>,
+            V: Into<String>,
+        {
+            Self {
+                bodies: entries
+                    .into_iter()
+                    .map(|(url, body)| (url.into(), body.into()))
+                    .collect(),
+            }
+        }
+    }
+
+    impl crate::download::traits::Downloader for SitemapHttp {
+        async fn fetch(&self, request: &Request) -> Result<Response, SpiderError> {
+            let body = self
+                .bodies
+                .get(&request.url)
+                .cloned()
+                .unwrap_or_default()
+                .into_bytes();
+
+            Ok(Response::from_request(
+                request.clone(),
+                200,
+                [(
+                    "content-type".to_string(),
+                    vec!["application/xml; charset=utf-8".to_string()],
+                )]
+                .into_iter()
+                .collect(),
+                body,
+            ))
+        }
+    }
+
+    struct DelayedCountHttp {
+        fetches: Arc<Mutex<usize>>,
+        statuses: Vec<u16>,
+        delays: Vec<i64>,
+    }
+
+    impl crate::download::traits::Downloader for DelayedCountHttp {
+        async fn fetch(&self, request: &Request) -> Result<Response, SpiderError> {
+            let mut fetches = self.fetches.lock().unwrap();
+            let index = *fetches;
+            *fetches += 1;
+            drop(fetches);
+
+            let delay = self.delays.get(index).copied().unwrap_or_default();
+            if delay > 0 {
+                std::thread::sleep(to_std_duration(SignedDuration::from_millis(delay)).unwrap());
+            }
+
+            let status = self.statuses.get(index).copied().unwrap_or(200);
+            Ok(Response::from_request(
+                request.clone(),
+                status,
+                Default::default(),
+                Vec::new(),
+            ))
+        }
+    }
+
+    struct AsyncDelayedHttp {
+        delay: i64,
+    }
+
+    impl crate::download::traits::Downloader for AsyncDelayedHttp {
+        async fn fetch(&self, request: &Request) -> Result<Response, SpiderError> {
+            if self.delay > 0 {
+                tokio::time::sleep(
+                    to_std_duration(SignedDuration::from_millis(self.delay)).unwrap(),
+                )
+                .await;
+            }
+
+            Ok(Response::from_request(
+                request.clone(),
+                200,
+                Default::default(),
+                Vec::new(),
+            ))
+        }
+    }
+
+    struct ConditionalCacheHttp {
+        seen_headers: Arc<Mutex<Vec<Headers>>>,
+        fetches: Arc<Mutex<usize>>,
+    }
+
+    impl crate::download::traits::Downloader for ConditionalCacheHttp {
+        async fn fetch(&self, request: &Request) -> Result<Response, SpiderError> {
+            self.seen_headers
+                .lock()
+                .unwrap()
+                .push(request.headers.clone());
+
+            let mut fetches = self.fetches.lock().unwrap();
+            let index = *fetches;
+            *fetches += 1;
+            drop(fetches);
+
+            if index == 0 {
+                return Ok(Response::from_request(
+                    request.clone(),
+                    200,
+                    [
+                        ("ETag".to_string(), vec!["v1".to_string()]),
+                        (
+                            "Last-Modified".to_string(),
+                            vec!["Wed, 21 Oct 2015 07:28:00 GMT".to_string()],
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    b"cached-body".to_vec(),
+                ));
+            }
+
+            Ok(Response::from_request(
+                request.clone(),
+                304,
+                Default::default(),
+                Vec::new(),
+            ))
+        }
+    }
+
     struct SimpleSpider(&'static str);
 
     impl Spider for SimpleSpider {
@@ -1521,6 +2676,18 @@ mod tests {
 
         async fn parse(&self, _response: &Response) -> Result<SpiderOutput, SpiderError> {
             Ok(SpiderOutput::empty())
+        }
+    }
+
+    struct StartUrlSpider;
+
+    impl Spider for StartUrlSpider {
+        fn name(&self) -> &str {
+            "start_url_spider"
+        }
+
+        fn start_urls(&self) -> Vec<String> {
+            vec!["https://example.com/start".to_string()]
         }
     }
 
@@ -1538,6 +2705,103 @@ mod tests {
                 ],
                 requests: Vec::new(),
             })
+        }
+    }
+
+    struct ResponseInspectSpider;
+
+    impl Spider for ResponseInspectSpider {
+        fn name(&self) -> &str {
+            "response_inspect_spider"
+        }
+
+        async fn parse(&self, response: &Response) -> Result<SpiderOutput, SpiderError> {
+            Ok(SpiderOutput {
+                items: vec![
+                    crate::item::Item::new()
+                        .with_field("status", Value::Number(response.status as f64))
+                        .with_field("text", Value::String(response.text.clone()))
+                        .with_field(
+                            "flags",
+                            Value::Array(
+                                response.flags.iter().cloned().map(Value::String).collect(),
+                            ),
+                        ),
+                ],
+                requests: Vec::new(),
+            })
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingReporter {
+        events: Arc<Mutex<Vec<(StatsEvent, StatsSnapshot)>>>,
+    }
+
+    impl StatsReporter for RecordingReporter {
+        fn report(&self, event: StatsEvent, snapshot: StatsSnapshot) {
+            self.events.lock().unwrap().push((event, snapshot));
+        }
+    }
+
+    struct ErrbackSpider;
+
+    impl Spider for ErrbackSpider {
+        fn name(&self) -> &str {
+            "errback_spider"
+        }
+
+        async fn handle_error(
+            &self,
+            name: &str,
+            failure: &Failure,
+        ) -> Result<SpiderOutput, SpiderError> {
+            match name {
+                "handle_failure" => Ok(SpiderOutput {
+                    items: vec![
+                        crate::item::Item::new()
+                            .with_field(
+                                "kind",
+                                Value::String(match failure.error {
+                                    SpiderError::Download(_) => "download".to_string(),
+                                    SpiderError::Parse(_) => "parse".to_string(),
+                                    _ => "other".to_string(),
+                                }),
+                            )
+                            .with_field("has_response", Value::Bool(failure.response.is_some()))
+                            .with_field(
+                                "page",
+                                failure.kwarg("page").cloned().unwrap_or(Value::Null),
+                            )
+                            .with_field(
+                                "source",
+                                failure.kwarg("source").cloned().unwrap_or(Value::Null),
+                            ),
+                    ],
+                    requests: Vec::new(),
+                }),
+                other => Err(SpiderError::engine(format!("unknown errback: {other}"))),
+            }
+        }
+    }
+
+    struct ParseErrorSpider;
+
+    impl Spider for ParseErrorSpider {
+        fn name(&self) -> &str {
+            "parse_error_spider"
+        }
+
+        async fn parse(&self, _response: &Response) -> Result<SpiderOutput, SpiderError> {
+            Err(SpiderError::parse("parse exploded"))
+        }
+
+        async fn handle_error(
+            &self,
+            name: &str,
+            failure: &Failure,
+        ) -> Result<SpiderOutput, SpiderError> {
+            ErrbackSpider.handle_error(name, failure).await
         }
     }
 
@@ -1587,6 +2851,11 @@ mod tests {
 
     struct FailPipeline;
 
+    struct PassPipeline;
+
+    #[derive(Clone, Copy)]
+    struct FailStore;
+
     impl Pipeline for FailPipeline {
         async fn process(
             &self,
@@ -1594,6 +2863,34 @@ mod tests {
             _spider_name: &str,
         ) -> Result<bool, SpiderError> {
             Err(SpiderError::engine("pipeline failed"))
+        }
+    }
+
+    impl Pipeline for PassPipeline {
+        async fn process(
+            &self,
+            _item: &mut crate::item::Item,
+            _spider_name: &str,
+        ) -> Result<bool, SpiderError> {
+            Ok(true)
+        }
+    }
+
+    impl crate::store::Store for FailStore {
+        async fn write(
+            &self,
+            _item: &crate::item::Item,
+            _spider_name: &str,
+        ) -> Result<(), SpiderError> {
+            Err(SpiderError::engine("store failed"))
+        }
+
+        async fn batch_write(
+            &self,
+            _items: &[crate::item::Item],
+            _spider_name: &str,
+        ) -> Result<(), SpiderError> {
+            Err(SpiderError::engine("store failed"))
         }
     }
 
@@ -1617,7 +2914,7 @@ mod tests {
         Settings::default()
             .with_runtime(crate::runtime::Config {
                 schedule: [
-                    ("interval_ms".to_string(), Value::Number(1000.0)),
+                    ("interval".to_string(), Value::Number(1000.0)),
                     ("rate_per_minute".to_string(), Value::Number(60.0)),
                 ]
                 .into_iter()
@@ -1625,36 +2922,9 @@ mod tests {
                 retry: [("count".to_string(), Value::Number(3.0))]
                     .into_iter()
                     .collect(),
-                dedup: [("enabled".to_string(), Value::Bool(true))]
-                    .into_iter()
-                    .collect(),
+                dedup: BTreeMap::new(),
             })
-            .with_middlewares(
-                [(
-                    "dedup".to_string(),
-                    Config {
-                        enabled: false,
-                        stage: Stage::Download,
-                        order: 999,
-                        options: BTreeMap::new(),
-                    },
-                )]
-                .into_iter()
-                .collect(),
-            )
-    }
-
-    fn dedup_settings() -> Settings {
-        Settings::default().with_runtime(crate::runtime::Config {
-            schedule: BTreeMap::new(),
-            retry: BTreeMap::new(),
-            dedup: [
-                ("enabled".to_string(), Value::Bool(true)),
-                ("key".to_string(), Value::String("url".to_string())),
-            ]
-            .into_iter()
-            .collect(),
-        })
+            .with_middlewares(BTreeMap::new())
     }
 
     fn retry_settings() -> Settings {
@@ -1683,7 +2953,7 @@ mod tests {
                     Value::Array(vec![Value::Number(500.0)]),
                 ),
                 (
-                    "backoff_ms".to_string(),
+                    "backoff".to_string(),
                     Value::Array(vec![Value::Number(10.0)]),
                 ),
             ]
@@ -1695,7 +2965,7 @@ mod tests {
 
     fn interval_settings() -> Settings {
         Settings::default().with_runtime(crate::runtime::Config {
-            schedule: [("interval_ms".to_string(), Value::Number(10.0))]
+            schedule: [("interval".to_string(), Value::Number(10.0))]
                 .into_iter()
                 .collect(),
             retry: BTreeMap::new(),
@@ -1711,5 +2981,17 @@ mod tests {
             retry: BTreeMap::new(),
             dedup: BTreeMap::new(),
         })
+    }
+
+    fn auto_throttle_settings() -> Settings {
+        Settings::default()
+            .with_auto_throttle(true)
+            .with_auto_throttle_target_concurrency(1.0)
+            .with_download_delay(SignedDuration::from_millis(0))
+            .with_auto_throttle_max_delay(SignedDuration::from_millis(500))
+    }
+
+    fn http_cache_settings() -> Settings {
+        Settings::default().with_http_cache(true)
     }
 }

@@ -8,6 +8,10 @@
 //! - [`Persist`] stores or restores that snapshot
 //! - [`File`] and [`Redis`] are built-in checkpoint persistence implementations
 //! - [`Memory`] is a wrapper that combines core `scheduler::Memory` with `Persist`
+//!
+//! Checkpoint restore is intentionally a snapshot boundary only. Runtime
+//! recovery behaviors such as reclaiming stale `inflight` tasks belong to the
+//! durable scheduler implementation itself, not to `Checkpoint`.
 
 use crate::error::SpiderError;
 use crate::scheduler::Task;

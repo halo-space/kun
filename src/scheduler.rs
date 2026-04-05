@@ -5,6 +5,8 @@
 //!
 //! Core schedulers own task lifecycle semantics.
 //! Checkpoint types only handle exporting or persisting scheduler state.
+//! They do not replace runtime recovery behaviors such as durable lease
+//! reclaim, which remain the scheduler's responsibility.
 
 pub mod checkpoint;
 pub mod memory;
@@ -14,5 +16,5 @@ pub mod traits;
 
 pub use memory::Memory;
 pub use redis::Redis;
-pub use task::{Task, TaskId};
+pub use task::{ClaimedTask, Task, TaskId, TaskLease};
 pub use traits::Scheduler;

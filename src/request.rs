@@ -98,7 +98,11 @@ pub struct Request {
     pub proxy: Option<ProxyConfig>,
     pub session: Option<SessionConfig>,
     pub meta: Metadata,
+    #[serde(default)]
+    pub kwargs: Metadata,
     pub callback: Option<CallbackTarget>,
+    #[serde(default)]
+    pub errback: Option<CallbackTarget>,
     pub dont_filter: bool,
     pub runtime: Option<RuntimeOverride>,
     pub http: Option<HttpConfig>,
@@ -118,7 +122,9 @@ impl Request {
             proxy: None,
             session: None,
             meta: Metadata::new(),
+            kwargs: Metadata::new(),
             callback: None,
+            errback: None,
             dont_filter: false,
             runtime: None,
             http: Some(HttpConfig::default()),
@@ -187,8 +193,23 @@ impl Request {
         self
     }
 
+    pub fn with_kwarg(mut self, key: impl Into<String>, value: Value) -> Self {
+        self.kwargs.insert(key.into(), value);
+        self
+    }
+
+    pub fn with_kwargs(mut self, kwargs: Metadata) -> Self {
+        self.kwargs.extend(kwargs);
+        self
+    }
+
     pub fn with_callback(mut self, callback: impl Into<String>) -> Self {
         self.callback = Some(CallbackTarget::new(callback));
+        self
+    }
+
+    pub fn with_errback(mut self, errback: impl Into<String>) -> Self {
+        self.errback = Some(CallbackTarget::new(errback));
         self
     }
 
@@ -260,7 +281,9 @@ impl Request {
             proxy: parent.proxy.clone(),
             session: parent.session.clone(),
             meta: Metadata::new(),
+            kwargs: Metadata::new(),
             callback: None,
+            errback: None,
             dont_filter: false,
             runtime: parent.runtime.clone(),
             http: parent.http.clone(),
@@ -346,7 +369,9 @@ mod tests {
         assert!(request.timeout.is_none());
         assert!(request.proxy.is_none());
         assert!(request.session.is_none());
+        assert!(request.kwargs.is_empty());
         assert!(request.callback.is_none());
+        assert!(request.errback.is_none());
         assert!(!request.dont_filter);
         assert!(request.http.is_some());
         assert!(request.browser.is_none());
@@ -368,7 +393,7 @@ mod tests {
                 .with_driver(Driver::Playwright)
                 .with_engine(Engine::Firefox)
                 .with_stealth(true)
-                .with_fingerprint_profile("desktop"),
+                .with_fingerprint_profile("desktop_en_us"),
         );
 
         assert_eq!(request.mode, RequestMode::Browser);
@@ -386,7 +411,7 @@ mod tests {
                 .browser
                 .as_ref()
                 .and_then(|config| config.fingerprint_profile.as_deref()),
-            Some("desktop")
+            Some("desktop_en_us")
         );
     }
 
@@ -428,8 +453,10 @@ mod tests {
             .with_timeout(SignedDuration::from_secs(3))
             .with_proxy("http://proxy.internal:8080")
             .with_session("session-a")
+            .with_kwarg("page", Value::Number(2.0))
             .with_dont_filter(true)
-            .with_callback("parse_list");
+            .with_callback("parse_list")
+            .with_errback("handle_error");
         let child = Request::from_parent_for_follow(&parent, "https://example.com/detail");
 
         assert_eq!(child.url, "https://example.com/detail");
@@ -448,7 +475,9 @@ mod tests {
         );
         assert_eq!(child.session, Some(SessionConfig::new("session-a")));
         assert!(!child.dont_filter);
+        assert!(child.kwargs.is_empty());
         assert!(child.callback.is_none());
+        assert!(child.errback.is_none());
         assert!(
             child
                 .http
@@ -468,7 +497,9 @@ mod tests {
             .with_proxy("http://127.0.0.1:8080")
             .with_session("shared-browser")
             .with_meta("page", Value::Number(2.0))
+            .with_kwarg("edition", Value::String("morning".to_string()))
             .with_callback("parse_detail")
+            .with_errback("handle_error")
             .with_browser(
                 BrowserConfig::default()
                     .with_driver(Driver::Playwright)
@@ -494,11 +525,22 @@ mod tests {
         assert_eq!(decoded.session, Some(SessionConfig::new("shared-browser")));
         assert_eq!(decoded.meta.get("page"), Some(&Value::Number(2.0)));
         assert_eq!(
+            decoded.kwargs.get("edition"),
+            Some(&Value::String("morning".to_string()))
+        );
+        assert_eq!(
             decoded
                 .callback
                 .as_ref()
                 .map(|callback| callback.name.as_str()),
             Some("parse_detail")
+        );
+        assert_eq!(
+            decoded
+                .errback
+                .as_ref()
+                .map(|errback| errback.name.as_str()),
+            Some("handle_error")
         );
         assert_eq!(
             decoded

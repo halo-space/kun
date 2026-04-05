@@ -1,8 +1,9 @@
+pub mod auto_throttle;
 pub mod chain;
 pub mod concurrency_gate;
 pub mod config;
 pub mod cookies;
-pub mod dedup;
+pub mod http_cache;
 pub mod interval_gate;
 pub mod proxy;
 pub mod rate_limit;
@@ -14,11 +15,12 @@ use crate::error::SpiderError;
 use crate::value::Value;
 use std::collections::BTreeMap;
 
+pub use auto_throttle::AutoThrottle;
 pub use chain::{Chain, Entry};
 pub use concurrency_gate::ConcurrencyGate;
 pub use config::{Config, Stage};
 pub use cookies::Cookies;
-pub use dedup::Dedup;
+pub use http_cache::HttpCache;
 pub use interval_gate::IntervalGate;
 pub use proxy::Proxy;
 pub use rate_limit::RateLimit;
@@ -81,13 +83,14 @@ fn instantiate(
     let options = &configs[key].options;
 
     let middleware: Box<dyn Middleware> = match key {
+        "auto_throttle" => Box::new(AutoThrottle::new(options)),
         "retry_by_status" => Box::new(RetryByStatus::new(options)),
         "retry_by_error" => Box::new(RetryByError::new(options)),
-        "dedup" => Box::new(Dedup::new(options)),
         "concurrency_gate" => Box::new(ConcurrencyGate::new(options)),
         "interval_gate" => Box::new(IntervalGate::new(options)),
         "rate_limit" => Box::new(RateLimit::new(options)),
         "cookies" => Box::new(Cookies::new(options)),
+        "http_cache" => Box::new(HttpCache::new(options)),
         "proxy" => Box::new(Proxy::new(options)),
         other => {
             if let Some(factory) = custom.factories.get(other) {

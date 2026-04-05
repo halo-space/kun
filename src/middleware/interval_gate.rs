@@ -10,18 +10,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Default)]
 pub struct IntervalGate {
-    interval_ms: u64,
-    next_allowed_ms: Mutex<u64>,
+    interval: u64,
+    next_allowed_at: Mutex<u64>,
 }
 
 impl IntervalGate {
     pub fn new(options: &BTreeMap<String, Value>) -> Self {
         Self {
-            interval_ms: options
-                .get("interval_ms")
+            interval: options
+                .get("interval")
                 .and_then(Value::as_f64)
                 .unwrap_or(0.0) as u64,
-            next_allowed_ms: Mutex::new(0),
+            next_allowed_at: Mutex::new(0),
         }
     }
 }
@@ -32,30 +32,30 @@ impl Middleware for IntervalGate {
         _context: &'a mut EngineContext,
     ) -> BoxFuture<'a, Result<Flow, SpiderError>> {
         Box::pin(async move {
-            if self.interval_ms == 0 {
+            if self.interval == 0 {
                 return Ok(Flow::Continue);
             }
 
-            let now = now_ms();
+            let now = now();
             let mut next_allowed = self
-                .next_allowed_ms
+                .next_allowed_at
                 .lock()
                 .map_err(|_| SpiderError::engine("interval gate state poisoned"))?;
 
             if *next_allowed > now {
                 return Ok(Flow::Retry {
                     reason: "interval gate".to_string(),
-                    backoff_ms: Some(*next_allowed - now),
+                    backoff: Some(*next_allowed - now),
                 });
             }
 
-            *next_allowed = now.saturating_add(self.interval_ms);
+            *next_allowed = now.saturating_add(self.interval);
             Ok(Flow::Continue)
         })
     }
 }
 
-fn now_ms() -> u64 {
+fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

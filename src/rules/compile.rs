@@ -331,7 +331,7 @@ fn schedule_runtime_map(
         map.insert("concurrency".to_string(), Value::Number(concurrency as f64));
     }
     if let Some(interval) = schedule.interval {
-        map.insert("interval_ms".to_string(), Value::Number(interval as f64));
+        map.insert("interval".to_string(), Value::Number(interval as f64));
     }
     map
 }
@@ -353,7 +353,7 @@ fn retry_runtime_map(retry: &crate::rules::schema::RetryConfig) -> BTreeMap<Stri
     }
     if !retry.backoff.is_empty() {
         map.insert(
-            "backoff_ms".to_string(),
+            "backoff".to_string(),
             Value::Array(
                 retry
                     .backoff

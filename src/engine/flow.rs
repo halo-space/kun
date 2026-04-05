@@ -6,6 +6,6 @@ pub enum Flow {
     Drop(String),
     Retry {
         reason: String,
-        backoff_ms: Option<u64>,
+        backoff: Option<u64>,
     },
 }

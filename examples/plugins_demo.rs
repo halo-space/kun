@@ -13,8 +13,9 @@
 //! 4. End users enable middleware by key in `Settings`
 //!
 //! Note: `Engine::load_plugins()` currently supports only `kind = "middleware"`.
-//! Other kinds still exist as manifest namespaces, but they are not auto-loaded
-//! into the engine runtime.
+//! Other known kinds map to future engine component owners such as `store`,
+//! `scheduler`, `dedup`, `robots`, `http`, and `browser`, but they are not
+//! auto-loaded into the runtime yet.
 //!
 //! Run with: `cargo run --example plugins_demo`
 
@@ -213,18 +214,18 @@ fn demo_plugin_key_conflicts() {
         .unwrap();
     println!("  [OK] registered (middleware, proxy)");
 
-    // 2) Same name under a different kind is allowed: `(rules, proxy)`.
+    // 2) Same name under a different kind is allowed: `(store, proxy)`.
     //    This demonstrates registry namespacing only. It does not mean the
-    //    engine can auto-load `rules` plugins today.
+    //    engine can auto-load `store` plugins today.
     registry
         .register(PluginManifest {
             name: "proxy".to_string(),
-            kind: "rules".to_string(),
-            entry: "custom::ProxyRulesPlugin".to_string(),
+            kind: "store".to_string(),
+            entry: "custom::ProxyStorePlugin".to_string(),
             r#override: false,
         })
         .unwrap();
-    println!("  [OK] registered (rules, proxy) -- same name, different kind");
+    println!("  [OK] registered (store, proxy) -- same name, different kind");
 
     // 3) Same kind plus same name without override causes a conflict.
     let err = registry
@@ -253,10 +254,10 @@ fn demo_plugin_key_conflicts() {
     );
 
     println!(
-        "\n  registry now holds {} manifests: middleware={}, rules={}\n",
+        "\n  registry now holds {} manifests: middleware={}, store={}\n",
         registry.manifests.len(),
         registry.by_kind("middleware").len(),
-        registry.by_kind("rules").len(),
+        registry.by_kind("store").len(),
     );
 }
 

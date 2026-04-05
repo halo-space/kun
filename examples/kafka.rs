@@ -4,6 +4,7 @@
 //! - Spider only produces items
 //! - final item is assembled directly in `parse()`
 //! - built-in `store::Kafka` keeps the same fixed `parse -> item -> pipeline -> store` chain
+//! - Kafka key / headers can also come from the final item fields
 //! - Kafka is treated as another final store boundary, not a separate sink runtime
 //!
 //! Run:
@@ -87,7 +88,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::env::var("HALO_SPIDER_KAFKA_BROKERS").unwrap_or_else(|_| "127.0.0.1:9092".to_string());
     let topic =
         std::env::var("HALO_SPIDER_KAFKA_TOPIC").unwrap_or_else(|_| "period_items".to_string());
-    let kafka = Kafka::new(&brokers, &topic);
+    let kafka = Kafka::new(&brokers, &topic)
+        .with_key_field("issue_key")
+        .with_header("x-spider", "period_kafka")
+        .with_header_field("x-period-date", "period_date");
     let settings = Settings::default().with_idle_timeout(SignedDuration::from_millis(200));
 
     let engine = Engine::new().with_settings(settings);

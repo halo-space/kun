@@ -1,7 +1,9 @@
 pub mod certificate;
 pub mod follow;
 
-use crate::parser::{AiQuery, CssQuery, FeedQuery, JsonQuery, RegexQuery, XPathQuery, XmlQuery};
+use crate::parser::{
+    AiQuery, CssQuery, FeedQuery, JsonQuery, RegexQuery, SitemapQuery, XPathQuery, XmlQuery,
+};
 use crate::request::{Headers, Metadata, Request};
 use certificate::CertificateInfo;
 use chardetng::EncodingDetector;
@@ -43,6 +45,11 @@ fn apparent_encoding(body: &[u8]) -> &'static Encoding {
     let mut detector = EncodingDetector::new();
     detector.feed(body, true);
     detector.guess(None, true)
+}
+
+fn empty_metadata() -> &'static Metadata {
+    static EMPTY_METADATA: OnceLock<Metadata> = OnceLock::new();
+    EMPTY_METADATA.get_or_init(Metadata::new)
 }
 
 fn charset_from_headers(headers: &Headers) -> Option<String> {
@@ -180,6 +187,18 @@ impl Response {
         }
     }
 
+    pub fn kwargs(&self) -> &Metadata {
+        if let Some(request) = self.request.as_deref() {
+            &request.kwargs
+        } else {
+            empty_metadata()
+        }
+    }
+
+    pub fn kwarg(&self, key: &str) -> Option<&crate::value::Value> {
+        self.kwargs().get(key)
+    }
+
     pub fn css(&self, selector: impl Into<String>) -> CssQuery {
         CssQuery::new(self.text.clone(), selector)
     }
@@ -206,6 +225,10 @@ impl Response {
 
     pub fn feed(&self) -> FeedQuery {
         FeedQuery::new(self.text.clone())
+    }
+
+    pub fn sitemap(&self) -> SitemapQuery {
+        SitemapQuery::new(self.text.clone())
     }
 
     pub fn follow(&self, url: impl Into<String>) -> Request {
@@ -356,7 +379,9 @@ mod tests {
             .with_timeout(SignedDuration::from_secs(8))
             .with_proxy("http://127.0.0.1:8080")
             .with_session("session-a")
+            .with_kwarg("page_size", Value::Number(50.0))
             .with_callback("parse_list")
+            .with_errback("handle_error")
             .with_dont_filter(true)
             .with_meta("page", Value::Number(1.0));
         let response = Response::from_request(request, 200, Headers::new(), b"list".to_vec());
@@ -389,9 +414,23 @@ mod tests {
                 .as_ref()
                 .is_some_and(|http| http.query.is_empty())
         );
+        assert!(follow_request.kwargs.is_empty());
         assert!(follow_request.callback.is_none());
+        assert!(follow_request.errback.is_none());
         assert!(!follow_request.dont_filter);
         assert_eq!(follow_request.meta.get("page"), Some(&Value::Number(1.0)));
+    }
+
+    #[test]
+    fn response_exposes_request_kwargs() {
+        let request = Request::new("https://example.com/detail")
+            .with_kwarg("edition", Value::String("night".to_string()));
+        let response = Response::from_request(request, 200, Headers::new(), b"detail".to_vec());
+
+        assert_eq!(
+            response.kwarg("edition"),
+            Some(&Value::String("night".to_string()))
+        );
     }
 
     #[test]

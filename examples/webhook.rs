@@ -5,6 +5,7 @@
 //! - final item is assembled directly in `parse()`
 //! - use `request.meta` for multi-hop context when needed, see `period_xml_spider.rs`
 //! - built-in `store::Webhook` pushes the final item JSON to an HTTP endpoint
+//! - retry / backoff stays on the same `Store` boundary, not a second delivery runtime
 //! - API delivery uses the same fixed item chain as file and database stores
 //!
 //! Run:
@@ -88,7 +89,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let (webhook_url, request_rx, server_handle) = spawn_webhook_server().await;
-    let webhook = Webhook::new(webhook_url).with_header("x-demo-token", "period-demo");
+    let webhook = Webhook::new(webhook_url)
+        .with_header("x-demo-token", "period-demo")
+        .with_retry_limit(2)
+        .with_retry_backoff(SignedDuration::from_millis(200));
     let settings = Settings::default().with_idle_timeout(SignedDuration::from_millis(200));
 
     let engine = Engine::new().with_settings(settings);

@@ -10,7 +10,7 @@ use std::collections::BTreeMap;
 pub struct RetryByStatus {
     count: u64,
     statuses: Vec<u16>,
-    backoff_ms: Vec<u64>,
+    backoff: Vec<u64>,
 }
 
 impl RetryByStatus {
@@ -28,7 +28,7 @@ impl RetryByStatus {
                         .collect()
                 })
                 .unwrap_or_default(),
-            backoff_ms: parse_backoff(options),
+            backoff: parse_backoff(options),
         }
     }
 
@@ -43,10 +43,10 @@ impl RetryByStatus {
 
     fn backoff(&self, context: &EngineContext) -> Option<u64> {
         let index = retry_times(context) as usize;
-        self.backoff_ms
+        self.backoff
             .get(index)
             .copied()
-            .or_else(|| self.backoff_ms.last().copied())
+            .or_else(|| self.backoff.last().copied())
     }
 }
 
@@ -67,7 +67,7 @@ impl Middleware for RetryByStatus {
                 .unwrap_or(0);
             Ok(Flow::Retry {
                 reason: format!("retry by status: {status}"),
-                backoff_ms: self.backoff(context),
+                backoff: self.backoff(context),
             })
         })
     }
@@ -93,7 +93,7 @@ fn parse_count(options: &BTreeMap<String, Value>) -> Option<u64> {
 
 fn parse_backoff(options: &BTreeMap<String, Value>) -> Vec<u64> {
     options
-        .get("backoff_ms")
+        .get("backoff")
         .and_then(Value::as_array)
         .map(|values| {
             values

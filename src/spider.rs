@@ -1,9 +1,10 @@
 use crate::error::SpiderError;
 use crate::item::Item;
-use crate::request::Request;
+use crate::request::{Metadata, Request};
 use crate::response::Response;
 use crate::rules::Config as RulesConfig;
 use crate::rules::{Compiled, CompiledStep, apply as apply_dsl};
+use crate::value::Value;
 
 /// Turn a method name into a callback string with a function-reference-like
 /// syntax.
@@ -67,6 +68,41 @@ macro_rules! spider_callbacks {
     };
 }
 
+/// Generate the `handle_error()` errback dispatcher automatically instead of
+/// writing a manual `match`.
+///
+/// ```rust,ignore
+/// impl Spider for MySpider {
+///     fn name(&self) -> &str { "my" }
+///
+///     spider_errbacks!(handle_detail_error);
+/// }
+///
+/// impl MySpider {
+///     async fn handle_detail_error(
+///         &self,
+///         failure: &halo_spider::spider::Failure,
+///     ) -> Result<halo_spider::spider::Output, halo_spider::error::SpiderError> { ... }
+/// }
+/// ```
+#[macro_export]
+macro_rules! spider_errbacks {
+    ($($method:ident),+ $(,)?) => {
+        async fn handle_error(
+            &self,
+            name: &str,
+            failure: &$crate::spider::Failure,
+        ) -> Result<$crate::spider::Output, $crate::error::SpiderError> {
+            match name {
+                $(stringify!($method) => self.$method(failure).await,)+
+                other => Err($crate::error::SpiderError::engine(
+                    format!("unknown errback: {other}"),
+                )),
+            }
+        }
+    };
+}
+
 #[derive(Debug, Default)]
 pub struct Output {
     pub items: Vec<Item>,
@@ -76,6 +112,31 @@ pub struct Output {
 impl Output {
     pub fn empty() -> Self {
         Self::default()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Failure {
+    pub request: Request,
+    pub response: Option<Response>,
+    pub error: SpiderError,
+}
+
+impl Failure {
+    pub fn new(request: Request, response: Option<Response>, error: SpiderError) -> Self {
+        Self {
+            request,
+            response,
+            error,
+        }
+    }
+
+    pub fn kwargs(&self) -> &Metadata {
+        &self.request.kwargs
+    }
+
+    pub fn kwarg(&self, key: &str) -> Option<&Value> {
+        self.request.kwargs.get(key)
     }
 }
 
@@ -112,6 +173,10 @@ pub trait Spider: Send + Sync {
             "parse" => self.parse(response).await,
             other => Err(SpiderError::engine(format!("unknown callback: {other}"))),
         }
+    }
+
+    async fn handle_error(&self, name: &str, _failure: &Failure) -> Result<Output, SpiderError> {
+        Err(SpiderError::engine(format!("unknown errback: {name}")))
     }
 
     async fn dispatch(

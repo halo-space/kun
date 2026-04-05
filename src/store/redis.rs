@@ -1,6 +1,6 @@
 use crate::error::SpiderError;
 use crate::item::Item;
-use crate::redis::{Connection, Endpoint, ErrorContext};
+use crate::redis::{Connection, ErrorContext, connect, query, validate_url};
 use crate::store::Store;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -29,25 +29,24 @@ impl Redis {
         &self.key
     }
 
-    fn validate(&self) -> Result<Endpoint, SpiderError> {
-        let endpoint = Endpoint::parse(&self.url, "redis store", ErrorContext::Engine)?;
+    fn validate(&self) -> Result<(), SpiderError> {
+        validate_url(&self.url, "redis store", ErrorContext::Engine)?;
 
         if self.key.trim().is_empty() {
             return Err(SpiderError::engine("redis store key cannot be empty"));
         }
 
-        Ok(endpoint)
+        Ok(())
     }
 
     async fn connection(
         &self,
     ) -> Result<tokio::sync::MutexGuard<'_, Option<Connection>>, SpiderError> {
-        let endpoint = self.validate()?;
+        self.validate()?;
         let mut guard = self.connection.lock().await;
 
         if guard.is_none() {
-            *guard =
-                Some(Connection::connect(&endpoint, "redis store", ErrorContext::Engine).await?);
+            *guard = Some(connect(&self.url, "redis store", ErrorContext::Engine).await?);
         }
 
         Ok(guard)
@@ -69,15 +68,16 @@ impl Store for Redis {
         let connection = guard.as_mut().ok_or_else(|| {
             SpiderError::engine("redis store connection is missing after initialization")
         })?;
-
-        connection
-            .send_command(
-                &["SADD".to_string(), self.key.clone(), payload],
-                "redis store",
-                ErrorContext::Engine,
-            )
-            .await
-            .map(|_| ())
+        let mut command = redis::cmd("SADD");
+        command.arg(&self.key).arg(payload);
+        let _: i64 = query(
+            connection,
+            &mut command,
+            "redis store",
+            ErrorContext::Engine,
+        )
+        .await?;
+        Ok(())
     }
 
     async fn batch_write(&self, items: &[Item], _spider_name: &str) -> Result<(), SpiderError> {
@@ -85,12 +85,9 @@ impl Store for Redis {
             return Ok(());
         }
 
-        let mut args = Vec::with_capacity(items.len() + 2);
-        args.push("SADD".to_string());
-        args.push(self.key.clone());
-
+        let mut payloads = Vec::with_capacity(items.len());
         for item in items {
-            args.push(serde_json::to_string(&item.to_json()).map_err(|error| {
+            payloads.push(serde_json::to_string(&item.to_json()).map_err(|error| {
                 SpiderError::engine(format!("failed to serialize item for redis store: {error}"))
             })?);
         }
@@ -99,25 +96,26 @@ impl Store for Redis {
         let connection = guard.as_mut().ok_or_else(|| {
             SpiderError::engine("redis store connection is missing after initialization")
         })?;
-
-        connection
-            .send_command(&args, "redis store", ErrorContext::Engine)
-            .await
-            .map(|_| ())
+        let mut command = redis::cmd("SADD");
+        command.arg(&self.key);
+        for payload in payloads {
+            command.arg(payload);
+        }
+        let _: i64 = query(
+            connection,
+            &mut command,
+            "redis store",
+            ErrorContext::Engine,
+        )
+        .await?;
+        Ok(())
     }
 
     async fn close(&self, _spider_name: &str) -> Result<(), SpiderError> {
-        let connection = {
+        let _connection = {
             let mut guard = self.connection.lock().await;
             guard.take()
         };
-
-        if let Some(mut connection) = connection {
-            connection
-                .close("redis store", ErrorContext::Engine)
-                .await?;
-        }
-
         Ok(())
     }
 }
@@ -125,7 +123,7 @@ impl Store for Redis {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::redis::test_support::spawn_redis_server;
+    use crate::test_support::redis::spawn_redis_server;
     use crate::value::Value;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -220,7 +218,7 @@ mod tests {
 
         let server_handle = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await?;
-            let command = read_resp_command(&mut stream).await?.unwrap();
+            let command = read_until_sadd(&mut stream).await?;
             assert_eq!(command[0], "SADD");
             stream.write_all(b"-ERR target rejected\r\n").await?;
             stream.shutdown().await
@@ -239,6 +237,28 @@ mod tests {
 
         server_handle.await.unwrap().unwrap();
     }
+
+    async fn read_until_sadd(stream: &mut TcpStream) -> Result<Vec<String>, std::io::Error> {
+        loop {
+            let Some(command) = read_resp_command(stream).await? else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "stream closed before SADD command arrived",
+                ));
+            };
+
+            if matches!(
+                command.as_slice(),
+                [name, action, ..] if name == "CLIENT" && action == "SETINFO"
+            ) {
+                stream.write_all(b"+OK\r\n").await?;
+                continue;
+            }
+
+            return Ok(command);
+        }
+    }
+
     async fn read_resp_command(
         stream: &mut TcpStream,
     ) -> Result<Option<Vec<String>>, std::io::Error> {

@@ -58,7 +58,29 @@
 #### Scenario: Follow request resets per-request payload
 
 - **WHEN** 用户从已有 request 派生新的 follow request
-- **THEN** 新请求继承 headers、cookies 与核心请求配置，但默认重置 method 为 `GET`、清空 body、清空 callback，并且不继承 `dont_filter`
+- **THEN** 新请求继承 headers、cookies 与核心请求配置，但默认重置 method 为 `GET`、清空 body、清空 callback / errback / kwargs，并且不继承 `dont_filter`
+
+### Requirement: Request Exposes Errback And Kwargs As Shared Core Semantics
+
+系统 MUST 把 `errback` 与 `kwargs` 收口为统一 `Request` 能力，而不是继续要求调用方退回 `meta` 或私有胶水逻辑。
+
+#### Scenario: Response can read request kwargs through a dedicated entry
+
+- **WHEN** 请求显式声明了 `kwargs` 并被执行成响应
+- **THEN** 代码回调可以通过统一响应入口读取这些 `kwargs`
+- **AND** `kwargs` 与 `meta` 继续保持不同语义
+
+#### Scenario: Request errback handles download failures
+
+- **WHEN** 请求显式声明了 `errback` 且下载失败
+- **THEN** 引擎把失败上下文分发到该 errback
+- **AND** errback 返回的输出继续走同一条 engine 主链
+
+#### Scenario: Request errback handles callback failures
+
+- **WHEN** 请求显式声明了 `errback` 且 spider callback 返回错误
+- **THEN** 引擎把失败上下文分发到该 errback
+- **AND** 失败上下文可以继续读取原请求、原响应与显式 `kwargs`
 
 ### Requirement: Browser Execution Must Match Playwright Runtime Boundaries
 
@@ -80,10 +102,16 @@
 - **THEN** downloader 在首个目标主文档请求上把这些值覆写到 Playwright 导航请求
 - **AND** 后续仍返回渲染后的最终页面 HTML 响应
 
-#### Scenario: Unsupported browser options fail explicitly
+#### Scenario: Browser request applies built-in fingerprint profiles and minimal stealth bootstrap
 
-- **WHEN** browser request 启用了尚未接线的 `stealth` 或 `fingerprint_profile`
-- **THEN** 系统返回显式 download error，而不是静默忽略这些配置
+- **WHEN** browser request 启用了内置 `fingerprint_profile` 或 `stealth = true`
+- **THEN** downloader 应用稳定的内置 profile 映射，覆盖 `user_agent`、`locale`、`timezone`、`languages`、`platform`
+- **AND** `stealth` 只补最小但可验证的 navigator / window bootstrap，而不是把 browser 路线扩成通用自动化 runtime
+
+#### Scenario: Unsupported custom fingerprint profile fails explicitly
+
+- **WHEN** browser request 设置了未知的 `fingerprint_profile`
+- **THEN** 系统返回显式 download error，而不是静默忽略该配置
 
 #### Scenario: Browser session can reuse persisted profile state
 
@@ -102,6 +130,12 @@
 - **WHEN** 多个 browser request 使用相同的 session id 并发执行
 - **THEN** downloader 至少按 session id 串行化实际浏览器执行
 - **AND** 避免共享 user data dir 时出现竞态
+
+#### Scenario: Browser runtime uses async-friendly session and temporary directory handling
+
+- **WHEN** browser downloader 需要准备 session user data dir 或临时 profile 目录
+- **THEN** 它使用更适合 async runtime 的目录准备与清理方式
+- **AND** 不再把明显同步文件 I/O 留在这条高频执行路径里
 
 ## MODIFIED Requirements
 
@@ -161,3 +195,9 @@
 - **WHEN** 用户对 `ValueQuery` 调用 `skip(...)`、`take(...)`、`last()`、`split(...)` 或 `dedup()`
 - **THEN** 系统按声明顺序处理结果集
 - **AND** 这些后处理仍属于同一条共享 parser 能力链路
+
+#### Scenario: Query transforms can filter and project structured values
+
+- **WHEN** 用户对结构化 `ValueQuery` 调用 `filter_field_present(...)`、`filter_field_equals(...)` 或 `pick_fields([...])`
+- **THEN** 系统会在同一条共享 parser 能力链路里完成结构过滤或字段投影
+- **AND** 过滤或投影后的结果仍可继续链式调用 `field(...)`、`index(...)` 等结构化读取方法

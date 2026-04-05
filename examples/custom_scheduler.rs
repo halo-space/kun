@@ -2,8 +2,8 @@ use halo_spider::engine::Engine;
 use halo_spider::error::SpiderError;
 use halo_spider::request::Request;
 use halo_spider::scheduler::checkpoint::{Checkpoint, Persist};
-use halo_spider::scheduler::{self, Scheduler, Task, TaskId};
-use std::sync::Arc;
+use halo_spider::scheduler::{self, Scheduler, Task, TaskLease};
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex;
 
 /// Custom scheduler example.
@@ -13,36 +13,42 @@ use tokio::sync::Mutex;
 #[derive(Default)]
 struct RecordingScheduler {
     inner: scheduler::Memory,
-    completed_task_ids: Vec<String>,
+    completed_task_ids: StdMutex<Vec<String>>,
 }
 
 impl RecordingScheduler {
-    fn completed_task_ids(&self) -> &[String] {
-        self.completed_task_ids.as_slice()
+    fn completed_task_ids(&self) -> Vec<String> {
+        self.completed_task_ids
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 }
 
 impl Scheduler for RecordingScheduler {
-    async fn enqueue(&mut self, task: Task) -> Result<(), SpiderError> {
+    async fn enqueue(&self, task: Task) -> Result<(), SpiderError> {
         println!("custom scheduler enqueue: {}", task.request.url);
         self.inner.enqueue(task).await
     }
 
-    async fn take_ready(&mut self) -> Result<Option<Task>, SpiderError> {
+    async fn take_ready(&self) -> Result<Option<scheduler::ClaimedTask>, SpiderError> {
         let task = self.inner.take_ready().await?;
         if let Some(task) = &task {
-            println!("custom scheduler take_ready: {}", task.request.url);
+            println!("custom scheduler take_ready: {}", task.task.request.url);
         }
         Ok(task)
     }
 
-    async fn complete(&mut self, task_id: &TaskId) -> Result<(), SpiderError> {
-        self.completed_task_ids.push(task_id.as_str().to_string());
-        self.inner.complete(task_id).await
+    async fn complete(&self, lease: &TaskLease) -> Result<(), SpiderError> {
+        self.completed_task_ids
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(lease.task_id().as_str().to_string());
+        self.inner.complete(lease).await
     }
 
-    async fn requeue(&mut self, task_id: &TaskId) -> Result<(), SpiderError> {
-        self.inner.requeue(task_id).await
+    async fn requeue(&self, lease: &TaskLease) -> Result<(), SpiderError> {
+        self.inner.requeue(lease).await
     }
 
     async fn has_pending(&self) -> Result<bool, SpiderError> {
@@ -80,7 +86,7 @@ async fn main() -> Result<(), SpiderError> {
 async fn custom_scheduler_demo() -> Result<(), SpiderError> {
     println!("== custom scheduler demo ==");
 
-    let mut scheduler = RecordingScheduler::default();
+    let scheduler = RecordingScheduler::default();
     let task = Task::new(Request::new("https://example.com/custom-scheduler"));
 
     scheduler.enqueue(task).await?;
@@ -88,7 +94,7 @@ async fn custom_scheduler_demo() -> Result<(), SpiderError> {
         .take_ready()
         .await?
         .expect("custom scheduler should yield one ready task");
-    scheduler.complete(&taken.id).await?;
+    scheduler.complete(&taken.lease).await?;
 
     println!(
         "completed ids recorded by custom scheduler: {:?}",

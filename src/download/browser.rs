@@ -20,10 +20,12 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 #[cfg(any(feature = "browser", test))]
 use std::sync::Arc;
-#[cfg(feature = "browser")]
-use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(any(feature = "browser", test))]
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
+#[cfg(feature = "browser")]
+use std::sync::atomic::AtomicBool;
+#[cfg(any(feature = "browser", test))]
+use std::sync::atomic::Ordering;
 #[cfg(any(feature = "browser", test))]
 use url::Url;
 
@@ -125,6 +127,94 @@ struct BrowserFingerprintProfile {
     languages: &'static [&'static str],
     platform: &'static str,
     vendor: &'static str,
+    hardware_concurrency: u8,
+    device_memory: u8,
+    max_touch_points: u8,
+}
+
+const BROWSER_FINGERPRINT_PROFILES: [BrowserFingerprintProfile; 6] = [
+    BrowserFingerprintProfile {
+        name: "desktop_zh_cn",
+        user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+        locale: "zh-CN",
+        timezone_id: "Asia/Shanghai",
+        accept_language: "zh-CN,zh;q=0.9,en;q=0.8",
+        languages: &["zh-CN", "zh", "en"],
+        platform: "Win32",
+        vendor: "Google Inc.",
+        hardware_concurrency: 8,
+        device_memory: 8,
+        max_touch_points: 0,
+    },
+    BrowserFingerprintProfile {
+        name: "desktop_en_us",
+        user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+        locale: "en-US",
+        timezone_id: "America/New_York",
+        accept_language: "en-US,en;q=0.9",
+        languages: &["en-US", "en"],
+        platform: "Win32",
+        vendor: "Google Inc.",
+        hardware_concurrency: 8,
+        device_memory: 8,
+        max_touch_points: 0,
+    },
+    BrowserFingerprintProfile {
+        name: "desktop_en_gb",
+        user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+        locale: "en-GB",
+        timezone_id: "Europe/London",
+        accept_language: "en-GB,en;q=0.9",
+        languages: &["en-GB", "en"],
+        platform: "Win32",
+        vendor: "Google Inc.",
+        hardware_concurrency: 8,
+        device_memory: 8,
+        max_touch_points: 0,
+    },
+    BrowserFingerprintProfile {
+        name: "desktop_ja_jp",
+        user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+        locale: "ja-JP",
+        timezone_id: "Asia/Tokyo",
+        accept_language: "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
+        languages: &["ja-JP", "ja", "en-US", "en"],
+        platform: "Win32",
+        vendor: "Google Inc.",
+        hardware_concurrency: 8,
+        device_memory: 8,
+        max_touch_points: 0,
+    },
+    BrowserFingerprintProfile {
+        name: "desktop_de_de",
+        user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+        locale: "de-DE",
+        timezone_id: "Europe/Berlin",
+        accept_language: "de-DE,de;q=0.9,en;q=0.8",
+        languages: &["de-DE", "de", "en"],
+        platform: "Win32",
+        vendor: "Google Inc.",
+        hardware_concurrency: 8,
+        device_memory: 8,
+        max_touch_points: 0,
+    },
+    BrowserFingerprintProfile {
+        name: "desktop_fr_fr",
+        user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+        locale: "fr-FR",
+        timezone_id: "Europe/Paris",
+        accept_language: "fr-FR,fr;q=0.9,en;q=0.8",
+        languages: &["fr-FR", "fr", "en"],
+        platform: "Win32",
+        vendor: "Google Inc.",
+        hardware_concurrency: 8,
+        device_memory: 8,
+        max_touch_points: 0,
+    },
+];
+
+fn builtin_browser_fingerprint_profiles() -> &'static [BrowserFingerprintProfile] {
+    &BROWSER_FINGERPRINT_PROFILES
 }
 
 #[cfg(feature = "browser")]
@@ -154,31 +244,23 @@ fn resolve_fingerprint_profile(
         return Ok(None);
     };
 
-    match profile_name {
-        "desktop_zh_cn" => Ok(Some(BrowserFingerprintProfile {
-            name: "desktop_zh_cn",
-            user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
-            locale: "zh-CN",
-            timezone_id: "Asia/Shanghai",
-            accept_language: "zh-CN,zh;q=0.9,en;q=0.8",
-            languages: &["zh-CN", "zh", "en"],
-            platform: "Win32",
-            vendor: "Google Inc.",
-        })),
-        "desktop_en_us" => Ok(Some(BrowserFingerprintProfile {
-            name: "desktop_en_us",
-            user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
-            locale: "en-US",
-            timezone_id: "America/New_York",
-            accept_language: "en-US,en;q=0.9",
-            languages: &["en-US", "en"],
-            platform: "Win32",
-            vendor: "Google Inc.",
-        })),
-        other => Err(SpiderError::download(format!(
-            "browser fingerprint_profile is not supported on the Playwright route: {other}"
-        ))),
+    if let Some(profile) = builtin_browser_fingerprint_profiles()
+        .iter()
+        .copied()
+        .find(|profile| profile.name == profile_name)
+    {
+        return Ok(Some(profile));
     }
+
+    let supported = builtin_browser_fingerprint_profiles()
+        .iter()
+        .map(|profile| profile.name)
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    Err(SpiderError::download(format!(
+        "browser fingerprint_profile is not supported on the Playwright route: {profile_name}; supported profiles: {supported}"
+    )))
 }
 
 #[cfg(any(feature = "browser", test))]
@@ -193,13 +275,23 @@ fn build_browser_init_script(
     let languages = profile
         .map(|profile| profile.languages)
         .unwrap_or(&["en-US", "en"]);
+    let language = languages.first().copied().unwrap_or("en-US");
     let platform = profile.map(|profile| profile.platform).unwrap_or("Win32");
     let vendor = profile
         .map(|profile| profile.vendor)
         .unwrap_or("Google Inc.");
+    let hardware_concurrency = profile
+        .map(|profile| profile.hardware_concurrency)
+        .unwrap_or(8);
+    let device_memory = profile.map(|profile| profile.device_memory).unwrap_or(8);
+    let max_touch_points = profile.map(|profile| profile.max_touch_points).unwrap_or(0);
     let languages_json = json!(languages).to_string();
+    let language_json = json!(language).to_string();
     let platform_json = json!(platform).to_string();
     let vendor_json = json!(vendor).to_string();
+    let hardware_concurrency_json = json!(hardware_concurrency).to_string();
+    let device_memory_json = json!(device_memory).to_string();
+    let max_touch_points_json = json!(max_touch_points).to_string();
     let mut lines = Vec::new();
 
     if config.stealth {
@@ -214,22 +306,75 @@ fn build_browser_init_script(
             "Object.defineProperty(navigator, 'languages', {{ get: () => {languages_json}.slice(), configurable: true }});"
         ));
         lines.push(format!(
+            "Object.defineProperty(navigator, 'language', {{ get: () => {language_json}, configurable: true }});"
+        ));
+        lines.push(format!(
             "Object.defineProperty(navigator, 'platform', {{ get: () => {platform_json}, configurable: true }});"
         ));
         lines.push(format!(
             "Object.defineProperty(navigator, 'vendor', {{ get: () => {vendor_json}, configurable: true }});"
         ));
-        lines.push(
-            "if (!window.chrome) { Object.defineProperty(window, 'chrome', { value: { runtime: {} }, configurable: true }); }"
-                .to_string(),
-        );
+        lines.push(format!(
+            "Object.defineProperty(navigator, 'hardwareConcurrency', {{ get: () => {hardware_concurrency_json}, configurable: true }});"
+        ));
+        lines.push(format!(
+            "Object.defineProperty(navigator, 'deviceMemory', {{ get: () => {device_memory_json}, configurable: true }});"
+        ));
+        lines.push(format!(
+            "Object.defineProperty(navigator, 'maxTouchPoints', {{ get: () => {max_touch_points_json}, configurable: true }});"
+        ));
     }
 
     if config.stealth {
         lines.push(
+            "const haloPluginArray = [{ name: 'PDF Viewer', filename: 'internal-pdf-viewer', description: 'Portable Document Format' }];"
+                .to_string(),
+        );
+        lines.push(
+            "const haloMimeTypeArray = [{ type: 'application/pdf', suffixes: 'pdf', description: 'Portable Document Format' }];"
+                .to_string(),
+        );
+        lines.push(
+            "Object.defineProperty(navigator, 'plugins', { get: () => haloPluginArray.slice(), configurable: true });"
+                .to_string(),
+        );
+        lines.push(
+            "Object.defineProperty(navigator, 'mimeTypes', { get: () => haloMimeTypeArray.slice(), configurable: true });"
+                .to_string(),
+        );
+        lines.push(
+            "Object.defineProperty(navigator, 'pdfViewerEnabled', { get: () => true, configurable: true });"
+                .to_string(),
+        );
+        lines.push(
+            "Object.defineProperty(screen, 'colorDepth', { get: () => 24, configurable: true });"
+                .to_string(),
+        );
+        lines.push(
+            "Object.defineProperty(screen, 'pixelDepth', { get: () => 24, configurable: true });"
+                .to_string(),
+        );
+        lines.push(
             "if (navigator.permissions && navigator.permissions.query) { const originalQuery = navigator.permissions.query.bind(navigator.permissions); navigator.permissions.query = (parameters) => { if (parameters && parameters.name === 'notifications') { return Promise.resolve({ state: Notification.permission }); } return originalQuery(parameters); }; }"
                 .to_string(),
         );
+        if config.engine == crate::request::browser::Engine::Chromium {
+            lines.push(
+                "if (!window.chrome) { Object.defineProperty(window, 'chrome', { value: {}, configurable: true }); }"
+                    .to_string(),
+            );
+            lines.push(
+                "if (!window.chrome.runtime) { Object.defineProperty(window.chrome, 'runtime', { value: {}, configurable: true }); }"
+                    .to_string(),
+            );
+            lines.push(
+                "if (!window.chrome.app) { Object.defineProperty(window.chrome, 'app', { value: { isInstalled: false }, configurable: true }); }"
+                    .to_string(),
+            );
+            lines.push(format!(
+                "Object.defineProperty(navigator, 'userAgentData', {{ get: () => ({{ brands: [{{ brand: 'Chromium', version: '136' }}, {{ brand: 'Not.A/Brand', version: '24' }}], mobile: false, platform: {platform_json}, getHighEntropyValues: async () => ({{ architecture: 'x86', bitness: '64', model: '', platform: {platform_json}, platformVersion: '10.0.0', uaFullVersion: '136.0.0.0' }}) }}), configurable: true }});"
+            ));
+        }
     }
 
     Some(format!("(() => {{\n{}\n}})();", lines.join("\n")))
@@ -372,10 +517,10 @@ async fn fetch_with_playwright_inner(
         execution_plan.profile.as_ref(),
     )?;
     let navigation_request_override = BrowserNavigationRequestOverride::for_request(request);
-    let user_data_dir = BrowserUserDataDir::for_request(request)?;
-    let user_data_path = user_data_dir.path();
+    let user_data_dir = BrowserUserDataDir::for_request(request).await?;
+    let user_data_path = user_data_dir.path().to_string_lossy().into_owned();
 
-    let context = match config.engine {
+    let context_result = match config.engine {
         crate::request::browser::Engine::Chromium => {
             playwright
                 .chromium()
@@ -394,10 +539,16 @@ async fn fetch_with_playwright_inner(
                 .launch_persistent_context_with_options(user_data_path.clone(), options)
                 .await
         }
-    }
-    .map_err(map_playwright_error)?;
+    };
+    let context = match context_result {
+        Ok(context) => context,
+        Err(error) => {
+            user_data_dir.cleanup().await?;
+            return Err(map_playwright_error(error));
+        }
+    };
 
-    let result = async {
+    let outcome = async {
         apply_execution_plan_to_context(&context, &execution_plan).await?;
         apply_request_cookies_to_context(&context, request).await?;
 
@@ -464,8 +615,17 @@ async fn fetch_with_playwright_inner(
     }
     .await;
 
-    context.close().await.map_err(map_playwright_error)?;
-    result
+    let close_outcome = context.close().await.map_err(map_playwright_error);
+    let cleanup_outcome = user_data_dir.cleanup().await;
+
+    match outcome {
+        Err(error) => Err(error),
+        Ok(result) => {
+            close_outcome?;
+            cleanup_outcome?;
+            Ok(result)
+        }
+    }
 }
 
 #[cfg(feature = "browser")]
@@ -658,12 +818,13 @@ struct BrowserRequestCookie {
 }
 
 #[cfg(any(feature = "browser", test))]
-fn browser_session_execution_lock(session_id: &str) -> Arc<tokio::sync::Mutex<()>> {
-    static SESSION_LOCKS: OnceLock<Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>> =
-        OnceLock::new();
+async fn browser_session_execution_lock(session_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    static SESSION_LOCKS: OnceLock<
+        tokio::sync::Mutex<BTreeMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    > = OnceLock::new();
 
-    let locks = SESSION_LOCKS.get_or_init(|| Mutex::new(BTreeMap::new()));
-    let mut locks = locks.lock().expect("browser session lock map poisoned");
+    let locks = SESSION_LOCKS.get_or_init(|| tokio::sync::Mutex::new(BTreeMap::new()));
+    let mut locks = locks.lock().await;
 
     locks
         .entry(session_id.to_string())
@@ -684,26 +845,28 @@ async fn acquire_browser_session_execution_guard(
         return None;
     };
 
-    let lock = browser_session_execution_lock(&session.id);
+    let lock = browser_session_execution_lock(&session.id).await;
     let guard = lock.lock_owned().await;
     Some(BrowserSessionExecutionGuard { _guard: guard })
 }
 
-#[cfg(feature = "browser")]
+#[cfg(any(feature = "browser", test))]
+#[cfg_attr(all(test, not(feature = "browser")), allow(dead_code))]
 enum BrowserUserDataDir {
     Temporary(TemporaryUserDataDir),
     Persistent(PathBuf),
 }
 
-#[cfg(feature = "browser")]
+#[cfg(any(feature = "browser", test))]
+#[cfg_attr(all(test, not(feature = "browser")), allow(dead_code))]
 impl BrowserUserDataDir {
-    fn for_request(request: &Request) -> Result<Self, SpiderError> {
+    async fn for_request(request: &Request) -> Result<Self, SpiderError> {
         let Some(session) = &request.session else {
-            return Ok(Self::Temporary(TemporaryUserDataDir::new()));
+            return Ok(Self::Temporary(TemporaryUserDataDir::new().await?));
         };
 
         let path = browser_session_user_data_dir(&session.id);
-        std::fs::create_dir_all(&path).map_err(|error| {
+        tokio::fs::create_dir_all(&path).await.map_err(|error| {
             SpiderError::download(format!(
                 "failed to create browser session user data dir: {error}"
             ))
@@ -712,10 +875,17 @@ impl BrowserUserDataDir {
         Ok(Self::Persistent(path))
     }
 
-    fn path(&self) -> String {
+    fn path(&self) -> &std::path::Path {
         match self {
             Self::Temporary(dir) => dir.path(),
-            Self::Persistent(path) => path.to_string_lossy().into_owned(),
+            Self::Persistent(path) => path.as_path(),
+        }
+    }
+
+    async fn cleanup(&self) -> Result<(), SpiderError> {
+        match self {
+            Self::Temporary(dir) => dir.cleanup().await,
+            Self::Persistent(_) => Ok(()),
         }
     }
 }
@@ -740,36 +910,42 @@ fn hex_encode(bytes: &[u8]) -> String {
     output
 }
 
-#[cfg(feature = "browser")]
+#[cfg(any(feature = "browser", test))]
 struct TemporaryUserDataDir {
     path: std::path::PathBuf,
 }
 
-#[cfg(feature = "browser")]
+#[cfg(any(feature = "browser", test))]
 impl TemporaryUserDataDir {
-    fn new() -> Self {
-        let unique_id = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
+    async fn new() -> Result<Self, SpiderError> {
+        static TEMP_DIR_COUNTER: OnceLock<std::sync::atomic::AtomicU64> = OnceLock::new();
+        let counter = TEMP_DIR_COUNTER.get_or_init(|| std::sync::atomic::AtomicU64::new(1));
+        let unique_id = counter.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
             "halo-spider-playwright-{}-{unique_id}",
             std::process::id()
         ));
-        let _ = std::fs::create_dir_all(&path);
+        tokio::fs::create_dir_all(&path).await.map_err(|error| {
+            SpiderError::download(format!(
+                "failed to create browser temporary user data dir: {error}"
+            ))
+        })?;
 
-        Self { path }
+        Ok(Self { path })
     }
 
-    fn path(&self) -> String {
-        self.path.to_string_lossy().into_owned()
+    fn path(&self) -> &std::path::Path {
+        self.path.as_path()
     }
-}
 
-#[cfg(feature = "browser")]
-impl Drop for TemporaryUserDataDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.path);
+    async fn cleanup(&self) -> Result<(), SpiderError> {
+        match tokio::fs::remove_dir_all(&self.path).await {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(SpiderError::download(format!(
+                "failed to remove browser temporary user data dir: {error}"
+            ))),
+        }
     }
 }
 
@@ -778,10 +954,7 @@ mod tests {
     use super::*;
     use crate::download::traits::Downloader;
     use crate::request::browser::Config as BrowserConfig;
-    use std::future::Future;
-    use std::pin::Pin;
     use std::sync::Arc;
-    use std::task::{Context, Poll, Wake, Waker};
 
     #[test]
     fn browser_downloader_rejects_http_request() {
@@ -842,7 +1015,7 @@ mod tests {
         assert_eq!(
             error,
             SpiderError::download(
-                "browser fingerprint_profile is not supported on the Playwright route: desktop_unknown",
+                "browser fingerprint_profile is not supported on the Playwright route: desktop_unknown; supported profiles: desktop_zh_cn, desktop_en_us, desktop_en_gb, desktop_ja_jp, desktop_de_de, desktop_fr_fr",
             )
         );
     }
@@ -1070,6 +1243,26 @@ mod tests {
     }
 
     #[test]
+    fn resolve_fingerprint_profile_exposes_expanded_builtin_set() {
+        let names = builtin_browser_fingerprint_profiles()
+            .iter()
+            .map(|profile| profile.name)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            names,
+            vec![
+                "desktop_zh_cn",
+                "desktop_en_us",
+                "desktop_en_gb",
+                "desktop_ja_jp",
+                "desktop_de_de",
+                "desktop_fr_fr",
+            ]
+        );
+    }
+
+    #[test]
     fn build_browser_init_script_supports_profile_and_stealth() {
         let config = BrowserConfig::default()
             .with_stealth(true)
@@ -1082,6 +1275,9 @@ mod tests {
 
         assert!(init_script.contains("Object.defineProperty(navigator, 'webdriver'"));
         assert!(init_script.contains("Object.defineProperty(navigator, 'languages'"));
+        assert!(init_script.contains("Object.defineProperty(navigator, 'language'"));
+        assert!(init_script.contains("Object.defineProperty(navigator, 'hardwareConcurrency'"));
+        assert!(init_script.contains("Object.defineProperty(navigator, 'plugins'"));
         assert!(init_script.contains("navigator.permissions.query"));
         assert!(init_script.contains("en-US"));
         assert!(init_script.contains("Win32"));
@@ -1110,12 +1306,23 @@ mod tests {
 
     #[test]
     fn browser_session_execution_lock_is_stable_per_session_id() {
-        let first = browser_session_execution_lock("shared-browser");
-        let second = browser_session_execution_lock("shared-browser");
-        let other = browser_session_execution_lock("other-browser");
+        let first = block_on(browser_session_execution_lock("shared-browser"));
+        let second = block_on(browser_session_execution_lock("shared-browser"));
+        let other = block_on(browser_session_execution_lock("other-browser"));
 
         assert!(Arc::ptr_eq(&first, &second));
         assert!(!Arc::ptr_eq(&first, &other));
+    }
+
+    #[test]
+    fn temporary_user_data_dir_is_created_and_cleaned_asynchronously() {
+        let dir = block_on(TemporaryUserDataDir::new()).expect("temp dir should create");
+        let path = dir.path().to_path_buf();
+
+        assert!(path.exists());
+
+        block_on(dir.cleanup()).expect("temp dir should clean");
+        assert!(!path.exists());
     }
 
     #[test]
@@ -1156,7 +1363,7 @@ mod tests {
         assert_eq!(
             error,
             SpiderError::download(
-                "browser fingerprint_profile is not supported on the Playwright route: desktop_unknown",
+                "browser fingerprint_profile is not supported on the Playwright route: desktop_unknown; supported profiles: desktop_zh_cn, desktop_en_us, desktop_en_gb, desktop_ja_jp, desktop_de_de, desktop_fr_fr",
             )
         );
     }
@@ -1218,22 +1425,11 @@ mod tests {
         );
     }
 
-    fn block_on<F: Future>(future: F) -> F::Output {
-        let waker = Waker::from(Arc::new(NoopWake));
-        let mut future = Pin::from(Box::new(future));
-        let mut context = Context::from_waker(&waker);
-
-        loop {
-            match future.as_mut().poll(&mut context) {
-                Poll::Ready(value) => return value,
-                Poll::Pending => std::thread::yield_now(),
-            }
-        }
-    }
-
-    struct NoopWake;
-
-    impl Wake for NoopWake {
-        fn wake(self: Arc<Self>) {}
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime should build")
+            .block_on(future)
     }
 }

@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[derive(Default)]
 pub struct RateLimit {
     rate_per_minute: usize,
-    hits_ms: Mutex<VecDeque<u64>>,
+    hits: Mutex<VecDeque<u64>>,
 }
 
 impl RateLimit {
@@ -22,7 +22,7 @@ impl RateLimit {
                 .get("rate_per_minute")
                 .and_then(Value::as_f64)
                 .unwrap_or(0.0) as usize,
-            hits_ms: Mutex::new(VecDeque::new()),
+            hits: Mutex::new(VecDeque::new()),
         }
     }
 }
@@ -37,10 +37,10 @@ impl Middleware for RateLimit {
                 return Ok(Flow::Continue);
             }
 
-            let now = now_ms();
+            let now = now();
             let window_start = now.saturating_sub(60_000);
             let mut hits = self
-                .hits_ms
+                .hits
                 .lock()
                 .map_err(|_| SpiderError::engine("rate limit state poisoned"))?;
 
@@ -58,7 +58,7 @@ impl Middleware for RateLimit {
                 let backoff = oldest.saturating_add(60_000).saturating_sub(now);
                 return Ok(Flow::Retry {
                     reason: "rate limit".to_string(),
-                    backoff_ms: Some(backoff.max(1)),
+                    backoff: Some(backoff.max(1)),
                 });
             }
 
@@ -68,7 +68,7 @@ impl Middleware for RateLimit {
     }
 }
 
-fn now_ms() -> u64 {
+fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -103,7 +103,7 @@ mod tests {
         assert!(matches!(
             second_flow,
             Flow::Retry {
-                backoff_ms: Some(_),
+                backoff: Some(_),
                 ..
             }
         ));

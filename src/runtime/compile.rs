@@ -8,7 +8,6 @@ pub fn compile(runtime: &RuntimeConfig) -> Result<MiddlewareMap, SpiderError> {
     let mut middleware = MiddlewareMap::new();
 
     compile_retry(runtime, &mut middleware)?;
-    compile_dedup(runtime, &mut middleware)?;
     compile_schedule(runtime, &mut middleware)?;
 
     Ok(middleware)
@@ -33,7 +32,7 @@ fn compile_retry(
     }
 
     let count = optional_number(&runtime.retry, "count");
-    let backoff = optional_array(&runtime.retry, "backoff_ms");
+    let backoff = optional_array(&runtime.retry, "backoff");
     let statuses = optional_array(&runtime.retry, "http_status");
 
     if count.is_some() || backoff.is_some() || statuses.is_some() {
@@ -44,7 +43,7 @@ fn compile_retry(
                     200,
                     vec![
                         optional_value("count", count.clone()),
-                        optional_value("backoff_ms", backoff.clone()),
+                        optional_value("backoff", backoff.clone()),
                         Some(("status".to_string(), Value::Array(statuses))),
                     ],
                 ),
@@ -57,38 +56,9 @@ fn compile_retry(
                 210,
                 vec![
                     optional_value("count", count),
-                    optional_value("backoff_ms", optional_array(&runtime.retry, "backoff_ms")),
+                    optional_value("backoff", optional_array(&runtime.retry, "backoff")),
                 ],
             ),
-        );
-    }
-
-    Ok(())
-}
-
-fn compile_dedup(
-    runtime: &RuntimeConfig,
-    middleware: &mut MiddlewareMap,
-) -> Result<(), SpiderError> {
-    if runtime.dedup.is_empty() {
-        return Ok(());
-    }
-
-    let enabled = runtime
-        .dedup
-        .get("enabled")
-        .and_then(Value::as_bool)
-        .unwrap_or(true);
-
-    if enabled {
-        middleware.insert(
-            "dedup".to_string(),
-            Config {
-                enabled: true,
-                stage: Stage::Download,
-                order: 220,
-                options: runtime.dedup.clone(),
-            },
         );
     }
 
@@ -110,10 +80,53 @@ fn compile_schedule(
         );
     }
 
-    if let Some(interval_ms) = runtime.schedule.get("interval_ms").cloned() {
+    let auto_throttle_enabled = runtime
+        .schedule
+        .get("auto_throttle")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    if auto_throttle_enabled {
+        middleware.insert(
+            "auto_throttle".to_string(),
+            config(
+                120,
+                vec![
+                    Some(("auto_throttle".to_string(), Value::Bool(true))),
+                    runtime
+                        .schedule
+                        .get("target_concurrency")
+                        .cloned()
+                        .map(|value| ("target_concurrency".to_string(), value)),
+                    runtime
+                        .schedule
+                        .get("start_interval")
+                        .cloned()
+                        .or_else(|| runtime.schedule.get("interval").cloned())
+                        .map(|value| ("start_interval".to_string(), value)),
+                    runtime
+                        .schedule
+                        .get("min_interval")
+                        .cloned()
+                        .or_else(|| runtime.schedule.get("interval").cloned())
+                        .map(|value| ("min_interval".to_string(), value)),
+                    runtime
+                        .schedule
+                        .get("max_interval")
+                        .cloned()
+                        .map(|value| ("max_interval".to_string(), value)),
+                    runtime
+                        .schedule
+                        .get("error_backoff_ratio")
+                        .cloned()
+                        .map(|value| ("error_backoff_ratio".to_string(), value)),
+                ],
+            ),
+        );
+    } else if let Some(interval) = runtime.schedule.get("interval").cloned() {
         middleware.insert(
             "interval_gate".to_string(),
-            config(120, vec![Some(("interval_ms".to_string(), interval_ms))]),
+            config(120, vec![Some(("interval".to_string(), interval))]),
         );
     }
 
@@ -165,7 +178,7 @@ mod tests {
         let runtime = RuntimeConfig {
             schedule: [
                 ("concurrency".to_string(), Value::Number(2.0)),
-                ("interval_ms".to_string(), Value::Number(1000.0)),
+                ("interval".to_string(), Value::Number(1000.0)),
                 ("rate_per_minute".to_string(), Value::Number(120.0)),
             ]
             .into_iter()
@@ -177,28 +190,47 @@ mod tests {
                     Value::Array(vec![Value::Number(429.0), Value::Number(500.0)]),
                 ),
                 (
-                    "backoff_ms".to_string(),
+                    "backoff".to_string(),
                     Value::Array(vec![Value::Number(1000.0), Value::Number(3000.0)]),
                 ),
             ]
             .into_iter()
             .collect(),
-            dedup: [
-                ("enabled".to_string(), Value::Bool(true)),
-                ("key".to_string(), Value::String("url".to_string())),
-            ]
-            .into_iter()
-            .collect(),
+            dedup: BTreeMap::new(),
         };
 
         let compiled = compile(&runtime).unwrap();
 
         assert!(compiled.contains_key("retry_by_status"));
         assert!(compiled.contains_key("retry_by_error"));
-        assert!(compiled.contains_key("dedup"));
         assert!(compiled.contains_key("concurrency_gate"));
         assert!(compiled.contains_key("interval_gate"));
         assert!(compiled.contains_key("rate_limit"));
+    }
+
+    #[test]
+    fn compile_prefers_auto_throttle_over_interval_gate() {
+        let runtime = RuntimeConfig {
+            schedule: [
+                ("auto_throttle".to_string(), Value::Bool(true)),
+                ("interval".to_string(), Value::Number(200.0)),
+                ("target_concurrency".to_string(), Value::Number(2.0)),
+                ("max_interval".to_string(), Value::Number(5_000.0)),
+            ]
+            .into_iter()
+            .collect(),
+            retry: BTreeMap::new(),
+            dedup: BTreeMap::new(),
+        };
+
+        let compiled = compile(&runtime).unwrap();
+
+        assert!(compiled.contains_key("auto_throttle"));
+        assert!(!compiled.contains_key("interval_gate"));
+        assert_eq!(
+            compiled["auto_throttle"].options.get("min_interval"),
+            Some(&Value::Number(200.0))
+        );
     }
 
     #[test]

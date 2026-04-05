@@ -65,7 +65,7 @@ impl Middleware for ConcurrencyGate {
             if *inflight >= self.limit {
                 return Ok(Flow::Retry {
                     reason: "concurrency gate".to_string(),
-                    backoff_ms: Some(1),
+                    backoff: Some(1),
                 });
             }
 
@@ -128,7 +128,7 @@ mod tests {
             second_flow,
             Flow::Retry {
                 reason,
-                backoff_ms: Some(1),
+                backoff: Some(1),
             } if reason == "concurrency gate"
         ));
 

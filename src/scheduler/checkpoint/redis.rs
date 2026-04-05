@@ -1,5 +1,5 @@
 use crate::error::SpiderError;
-use crate::redis::{Connection, Endpoint, ErrorContext};
+use crate::redis::{Connection, ErrorContext, connect, query, validate_url};
 use crate::scheduler::checkpoint::{Checkpoint, Persist};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -28,8 +28,8 @@ impl Redis {
         &self.key
     }
 
-    fn validate(&self) -> Result<Endpoint, SpiderError> {
-        let endpoint = Endpoint::parse(
+    fn validate(&self) -> Result<(), SpiderError> {
+        validate_url(
             &self.url,
             "redis scheduler checkpoint",
             ErrorContext::Scheduler,
@@ -41,19 +41,19 @@ impl Redis {
             ));
         }
 
-        Ok(endpoint)
+        Ok(())
     }
 
     async fn connection(
         &self,
     ) -> Result<tokio::sync::MutexGuard<'_, Option<Connection>>, SpiderError> {
-        let endpoint = self.validate()?;
+        self.validate()?;
         let mut guard = self.connection.lock().await;
 
         if guard.is_none() {
             *guard = Some(
-                Connection::connect(
-                    &endpoint,
+                connect(
+                    &self.url,
                     "redis scheduler checkpoint",
                     ErrorContext::Scheduler,
                 )
@@ -73,17 +73,17 @@ impl Persist for Redis {
                 "redis scheduler checkpoint connection is missing after initialization",
             )
         })?;
-        let reply = connection
-            .send_command(
-                &["GET".to_string(), self.key.clone()],
-                "redis scheduler checkpoint",
-                ErrorContext::Scheduler,
-            )
-            .await?;
+        let mut command = redis::cmd("GET");
+        command.arg(&self.key);
+        let payload: Option<String> = query(
+            connection,
+            &mut command,
+            "redis scheduler checkpoint",
+            ErrorContext::Scheduler,
+        )
+        .await?;
 
-        let Some(payload) =
-            reply.into_bulk("redis scheduler checkpoint", ErrorContext::Scheduler)?
-        else {
+        let Some(payload) = payload else {
             return Ok(Checkpoint::default());
         };
 
@@ -107,13 +107,15 @@ impl Persist for Redis {
                 "redis scheduler checkpoint connection is missing after initialization",
             )
         })?;
-        connection
-            .send_command(
-                &["SET".to_string(), self.key.clone(), payload],
-                "redis scheduler checkpoint",
-                ErrorContext::Scheduler,
-            )
-            .await?;
+        let mut command = redis::cmd("SET");
+        command.arg(&self.key).arg(payload);
+        let _: String = query(
+            connection,
+            &mut command,
+            "redis scheduler checkpoint",
+            ErrorContext::Scheduler,
+        )
+        .await?;
         Ok(())
     }
 }
@@ -121,9 +123,9 @@ impl Persist for Redis {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::redis::test_support::spawn_redis_server;
     use crate::request::Request;
     use crate::scheduler::Task;
+    use crate::test_support::redis::spawn_redis_server;
 
     #[tokio::test]
     async fn redis_round_trips_checkpoint() {

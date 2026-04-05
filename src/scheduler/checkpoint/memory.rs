@@ -2,7 +2,7 @@ use crate::error::SpiderError;
 use crate::scheduler::checkpoint::File;
 use crate::scheduler::checkpoint::{Checkpoint, Counts, Persist};
 use crate::scheduler::memory::Memory as CoreMemory;
-use crate::scheduler::{Scheduler, Task, TaskId};
+use crate::scheduler::{ClaimedTask, Scheduler, Task, TaskLease};
 
 /// Memory scheduler with automatic checkpoint persistence.
 ///
@@ -58,24 +58,24 @@ impl<P> Scheduler for Memory<P>
 where
     P: Persist,
 {
-    async fn enqueue(&mut self, task: Task) -> Result<(), SpiderError> {
+    async fn enqueue(&self, task: Task) -> Result<(), SpiderError> {
         self.scheduler.enqueue(task).await?;
         self.save_checkpoint().await
     }
 
-    async fn take_ready(&mut self) -> Result<Option<Task>, SpiderError> {
+    async fn take_ready(&self) -> Result<Option<ClaimedTask>, SpiderError> {
         let task = self.scheduler.take_ready().await?;
         self.save_checkpoint().await?;
         Ok(task)
     }
 
-    async fn complete(&mut self, task_id: &TaskId) -> Result<(), SpiderError> {
-        self.scheduler.complete(task_id).await?;
+    async fn complete(&self, lease: &TaskLease) -> Result<(), SpiderError> {
+        self.scheduler.complete(lease).await?;
         self.save_checkpoint().await
     }
 
-    async fn requeue(&mut self, task_id: &TaskId) -> Result<(), SpiderError> {
-        self.scheduler.requeue(task_id).await?;
+    async fn requeue(&self, lease: &TaskLease) -> Result<(), SpiderError> {
+        self.scheduler.requeue(lease).await?;
         self.save_checkpoint().await
     }
 
@@ -118,7 +118,7 @@ mod tests {
     #[tokio::test]
     async fn checkpoint_memory_saves_checkpoint_after_scheduler_transitions() {
         let path = unique_path("save");
-        let mut scheduler = Memory::load(File::new(path.clone())).await.unwrap();
+        let scheduler = Memory::load(File::new(path.clone())).await.unwrap();
 
         scheduler
             .enqueue(
@@ -129,13 +129,36 @@ mod tests {
             .await
             .unwrap();
         let taken = scheduler.take_ready().await.unwrap().unwrap();
-        scheduler.complete(&taken.id).await.unwrap();
+        scheduler.complete(&taken.lease).await.unwrap();
 
         let checkpoint = File::new(path.clone()).load().await.unwrap();
 
         assert!(checkpoint.ready.is_empty());
         assert!(checkpoint.delayed.is_empty());
         assert!(checkpoint.inflight.is_empty());
+
+        tokio::fs::remove_file(path).await.ok();
+    }
+
+    #[tokio::test]
+    async fn checkpoint_memory_restores_exact_inflight_snapshot_without_runtime_reclaim() {
+        let path = unique_path("inflight_snapshot");
+        let inflight = Task::new(Request::new("https://example.com/inflight"));
+        File::new(path.clone())
+            .save(&Checkpoint {
+                ready: Vec::new(),
+                delayed: Vec::new(),
+                inflight: vec![inflight.clone()],
+            })
+            .await
+            .unwrap();
+
+        let scheduler = Memory::load(File::new(path.clone())).await.unwrap();
+
+        assert_eq!(scheduler.counts().ready, 0);
+        assert_eq!(scheduler.counts().inflight, 1);
+        assert!(scheduler.take_ready().await.unwrap().is_none());
+        assert_eq!(scheduler.checkpoint().inflight[0].id, inflight.id);
 
         tokio::fs::remove_file(path).await.ok();
     }

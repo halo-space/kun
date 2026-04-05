@@ -2,6 +2,7 @@ use crate::error::SpiderError;
 use crate::item::Item;
 use crate::store::Store;
 use rdkafka::config::ClientConfig;
+use rdkafka::message::{Header, OwnedHeaders};
 use rdkafka::producer::{FutureProducer, FutureRecord, Producer};
 use rdkafka::util::Timeout;
 use std::fmt;
@@ -12,6 +13,8 @@ use tokio::sync::Mutex;
 pub struct Kafka {
     brokers: String,
     topic: String,
+    key: Option<KafkaTextSource>,
+    headers: Vec<KafkaHeaderConfig>,
     producer: Arc<Mutex<Option<KafkaClient>>>,
 }
 
@@ -20,6 +23,8 @@ impl Kafka {
         Self {
             brokers: brokers.into(),
             topic: topic.into(),
+            key: None,
+            headers: Vec::new(),
             producer: Arc::new(Mutex::new(None)),
         }
     }
@@ -32,6 +37,32 @@ impl Kafka {
         &self.topic
     }
 
+    pub fn with_key(mut self, key: impl Into<String>) -> Self {
+        self.key = Some(KafkaTextSource::Static(key.into()));
+        self
+    }
+
+    pub fn with_key_field(mut self, field: impl Into<String>) -> Self {
+        self.key = Some(KafkaTextSource::ItemField(field.into()));
+        self
+    }
+
+    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push(KafkaHeaderConfig {
+            name: name.into(),
+            value: KafkaTextSource::Static(value.into()),
+        });
+        self
+    }
+
+    pub fn with_header_field(mut self, name: impl Into<String>, field: impl Into<String>) -> Self {
+        self.headers.push(KafkaHeaderConfig {
+            name: name.into(),
+            value: KafkaTextSource::ItemField(field.into()),
+        });
+        self
+    }
+
     fn validate(&self) -> Result<(), SpiderError> {
         if self.brokers.trim().is_empty() {
             return Err(SpiderError::engine("kafka store brokers cannot be empty"));
@@ -41,7 +72,42 @@ impl Kafka {
             return Err(SpiderError::engine("kafka store topic cannot be empty"));
         }
 
+        for header in &self.headers {
+            if header.name.trim().is_empty() {
+                return Err(SpiderError::engine(
+                    "kafka store header name cannot be empty",
+                ));
+            }
+        }
+
         Ok(())
+    }
+
+    fn build_message(&self, item: &Item) -> Result<KafkaMessage, SpiderError> {
+        let payload = serialize_item(item)?;
+        let key = self
+            .key
+            .as_ref()
+            .map(|source| source.resolve(item, "kafka store key"))
+            .transpose()?;
+        let headers = self
+            .headers
+            .iter()
+            .map(|header| {
+                Ok((
+                    header.name.clone(),
+                    header
+                        .value
+                        .resolve(item, &format!("kafka store header `{}`", header.name))?,
+                ))
+            })
+            .collect::<Result<Vec<_>, SpiderError>>()?;
+
+        Ok(KafkaMessage {
+            payload,
+            key,
+            headers,
+        })
     }
 
     async fn producer(&self) -> Result<KafkaClient, SpiderError> {
@@ -67,6 +133,8 @@ impl Kafka {
         Self {
             brokers: brokers.into(),
             topic: topic.into(),
+            key: None,
+            headers: Vec::new(),
             producer: Arc::new(Mutex::new(Some(KafkaClient::Test(producer)))),
         }
     }
@@ -89,9 +157,9 @@ impl Store for Kafka {
     }
 
     async fn write(&self, item: &Item, _spider_name: &str) -> Result<(), SpiderError> {
-        let payload = serialize_item(item)?;
+        let message = self.build_message(item)?;
         let producer = self.producer().await?;
-        producer.send_payload(&self.topic, payload).await
+        producer.send_message(&self.topic, message).await
     }
 
     async fn batch_write(&self, items: &[Item], _spider_name: &str) -> Result<(), SpiderError> {
@@ -101,8 +169,8 @@ impl Store for Kafka {
 
         let producer = self.producer().await?;
         for item in items {
-            let payload = serialize_item(item)?;
-            producer.send_payload(&self.topic, payload).await?;
+            let message = self.build_message(item)?;
+            producer.send_message(&self.topic, message).await?;
         }
 
         Ok(())
@@ -128,6 +196,65 @@ fn serialize_item(item: &Item) -> Result<String, SpiderError> {
     })
 }
 
+#[derive(Debug, Clone)]
+enum KafkaTextSource {
+    Static(String),
+    ItemField(String),
+}
+
+impl KafkaTextSource {
+    fn resolve(&self, item: &Item, label: &str) -> Result<String, SpiderError> {
+        match self {
+            Self::Static(value) => Ok(value.clone()),
+            Self::ItemField(field) => {
+                let value = item.get(field).ok_or_else(|| {
+                    SpiderError::engine(format!("{label} field `{field}` is missing"))
+                })?;
+                value_to_text(value).ok_or_else(|| {
+                    SpiderError::engine(format!(
+                        "{label} field `{field}` must be string, number, or bool"
+                    ))
+                })
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct KafkaHeaderConfig {
+    name: String,
+    value: KafkaTextSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct KafkaMessage {
+    payload: String,
+    key: Option<String>,
+    headers: Vec<(String, String)>,
+}
+
+fn value_to_text(value: &crate::value::Value) -> Option<String> {
+    match value {
+        crate::value::Value::String(value) => Some(value.clone()),
+        crate::value::Value::Bool(value) => Some(value.to_string()),
+        crate::value::Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn build_kafka_headers(headers: &[(String, String)]) -> OwnedHeaders {
+    let mut owned = OwnedHeaders::new_with_capacity(headers.len());
+
+    for (name, value) in headers {
+        owned = owned.insert(Header {
+            key: name.as_str(),
+            value: Some(value.as_str()),
+        });
+    }
+
+    owned
+}
+
 #[derive(Clone)]
 enum KafkaClient {
     Real(FutureProducer),
@@ -148,20 +275,29 @@ impl KafkaClient {
         Ok(Self::Real(producer))
     }
 
-    async fn send_payload(&self, topic: &str, payload: String) -> Result<(), SpiderError> {
+    async fn send_message(&self, topic: &str, message: KafkaMessage) -> Result<(), SpiderError> {
         match self {
-            Self::Real(producer) => producer
-                .send(
-                    FutureRecord::<(), _>::to(topic).payload(&payload),
-                    Timeout::Never,
-                )
-                .await
-                .map(|_| ())
-                .map_err(|(error, _)| {
-                    SpiderError::engine(format!("failed to deliver kafka store message: {error}"))
-                }),
+            Self::Real(producer) => {
+                let mut record = FutureRecord::to(topic).payload(message.payload.as_str());
+                if let Some(key) = message.key.as_deref() {
+                    record = record.key(key);
+                }
+                if !message.headers.is_empty() {
+                    record = record.headers(build_kafka_headers(&message.headers));
+                }
+
+                producer
+                    .send(record, Timeout::Never)
+                    .await
+                    .map(|_| ())
+                    .map_err(|(error, _)| {
+                        SpiderError::engine(format!(
+                            "failed to deliver kafka store message: {error}"
+                        ))
+                    })
+            }
             #[cfg(test)]
-            Self::Test(producer) => producer.send_payload(topic, payload).await,
+            Self::Test(producer) => producer.send_message(topic, message).await,
         }
     }
 
@@ -187,7 +323,7 @@ impl KafkaClient {
 #[cfg(test)]
 #[derive(Debug, Clone, Default)]
 struct TestProducer {
-    messages: Arc<Mutex<Vec<(String, String)>>>,
+    messages: Arc<Mutex<Vec<(String, KafkaMessage)>>>,
     error: Arc<Mutex<Option<String>>>,
 }
 
@@ -200,7 +336,7 @@ impl TestProducer {
         }
     }
 
-    async fn send_payload(&self, topic: &str, payload: String) -> Result<(), SpiderError> {
+    async fn send_message(&self, topic: &str, message: KafkaMessage) -> Result<(), SpiderError> {
         if let Some(message) = self.error.lock().await.clone() {
             return Err(SpiderError::engine(format!(
                 "failed to deliver kafka store message: {message}"
@@ -210,11 +346,11 @@ impl TestProducer {
         self.messages
             .lock()
             .await
-            .push((topic.to_string(), payload));
+            .push((topic.to_string(), message));
         Ok(())
     }
 
-    async fn messages(&self) -> Vec<(String, String)> {
+    async fn messages(&self) -> Vec<(String, KafkaMessage)> {
         self.messages.lock().await.clone()
     }
 
@@ -268,11 +404,15 @@ mod tests {
             producer.messages().await,
             vec![(
                 "period_items".to_string(),
-                serde_json::json!({
-                    "front_page": "01",
-                    "period_date": "2026-03-31",
-                })
-                .to_string(),
+                KafkaMessage {
+                    payload: serde_json::json!({
+                        "front_page": "01",
+                        "period_date": "2026-03-31",
+                    })
+                    .to_string(),
+                    key: None,
+                    headers: Vec::new(),
+                },
             )]
         );
     }
@@ -295,13 +435,77 @@ mod tests {
             vec![
                 (
                     "period_items".to_string(),
-                    serde_json::json!({"issue_key": "2026-03-31-front-01"}).to_string(),
+                    KafkaMessage {
+                        payload: serde_json::json!({"issue_key": "2026-03-31-front-01"})
+                            .to_string(),
+                        key: None,
+                        headers: Vec::new(),
+                    },
                 ),
                 (
                     "period_items".to_string(),
-                    serde_json::json!({"issue_key": "2026-03-30-front-01"}).to_string(),
+                    KafkaMessage {
+                        payload: serde_json::json!({"issue_key": "2026-03-30-front-01"})
+                            .to_string(),
+                        key: None,
+                        headers: Vec::new(),
+                    },
                 ),
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn kafka_store_can_send_key_and_headers_from_static_and_item_fields() {
+        let producer = TestProducer::default();
+        let store = Kafka::with_test_producer("127.0.0.1:9092", "period_items", producer.clone())
+            .with_key_field("issue_key")
+            .with_header("x-spider", "period_kafka")
+            .with_header_field("x-date", "period_date");
+        let item = Item::new()
+            .with_field(
+                "issue_key",
+                Value::String("2026-03-31-front-01".to_string()),
+            )
+            .with_field("period_date", Value::String("2026-03-31".to_string()));
+
+        store.open("news").await.unwrap();
+        store.write(&item, "news").await.unwrap();
+        store.close("news").await.unwrap();
+
+        assert_eq!(
+            producer.messages().await,
+            vec![(
+                "period_items".to_string(),
+                KafkaMessage {
+                    payload: serde_json::json!({
+                        "issue_key": "2026-03-31-front-01",
+                        "period_date": "2026-03-31",
+                    })
+                    .to_string(),
+                    key: Some("2026-03-31-front-01".to_string()),
+                    headers: vec![
+                        ("x-spider".to_string(), "period_kafka".to_string()),
+                        ("x-date".to_string(), "2026-03-31".to_string()),
+                    ],
+                },
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn kafka_store_rejects_missing_key_field() {
+        let producer = TestProducer::default();
+        let store = Kafka::with_test_producer("127.0.0.1:9092", "period_items", producer)
+            .with_key_field("issue_key");
+        let item = Item::new().with_field("title", Value::String("period".to_string()));
+
+        store.open("news").await.unwrap();
+        let error = store.write(&item, "news").await.unwrap_err();
+
+        assert_eq!(
+            error,
+            SpiderError::engine("kafka store key field `issue_key` is missing")
         );
     }
 

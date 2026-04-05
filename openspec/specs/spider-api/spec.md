@@ -107,6 +107,20 @@
 - When 该请求被执行并转换成响应
 - Then 响应保留原始 metadata 与回调路由上下文
 
+#### Scenario: Request kwargs remain a dedicated callback context channel
+
+- Given 请求显式声明了 `kwargs`
+- When 该请求被执行并转换成响应
+- Then 响应可以通过统一入口读取这些 `kwargs`
+- And `kwargs` 与 `meta` 保持为两条不同语义的上下文通道
+
+#### Scenario: Request errback handles download or callback failures explicitly
+
+- Given 请求显式声明了 `errback`
+- When 下载失败或 spider callback 返回错误
+- Then 引擎会把失败上下文分发到对应 errback
+- And errback 返回的 `items` 与 `requests` 继续走同一条 engine 主链
+
 #### Scenario: browser 请求走 Playwright 兼容引擎配置
 
 - Given 一个 browser 请求声明 `driver = playwright`
@@ -129,12 +143,19 @@
 - Then 执行返回显式 download error
 - And 框架不能返回受限 stub response 冒充成功执行
 
-#### Scenario: 未实现的 browser 能力显式报错
+#### Scenario: browser 请求支持内置 fingerprint profile 与最小 stealth bootstrap
 
-- Given 一个 browser 请求启用了 `stealth` 或 `fingerprint_profile`
+- Given 一个 browser 请求启用了内置 `fingerprint_profile` 或 `stealth = true`
+- When browser downloader 执行它
+- Then downloader 应用稳定的 profile 映射，覆盖 `user_agent`、`locale`、`timezone`、`languages`、`platform`
+- And `stealth` 只补最小但可验证的 navigator / window bootstrap，不把 browser 路线扩成通用自动化 runtime
+
+#### Scenario: 未知 browser fingerprint profile 显式报错
+
+- Given 一个 browser 请求设置了未知的 `fingerprint_profile`
 - When browser downloader 尝试执行它
 - Then 执行返回显式 download error
-- And 框架不能静默忽略这些未实现配置
+- And 框架不能静默忽略这个未支持的 profile
 
 #### Scenario: Browser session reuses persisted profile state
 
@@ -156,6 +177,13 @@
 - When 引擎并发执行它们
 - Then browser downloader 至少按 session id 串行化实际浏览器执行
 - And 不同 session id 之间仍可继续并发
+
+#### Scenario: Browser runtime prepares session and temporary directories in an async-friendly way
+
+- Given browser downloader 需要准备 session user data dir 或临时 profile 目录
+- When 它进入实际执行路径
+- Then 目录准备和清理采用更适合 async runtime 的方式
+- And 框架不把明显同步文件 I/O 留在这条高频路径
 
 #### Scenario: Browser route remains a rendering downloader
 
@@ -187,7 +215,7 @@
 - When 用户调用 `response.follow()` 创建子请求
 - Then 子请求继承这些核心设置
 - And 子请求默认使用 `GET`
-- And 子请求不继承 body、callback 与 `dont_filter`
+- And 子请求不继承 body、callback、errback、kwargs 与 `dont_filter`
 
 ### Requirement: Response 暴露核心网络与解析状态
 
@@ -264,3 +292,10 @@
 - When 它对 `ValueQuery` 调用 `skip(...)`、`take(...)`、`last()`、`split(...)` 或 `dedup()`
 - Then 系统按声明顺序处理结果集
 - And 不会隐式改变其它未声明的 query 语义
+
+#### Scenario: Query transforms can filter and project structured values
+
+- Given 用户从响应里提取到结构化对象结果或对象数组
+- When 它对 `ValueQuery` 调用 `filter_field_present(...)`、`filter_field_equals(...)` 或 `pick_fields([...])`
+- Then 系统会在同一条 query transform 链路里完成结构过滤或字段投影
+- And 用户仍可继续对结果调用 `field(...)`、`index(...)` 等结构化读取方法

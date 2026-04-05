@@ -10,7 +10,7 @@ pub mod sqlite;
 pub mod webhook;
 
 pub use database::FieldColumnType;
-pub use file::File;
+pub use file::{File, FileFormat};
 pub use kafka::Kafka;
 pub use memory::Memory;
 pub use redis::Redis;

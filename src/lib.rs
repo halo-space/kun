@@ -1,3 +1,4 @@
+pub mod dedup;
 pub mod download;
 pub mod engine;
 pub mod error;
@@ -18,5 +19,7 @@ pub mod settings;
 pub mod spider;
 pub mod stats;
 pub mod store;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub mod validator;
 pub mod value;

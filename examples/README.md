@@ -8,14 +8,17 @@
 
 - `period_xml_spider.rs`：代码爬虫的多级回调、`meta` 透传、`follow` 链路
 - `memory.rs`：`parse -> item -> pipeline -> store::Memory`，展示最终 item 直接在 `parse()` 里组装
-- `file.rs`：`parse -> item -> pipeline -> store::File`
+- `file.rs`：`parse -> item -> pipeline -> store::File`，并演示 pretty file format
 - `sqlite.rs`：`parse -> item -> pipeline -> store::Sqlite`
-- `webhook.rs`：`parse -> item -> pipeline -> store::Webhook`
+- `webhook.rs`：`parse -> item -> pipeline -> store::Webhook`，并演示 retry/backoff
 - `redis.rs`：`parse -> item -> pipeline -> store::Redis`
 - `elasticsearch.rs`：自定义 `Store` trait，实现 Elasticsearch `_doc / _bulk` 写入
-- `kafka.rs`：`parse -> item -> pipeline -> store::Kafka`
+- `kafka.rs`：`parse -> item -> pipeline -> store::Kafka`，并演示 message key / headers
 - `concurrency_control.rs`：从 `period.xml` 扇出多个版面请求，观察并发与节流配置
+- `http_cache.rs`：`http_cache` 的 `ttl / strategy / file backend / stats` 最小用法示例
+- `custom_http_cache.rs`：自定义 `middleware::http_cache::Cache` backend，再复用内置 `HttpCache` 行为
 - `custom_middleware.rs`：引擎级中间件注册与执行顺序
+- `custom_dedup.rs`：自定义 `dedup::Dedup`，替换默认 request 去重实现
 - `custom_scheduler.rs`：自定义 `scheduler::Scheduler` 与自定义 `scheduler::checkpoint::Persist` 的接线方式
 - `plugins_demo.rs`：当前 middleware 插件接入路径、`PluginRegistry` 的 `(kind, name)` 唯一性与 override 规则
 - `ai_extraction.rs`：AI selector 直接处理 `period.xml`

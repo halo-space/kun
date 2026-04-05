@@ -33,7 +33,7 @@ override = false
 
 [[plugins]]
 name = "local"
-kind = "rules"
+kind = "store"
 entry = "myproject.plugins.local_rules:Plugin"
 "#;
 
@@ -47,7 +47,7 @@ entry = "myproject.plugins.local_rules:Plugin"
         assert_eq!(manifests[0].kind, "middleware");
         assert!(!manifests[0].r#override);
         assert_eq!(manifests[1].name, "local");
-        assert_eq!(manifests[1].kind, "rules");
+        assert_eq!(manifests[1].kind, "store");
 
         std::fs::remove_file(&tmp).ok();
     }

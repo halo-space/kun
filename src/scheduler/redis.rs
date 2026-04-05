@@ -1,16 +1,355 @@
 use crate::error::SpiderError;
-use crate::redis::{Connection, Endpoint, ErrorContext};
+use crate::redis::{Connection, ErrorContext, connect, query, validate_url};
 use crate::scheduler::checkpoint::{Checkpoint, Counts};
-use crate::scheduler::{Scheduler, Task, TaskId};
-use jiff::Timestamp;
+use crate::scheduler::{ClaimedTask, Scheduler, Task, TaskLease};
+use jiff::{SignedDuration, Timestamp};
+use redis::FromRedisValue;
 use std::cmp::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use tokio::sync::Mutex;
 
+const DEFAULT_LEASE_TIMEOUT: u64 = 300_000;
+static NEXT_WORKER_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_LEASE_ID: AtomicU64 = AtomicU64::new(1);
+const SCHEDULER_ENQUEUE_SCRIPT: &str = r#"
+-- kun:scheduler:enqueue_v1
+local tasks = KEYS[1]
+local ready = KEYS[2]
+local ready_order = KEYS[3]
+local delayed = KEYS[4]
+local sequence = KEYS[5]
+
+local task_id = ARGV[1]
+local task_json = ARGV[2]
+local ready_at = ARGV[3]
+
+local function push_ready(id)
+    local next_ready_order = redis.call('INCR', sequence)
+    redis.call('SADD', ready, id)
+    redis.call('HSET', ready_order, id, tostring(next_ready_order))
+end
+
+redis.call('HSET', tasks, task_id, task_json)
+
+if ready_at == '' then
+    push_ready(task_id)
+else
+    redis.call('ZADD', delayed, ready_at, task_id)
+end
+
+return 1
+"#;
+const SCHEDULER_RECLAIM_SCRIPT: &str = r#"
+-- kun:scheduler:reclaim_v2
+local tasks = KEYS[1]
+local ready = KEYS[2]
+local ready_order = KEYS[3]
+local delayed = KEYS[4]
+local inflight = KEYS[5]
+local inflight_deadlines = KEYS[6]
+local inflight_workers = KEYS[7]
+local inflight_leases = KEYS[8]
+local sequence = KEYS[9]
+
+local now = tonumber(ARGV[1])
+local reclaimed = 0
+
+local function push_ready(id)
+    local next_ready_order = redis.call('INCR', sequence)
+    redis.call('SADD', ready, id)
+    redis.call('HSET', ready_order, id, tostring(next_ready_order))
+end
+
+local function route_task(id, task_json)
+    local ok, task = pcall(cjson.decode, task_json)
+    if not ok then
+        return
+    end
+
+    local ready_at = task['ready_at']
+    if (not ready_at) or tonumber(ready_at) <= now then
+        push_ready(id)
+    else
+        redis.call('ZADD', delayed, tostring(ready_at), id)
+    end
+end
+
+local expired_ids = redis.call('ZRANGEBYSCORE', inflight_deadlines, '-inf', tostring(now))
+for _, task_id in ipairs(expired_ids) do
+    local removed_deadline = redis.call('ZREM', inflight_deadlines, task_id)
+    local removed_inflight = redis.call('SREM', inflight, task_id)
+    redis.call('HDEL', inflight_workers, task_id)
+    redis.call('HDEL', inflight_leases, task_id)
+    if removed_deadline > 0 or removed_inflight > 0 then
+        local task_json = redis.call('HGET', tasks, task_id)
+        if task_json then
+            route_task(task_id, task_json)
+            reclaimed = reclaimed + 1
+        end
+    end
+end
+
+return reclaimed
+"#;
+const SCHEDULER_CLAIM_READY_SCRIPT: &str = r#"
+-- kun:scheduler:claim_ready_v2
+local tasks = KEYS[1]
+local ready = KEYS[2]
+local ready_order = KEYS[3]
+local delayed = KEYS[4]
+local inflight = KEYS[5]
+local inflight_deadlines = KEYS[6]
+local inflight_workers = KEYS[7]
+local inflight_leases = KEYS[8]
+local sequence = KEYS[9]
+
+local now = tonumber(ARGV[1])
+local lease_timeout = ARGV[2]
+local worker_id = ARGV[3]
+local lease_id = ARGV[4]
+local max_ready_order = 9007199254740991
+
+local function push_ready(id)
+    local next_ready_order = redis.call('INCR', sequence)
+    redis.call('SADD', ready, id)
+    redis.call('HSET', ready_order, id, tostring(next_ready_order))
+end
+
+local function route_task(id, task_json)
+    local ok, task = pcall(cjson.decode, task_json)
+    if not ok then
+        return
+    end
+
+    local ready_at = task['ready_at']
+    if (not ready_at) or tonumber(ready_at) <= now then
+        push_ready(id)
+    else
+        redis.call('ZADD', delayed, tostring(ready_at), id)
+    end
+end
+
+local expired_ids = redis.call('ZRANGEBYSCORE', inflight_deadlines, '-inf', tostring(now))
+for _, task_id in ipairs(expired_ids) do
+    local removed_deadline = redis.call('ZREM', inflight_deadlines, task_id)
+    local removed_inflight = redis.call('SREM', inflight, task_id)
+    redis.call('HDEL', inflight_workers, task_id)
+    redis.call('HDEL', inflight_leases, task_id)
+    if removed_deadline > 0 or removed_inflight > 0 then
+        local task_json = redis.call('HGET', tasks, task_id)
+        if task_json then
+            route_task(task_id, task_json)
+        end
+    end
+end
+
+local delayed_ids = redis.call('ZRANGEBYSCORE', delayed, '-inf', tostring(now))
+for _, task_id in ipairs(delayed_ids) do
+    if redis.call('ZREM', delayed, task_id) > 0 then
+        local task_json = redis.call('HGET', tasks, task_id)
+        if task_json then
+            push_ready(task_id)
+        end
+    end
+end
+
+local best_task_id = nil
+local best_task_json = nil
+local best_priority = nil
+local best_depth = nil
+local best_order = nil
+
+local ready_ids = redis.call('SMEMBERS', ready)
+for _, task_id in ipairs(ready_ids) do
+    local task_json = redis.call('HGET', tasks, task_id)
+    if not task_json then
+        redis.call('SREM', ready, task_id)
+        redis.call('HDEL', ready_order, task_id)
+    else
+        local ok, task = pcall(cjson.decode, task_json)
+        if not ok then
+            redis.call('SREM', ready, task_id)
+            redis.call('HDEL', ready_order, task_id)
+        else
+            local priority = tonumber(task['priority']) or 0
+            local depth = tonumber(task['depth']) or 0
+            local order = tonumber(redis.call('HGET', ready_order, task_id)) or max_ready_order
+            if (not best_task_id)
+                or priority > best_priority
+                or (priority == best_priority and depth < best_depth)
+                or (priority == best_priority and depth == best_depth and order < best_order)
+                or (priority == best_priority and depth == best_depth and order == best_order and task_id < best_task_id)
+            then
+                best_task_id = task_id
+                best_task_json = task_json
+                best_priority = priority
+                best_depth = depth
+                best_order = order
+            end
+        end
+    end
+end
+
+if not best_task_id then
+    return nil
+end
+
+redis.call('SREM', ready, best_task_id)
+redis.call('HDEL', ready_order, best_task_id)
+redis.call('SADD', inflight, best_task_id)
+redis.call('ZREM', inflight_deadlines, best_task_id)
+redis.call('HSET', inflight_workers, best_task_id, worker_id)
+redis.call('HSET', inflight_leases, best_task_id, lease_id)
+
+if lease_timeout ~= '' then
+    local deadline = now + tonumber(lease_timeout)
+    redis.call('ZADD', inflight_deadlines, tostring(deadline), best_task_id)
+end
+
+return {best_task_json, lease_id}
+"#;
+const SCHEDULER_COMPLETE_SCRIPT: &str = r#"
+-- kun:scheduler:complete_v2
+local tasks = KEYS[1]
+local ready = KEYS[2]
+local ready_order = KEYS[3]
+local delayed = KEYS[4]
+local inflight = KEYS[5]
+local inflight_deadlines = KEYS[6]
+local inflight_workers = KEYS[7]
+local inflight_leases = KEYS[8]
+
+local task_id = ARGV[1]
+local worker_id = ARGV[2]
+local lease_id = ARGV[3]
+
+local current_worker = redis.call('HGET', inflight_workers, task_id)
+local current_lease = redis.call('HGET', inflight_leases, task_id)
+
+if (not current_worker) or (not current_lease) then
+    return 0
+end
+
+if current_worker ~= worker_id or current_lease ~= lease_id then
+    return -1
+end
+
+redis.call('ZREM', inflight_deadlines, task_id)
+redis.call('SREM', inflight, task_id)
+redis.call('SREM', ready, task_id)
+redis.call('ZREM', delayed, task_id)
+redis.call('HDEL', ready_order, task_id)
+redis.call('HDEL', inflight_workers, task_id)
+redis.call('HDEL', inflight_leases, task_id)
+redis.call('HDEL', tasks, task_id)
+return 1
+"#;
+const SCHEDULER_REQUEUE_SCRIPT: &str = r#"
+-- kun:scheduler:requeue_v2
+local tasks = KEYS[1]
+local ready = KEYS[2]
+local ready_order = KEYS[3]
+local delayed = KEYS[4]
+local inflight = KEYS[5]
+local inflight_deadlines = KEYS[6]
+local inflight_workers = KEYS[7]
+local inflight_leases = KEYS[8]
+local sequence = KEYS[9]
+
+local task_id = ARGV[1]
+local now = tonumber(ARGV[2])
+local worker_id = ARGV[3]
+local lease_id = ARGV[4]
+
+local function push_ready(id)
+    local next_ready_order = redis.call('INCR', sequence)
+    redis.call('SADD', ready, id)
+    redis.call('HSET', ready_order, id, tostring(next_ready_order))
+end
+
+local current_worker = redis.call('HGET', inflight_workers, task_id)
+local current_lease = redis.call('HGET', inflight_leases, task_id)
+
+if (not current_worker) or (not current_lease) then
+    return 0
+end
+
+if current_worker ~= worker_id or current_lease ~= lease_id then
+    return -1
+end
+
+local task_json = redis.call('HGET', tasks, task_id)
+
+redis.call('SREM', inflight, task_id)
+redis.call('ZREM', inflight_deadlines, task_id)
+redis.call('HDEL', inflight_workers, task_id)
+redis.call('HDEL', inflight_leases, task_id)
+redis.call('SREM', ready, task_id)
+redis.call('HDEL', ready_order, task_id)
+redis.call('ZREM', delayed, task_id)
+
+if not task_json then
+    return 0
+end
+
+local ok, task = pcall(cjson.decode, task_json)
+if not ok then
+    return redis.error_reply('ERR invalid task payload')
+end
+
+local ready_at = task['ready_at']
+if (not ready_at) or tonumber(ready_at) <= now then
+    push_ready(task_id)
+else
+    redis.call('ZADD', delayed, tostring(ready_at), task_id)
+end
+
+return 1
+"#;
+const SCHEDULER_HEARTBEAT_SCRIPT: &str = r#"
+-- kun:scheduler:heartbeat_v1
+local inflight = KEYS[1]
+local inflight_deadlines = KEYS[2]
+local inflight_workers = KEYS[3]
+local inflight_leases = KEYS[4]
+
+local task_id = ARGV[1]
+local deadline = ARGV[2]
+local worker_id = ARGV[3]
+local lease_id = ARGV[4]
+
+local current_worker = redis.call('HGET', inflight_workers, task_id)
+local current_lease = redis.call('HGET', inflight_leases, task_id)
+
+if (not current_worker) or (not current_lease) then
+    return 0
+end
+
+if current_worker ~= worker_id or current_lease ~= lease_id then
+    return -1
+end
+
+if redis.call('SREM', inflight, task_id) == 0 then
+    return 0
+end
+redis.call('SADD', inflight, task_id)
+redis.call('ZADD', inflight_deadlines, deadline, task_id)
+return 1
+"#;
+
 #[derive(Debug, Clone)]
+/// Redis-backed durable scheduler.
+///
+/// This scheduler persists `ready / delayed / inflight` buckets directly in
+/// Redis. Unlike checkpoint persistence, it also owns runtime recovery
+/// semantics such as reclaiming stale `inflight` tasks after a lease timeout.
 pub struct Redis {
     url: String,
     namespace: String,
+    worker_id: String,
+    lease_timeout: Option<u64>,
+    heartbeat_interval: Option<u64>,
     connection: Arc<Mutex<Option<Connection>>>,
 }
 
@@ -19,6 +358,9 @@ impl Redis {
         Self {
             url: url.into(),
             namespace: namespace.into(),
+            worker_id: next_worker_id(),
+            lease_timeout: Some(DEFAULT_LEASE_TIMEOUT),
+            heartbeat_interval: None,
             connection: Arc::new(Mutex::new(None)),
         }
     }
@@ -31,35 +373,52 @@ impl Redis {
         &self.namespace
     }
 
+    pub fn worker_id(&self) -> &str {
+        &self.worker_id
+    }
+
+    /// Overrides the logical worker id used for task ownership validation.
+    pub fn with_worker_id(mut self, worker_id: impl Into<String>) -> Self {
+        self.worker_id = worker_id.into();
+        self
+    }
+
+    /// Overrides how long an `inflight` task lease may stay unresolved before
+    /// the scheduler reclaims it back into the runnable buckets.
+    pub fn with_lease_timeout(mut self, timeout: SignedDuration) -> Self {
+        self.lease_timeout = Some(non_negative_milliseconds(timeout));
+        self
+    }
+
+    /// Overrides how often the engine should renew claimed task leases.
+    pub fn with_heartbeat_interval(mut self, interval: SignedDuration) -> Self {
+        self.heartbeat_interval = Some(non_negative_milliseconds(interval));
+        self
+    }
+
+    /// Disables automatic stale `inflight` reclaim for this Redis scheduler.
+    pub fn without_lease_timeout(mut self) -> Self {
+        self.lease_timeout = None;
+        self.heartbeat_interval = None;
+        self
+    }
+
     pub async fn checkpoint(&self) -> Result<Checkpoint, SpiderError> {
         let mut guard = self.connection().await?;
         let connection = self.connection_mut(&mut guard)?;
+        self.reclaim_expired_inflight(connection).await?;
         let keys = self.keys();
 
         let ready_tasks = self.load_ready_tasks(connection).await?;
-        let delayed_ids = connection
-            .send_command(
-                &[
-                    "ZRANGE".to_string(),
-                    keys.delayed.clone(),
-                    "0".to_string(),
-                    "-1".to_string(),
-                ],
-                "redis scheduler",
-                ErrorContext::Scheduler,
-            )
-            .await?
-            .into_strings("redis scheduler", ErrorContext::Scheduler)?;
+        let delayed_ids: Vec<String> = scheduler_query(
+            connection,
+            redis_command("ZRANGE", [&keys.delayed, "0", "-1"]),
+        )
+        .await?;
         let delayed = self.load_tasks(connection, &delayed_ids).await?;
 
-        let mut inflight_ids = connection
-            .send_command(
-                &["SMEMBERS".to_string(), keys.inflight.clone()],
-                "redis scheduler",
-                ErrorContext::Scheduler,
-            )
-            .await?
-            .into_strings("redis scheduler", ErrorContext::Scheduler)?;
+        let mut inflight_ids: Vec<String> =
+            scheduler_query(connection, redis_command("SMEMBERS", [&keys.inflight])).await?;
         inflight_ids.sort();
         let inflight = self.load_tasks(connection, &inflight_ids).await?;
 
@@ -73,57 +432,33 @@ impl Redis {
     pub async fn counts(&self) -> Result<Counts, SpiderError> {
         let mut guard = self.connection().await?;
         let connection = self.connection_mut(&mut guard)?;
+        self.reclaim_expired_inflight(connection).await?;
         let keys = self.keys();
 
-        let ready = connection
-            .send_command(
-                &["SCARD".to_string(), keys.ready.clone()],
-                "redis scheduler",
-                ErrorContext::Scheduler,
-            )
-            .await?
-            .into_integer("redis scheduler", ErrorContext::Scheduler)?;
-        let delayed = connection
-            .send_command(
-                &["ZCARD".to_string(), keys.delayed.clone()],
-                "redis scheduler",
-                ErrorContext::Scheduler,
-            )
-            .await?
-            .into_integer("redis scheduler", ErrorContext::Scheduler)?;
-        let inflight = connection
-            .send_command(
-                &["SCARD".to_string(), keys.inflight.clone()],
-                "redis scheduler",
-                ErrorContext::Scheduler,
-            )
-            .await?
-            .into_integer("redis scheduler", ErrorContext::Scheduler)?;
+        let ready: usize =
+            scheduler_query(connection, redis_command("SCARD", [&keys.ready])).await?;
+        let delayed: usize =
+            scheduler_query(connection, redis_command("ZCARD", [&keys.delayed])).await?;
+        let inflight: usize =
+            scheduler_query(connection, redis_command("SCARD", [&keys.inflight])).await?;
 
         Ok(Counts {
-            ready: usize::try_from(ready).unwrap_or_default(),
-            delayed: usize::try_from(delayed).unwrap_or_default(),
-            inflight: usize::try_from(inflight).unwrap_or_default(),
+            ready,
+            delayed,
+            inflight,
         })
     }
 
     pub async fn close(&self) -> Result<(), SpiderError> {
-        let connection = {
+        let _connection = {
             let mut guard = self.connection.lock().await;
             guard.take()
         };
-
-        if let Some(mut connection) = connection {
-            connection
-                .close("redis scheduler", ErrorContext::Scheduler)
-                .await?;
-        }
-
         Ok(())
     }
 
-    fn validate(&self) -> Result<Endpoint, SpiderError> {
-        let endpoint = Endpoint::parse(&self.url, "redis scheduler", ErrorContext::Scheduler)?;
+    fn validate(&self) -> Result<(), SpiderError> {
+        validate_url(&self.url, "redis scheduler", ErrorContext::Scheduler)?;
 
         if self.namespace.trim().is_empty() {
             return Err(SpiderError::scheduler(
@@ -131,19 +466,23 @@ impl Redis {
             ));
         }
 
-        Ok(endpoint)
+        if self.worker_id.trim().is_empty() {
+            return Err(SpiderError::scheduler(
+                "redis scheduler worker_id cannot be empty",
+            ));
+        }
+
+        Ok(())
     }
 
     async fn connection(
         &self,
     ) -> Result<tokio::sync::MutexGuard<'_, Option<Connection>>, SpiderError> {
-        let endpoint = self.validate()?;
+        self.validate()?;
         let mut guard = self.connection.lock().await;
 
         if guard.is_none() {
-            *guard = Some(
-                Connection::connect(&endpoint, "redis scheduler", ErrorContext::Scheduler).await?,
-            );
+            *guard = Some(connect(&self.url, "redis scheduler", ErrorContext::Scheduler).await?);
         }
 
         Ok(guard)
@@ -165,8 +504,31 @@ impl Redis {
             ready_order: format!("{}:ready_order", self.namespace),
             delayed: format!("{}:delayed", self.namespace),
             inflight: format!("{}:inflight", self.namespace),
+            inflight_deadlines: format!("{}:inflight_deadlines", self.namespace),
+            inflight_workers: format!("{}:inflight_workers", self.namespace),
+            inflight_leases: format!("{}:inflight_leases", self.namespace),
             sequence: format!("{}:ready_sequence", self.namespace),
         }
+    }
+
+    fn heartbeat_interval_millis(&self) -> Option<u64> {
+        let lease_timeout = self.lease_timeout?;
+        Some(
+            self.heartbeat_interval
+                .unwrap_or_else(|| default_heartbeat_interval(lease_timeout)),
+        )
+    }
+
+    fn validate_lease_worker(&self, lease: &TaskLease) -> Result<(), SpiderError> {
+        if lease.worker_id() != self.worker_id {
+            return Err(SpiderError::scheduler(format!(
+                "redis scheduler lease belongs to worker `{}`, current worker is `{}`",
+                lease.worker_id(),
+                self.worker_id
+            )));
+        }
+
+        Ok(())
     }
 
     async fn enqueue_internal(
@@ -178,106 +540,57 @@ impl Redis {
         let task_json = serde_json::to_string(&task).map_err(|error| {
             SpiderError::scheduler(format!("failed to encode redis scheduler task: {error}"))
         })?;
-        connection
-            .send_command(
-                &[
-                    "HSET".to_string(),
-                    keys.tasks.clone(),
-                    task.id.as_str().to_string(),
-                    task_json,
-                ],
-                "redis scheduler",
-                ErrorContext::Scheduler,
-            )
-            .await?;
+        let ready_at = task
+            .ready_at
+            .map(|value| value.to_string())
+            .unwrap_or_default();
 
-        if task.is_ready() {
-            self.push_ready_task(connection, task.id.as_str()).await
-        } else {
-            connection
-                .send_command(
-                    &[
-                        "ZADD".to_string(),
-                        keys.delayed.clone(),
-                        i64::try_from(task.ready_at_ms.unwrap_or_default())
-                            .unwrap_or_default()
-                            .to_string(),
-                        task.id.as_str().to_string(),
-                    ],
-                    "redis scheduler",
-                    ErrorContext::Scheduler,
-                )
-                .await?;
-            Ok(())
-        }
-    }
-
-    async fn push_ready_task(
-        &self,
-        connection: &mut Connection,
-        task_id: &str,
-    ) -> Result<(), SpiderError> {
-        let keys = self.keys();
-        let ready_order = self.next_ready_order(connection).await?;
-        connection
-            .send_command(
-                &["SADD".to_string(), keys.ready.clone(), task_id.to_string()],
-                "redis scheduler",
-                ErrorContext::Scheduler,
-            )
-            .await?;
-        connection
-            .send_command(
-                &[
-                    "HSET".to_string(),
-                    keys.ready_order.clone(),
-                    task_id.to_string(),
-                    ready_order.to_string(),
-                ],
-                "redis scheduler",
-                ErrorContext::Scheduler,
-            )
-            .await?;
+        let _: i64 = scheduler_eval(
+            connection,
+            SCHEDULER_ENQUEUE_SCRIPT,
+            &[
+                keys.tasks.as_str(),
+                keys.ready.as_str(),
+                keys.ready_order.as_str(),
+                keys.delayed.as_str(),
+                keys.sequence.as_str(),
+            ],
+            &[task.id.as_str(), task_json.as_str(), ready_at.as_str()],
+        )
+        .await?;
         Ok(())
     }
 
-    async fn next_ready_order(&self, connection: &mut Connection) -> Result<i64, SpiderError> {
-        let keys = self.keys();
-        connection
-            .send_command(
-                &["INCR".to_string(), keys.sequence.clone()],
-                "redis scheduler",
-                ErrorContext::Scheduler,
-            )
-            .await?
-            .into_integer("redis scheduler", ErrorContext::Scheduler)
-    }
+    async fn reclaim_expired_inflight(
+        &self,
+        connection: &mut Connection,
+    ) -> Result<(), SpiderError> {
+        let Some(_lease_timeout) = self.lease_timeout else {
+            return Ok(());
+        };
 
-    async fn promote_delayed(&self, connection: &mut Connection) -> Result<(), SpiderError> {
         let keys = self.keys();
-        let delayed_ids = connection
-            .send_command(
-                &[
-                    "ZRANGEBYSCORE".to_string(),
-                    keys.delayed.clone(),
-                    "-inf".to_string(),
-                    now_ms().to_string(),
-                ],
-                "redis scheduler",
-                ErrorContext::Scheduler,
-            )
-            .await?
-            .into_strings("redis scheduler", ErrorContext::Scheduler)?;
+        let now = now().to_string();
+        let reclaimed: i64 = scheduler_eval(
+            connection,
+            SCHEDULER_RECLAIM_SCRIPT,
+            &[
+                keys.tasks.as_str(),
+                keys.ready.as_str(),
+                keys.ready_order.as_str(),
+                keys.delayed.as_str(),
+                keys.inflight.as_str(),
+                keys.inflight_deadlines.as_str(),
+                keys.inflight_workers.as_str(),
+                keys.inflight_leases.as_str(),
+                keys.sequence.as_str(),
+            ],
+            &[now.as_str()],
+        )
+        .await?;
 
-        for task_id in delayed_ids {
-            connection
-                .send_command(
-                    &["ZREM".to_string(), keys.delayed.clone(), task_id.clone()],
-                    "redis scheduler",
-                    ErrorContext::Scheduler,
-                )
-                .await?;
-            self.push_ready_task(connection, &task_id).await?;
+        for _ in 0..usize::try_from(reclaimed).unwrap_or_default() {
+            tracing::warn!("redis scheduler reclaimed stale inflight task");
         }
 
         Ok(())
@@ -288,14 +601,8 @@ impl Redis {
         connection: &mut Connection,
     ) -> Result<Vec<(Task, i64)>, SpiderError> {
         let keys = self.keys();
-        let ready_ids = connection
-            .send_command(
-                &["SMEMBERS".to_string(), keys.ready.clone()],
-                "redis scheduler",
-                ErrorContext::Scheduler,
-            )
-            .await?
-            .into_strings("redis scheduler", ErrorContext::Scheduler)?;
+        let ready_ids: Vec<String> =
+            scheduler_query(connection, redis_command("SMEMBERS", [&keys.ready])).await?;
 
         let mut tasks = Vec::with_capacity(ready_ids.len());
         for task_id in ready_ids {
@@ -313,25 +620,12 @@ impl Redis {
         task_id: &str,
     ) -> Result<i64, SpiderError> {
         let keys = self.keys();
-        let reply = connection
-            .send_command(
-                &[
-                    "HGET".to_string(),
-                    keys.ready_order.clone(),
-                    task_id.to_string(),
-                ],
-                "redis scheduler",
-                ErrorContext::Scheduler,
-            )
-            .await?;
-        let Some(value) = reply.into_bulk("redis scheduler", ErrorContext::Scheduler)? else {
-            return Ok(i64::MAX);
-        };
-        value.parse::<i64>().map_err(|error| {
-            SpiderError::scheduler(format!(
-                "redis scheduler returned invalid ready order: {error}"
-            ))
-        })
+        let ready_order: Option<i64> = scheduler_query(
+            connection,
+            redis_command("HGET", [&keys.ready_order, task_id]),
+        )
+        .await?;
+        Ok(ready_order.unwrap_or(i64::MAX))
     }
 
     async fn load_tasks(
@@ -352,174 +646,187 @@ impl Redis {
         task_id: &str,
     ) -> Result<Task, SpiderError> {
         let keys = self.keys();
-        let reply = connection
-            .send_command(
-                &["HGET".to_string(), keys.tasks.clone(), task_id.to_string()],
-                "redis scheduler",
-                ErrorContext::Scheduler,
-            )
-            .await?;
-        let task_json = reply
-            .into_bulk("redis scheduler", ErrorContext::Scheduler)?
-            .ok_or_else(|| {
-                SpiderError::scheduler(format!(
-                    "redis scheduler task payload is missing for task id {task_id}"
-                ))
-            })?;
+        let task_json: Option<String> =
+            scheduler_query(connection, redis_command("HGET", [&keys.tasks, task_id])).await?;
+        let task_json = task_json.ok_or_else(|| {
+            SpiderError::scheduler(format!(
+                "redis scheduler task payload is missing for task id {task_id}"
+            ))
+        })?;
+
         serde_json::from_str(&task_json).map_err(|error| {
             SpiderError::scheduler(format!("failed to decode redis scheduler task: {error}"))
         })
     }
 
-    async fn remove_completed_task(
+    async fn heartbeat_internal(
         &self,
         connection: &mut Connection,
-        task_id: &TaskId,
+        lease: &TaskLease,
     ) -> Result<(), SpiderError> {
+        let Some(heartbeat_interval) = self.heartbeat_interval_millis() else {
+            return Ok(());
+        };
+
+        let Some(lease_timeout) = self.lease_timeout else {
+            return Ok(());
+        };
+
+        let _ = heartbeat_interval;
         let keys = self.keys();
-        let task_id = task_id.as_str().to_string();
-        connection
-            .send_command(
-                &["SREM".to_string(), keys.inflight.clone(), task_id.clone()],
-                "redis scheduler",
-                ErrorContext::Scheduler,
-            )
-            .await?;
-        connection
-            .send_command(
-                &["SREM".to_string(), keys.ready.clone(), task_id.clone()],
-                "redis scheduler",
-                ErrorContext::Scheduler,
-            )
-            .await?;
-        connection
-            .send_command(
-                &["ZREM".to_string(), keys.delayed.clone(), task_id.clone()],
-                "redis scheduler",
-                ErrorContext::Scheduler,
-            )
-            .await?;
-        connection
-            .send_command(
-                &[
-                    "HDEL".to_string(),
-                    keys.ready_order.clone(),
-                    task_id.clone(),
-                ],
-                "redis scheduler",
-                ErrorContext::Scheduler,
-            )
-            .await?;
-        connection
-            .send_command(
-                &["HDEL".to_string(), keys.tasks.clone(), task_id],
-                "redis scheduler",
-                ErrorContext::Scheduler,
-            )
-            .await?;
-        Ok(())
+        let deadline = now()
+            .saturating_add(i64::try_from(lease_timeout).unwrap_or(i64::MAX))
+            .to_string();
+        let result: i64 = scheduler_eval(
+            connection,
+            SCHEDULER_HEARTBEAT_SCRIPT,
+            &[
+                keys.inflight.as_str(),
+                keys.inflight_deadlines.as_str(),
+                keys.inflight_workers.as_str(),
+                keys.inflight_leases.as_str(),
+            ],
+            &[
+                lease.task_id().as_str(),
+                deadline.as_str(),
+                lease.worker_id(),
+                lease.lease_id(),
+            ],
+        )
+        .await?;
+        ensure_lease_transition("heartbeat", lease, result)
     }
 }
 
 impl Scheduler for Redis {
-    async fn enqueue(&mut self, task: Task) -> Result<(), SpiderError> {
+    async fn enqueue(&self, task: Task) -> Result<(), SpiderError> {
         let mut guard = self.connection().await?;
         let connection = self.connection_mut(&mut guard)?;
         self.enqueue_internal(connection, task).await
     }
 
-    async fn take_ready(&mut self) -> Result<Option<Task>, SpiderError> {
+    async fn take_ready(&self) -> Result<Option<ClaimedTask>, SpiderError> {
         let mut guard = self.connection().await?;
         let connection = self.connection_mut(&mut guard)?;
-        self.promote_delayed(connection).await?;
+        let keys = self.keys();
+        let now = now().to_string();
+        let lease_timeout = self
+            .lease_timeout
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        let lease_id = next_lease_id(&self.worker_id);
+        let result: Option<Vec<String>> = scheduler_eval(
+            connection,
+            SCHEDULER_CLAIM_READY_SCRIPT,
+            &[
+                keys.tasks.as_str(),
+                keys.ready.as_str(),
+                keys.ready_order.as_str(),
+                keys.delayed.as_str(),
+                keys.inflight.as_str(),
+                keys.inflight_deadlines.as_str(),
+                keys.inflight_workers.as_str(),
+                keys.inflight_leases.as_str(),
+                keys.sequence.as_str(),
+            ],
+            &[
+                now.as_str(),
+                lease_timeout.as_str(),
+                self.worker_id.as_str(),
+                lease_id.as_str(),
+            ],
+        )
+        .await?;
 
-        let ready_tasks = self.load_ready_tasks(connection).await?;
-        let Some((task, _)) = ready_tasks.into_iter().next() else {
+        let Some(result) = result else {
             return Ok(None);
         };
-
-        let keys = self.keys();
-        connection
-            .send_command(
-                &[
-                    "SREM".to_string(),
-                    keys.ready.clone(),
-                    task.id.as_str().to_string(),
-                ],
-                "redis scheduler",
-                ErrorContext::Scheduler,
-            )
-            .await?;
-        connection
-            .send_command(
-                &[
-                    "HDEL".to_string(),
-                    keys.ready_order.clone(),
-                    task.id.as_str().to_string(),
-                ],
-                "redis scheduler",
-                ErrorContext::Scheduler,
-            )
-            .await?;
-        connection
-            .send_command(
-                &[
-                    "SADD".to_string(),
-                    keys.inflight.clone(),
-                    task.id.as_str().to_string(),
-                ],
-                "redis scheduler",
-                ErrorContext::Scheduler,
-            )
-            .await?;
-        Ok(Some(task))
-    }
-
-    async fn complete(&mut self, task_id: &TaskId) -> Result<(), SpiderError> {
-        let mut guard = self.connection().await?;
-        let connection = self.connection_mut(&mut guard)?;
-        self.remove_completed_task(connection, task_id).await
-    }
-
-    async fn requeue(&mut self, task_id: &TaskId) -> Result<(), SpiderError> {
-        let mut guard = self.connection().await?;
-        let connection = self.connection_mut(&mut guard)?;
-        let task = match self.load_task(connection, task_id.as_str()).await {
-            Ok(task) => task,
-            Err(_) => return Ok(()),
-        };
-        let keys = self.keys();
-        connection
-            .send_command(
-                &[
-                    "SREM".to_string(),
-                    keys.inflight.clone(),
-                    task_id.as_str().to_string(),
-                ],
-                "redis scheduler",
-                ErrorContext::Scheduler,
-            )
-            .await?;
-
-        if task.is_ready() {
-            self.push_ready_task(connection, task_id.as_str()).await
-        } else {
-            connection
-                .send_command(
-                    &[
-                        "ZADD".to_string(),
-                        keys.delayed.clone(),
-                        i64::try_from(task.ready_at_ms.unwrap_or_default())
-                            .unwrap_or_default()
-                            .to_string(),
-                        task_id.as_str().to_string(),
-                    ],
-                    "redis scheduler",
-                    ErrorContext::Scheduler,
-                )
-                .await?;
-            Ok(())
+        if result.len() != 2 {
+            return Err(SpiderError::scheduler(
+                "redis scheduler claim script returned invalid lease payload",
+            ));
         }
+        let task_json = result[0].as_str();
+        let lease_id = result[1].clone();
+        let task: Task = serde_json::from_str(task_json).map_err(|error| {
+            SpiderError::scheduler(format!("failed to decode redis scheduler task: {error}"))
+        })?;
+        let lease = TaskLease::new(task.id.clone(), self.worker_id.clone(), lease_id);
+
+        Ok(Some(ClaimedTask::new(task, lease)))
+    }
+
+    async fn complete(&self, lease: &TaskLease) -> Result<(), SpiderError> {
+        self.validate_lease_worker(lease)?;
+        let mut guard = self.connection().await?;
+        let connection = self.connection_mut(&mut guard)?;
+        let keys = self.keys();
+        let result: i64 = scheduler_eval(
+            connection,
+            SCHEDULER_COMPLETE_SCRIPT,
+            &[
+                keys.tasks.as_str(),
+                keys.ready.as_str(),
+                keys.ready_order.as_str(),
+                keys.delayed.as_str(),
+                keys.inflight.as_str(),
+                keys.inflight_deadlines.as_str(),
+                keys.inflight_workers.as_str(),
+                keys.inflight_leases.as_str(),
+            ],
+            &[
+                lease.task_id().as_str(),
+                lease.worker_id(),
+                lease.lease_id(),
+            ],
+        )
+        .await?;
+        ensure_lease_transition("complete", lease, result)
+    }
+
+    async fn requeue(&self, lease: &TaskLease) -> Result<(), SpiderError> {
+        self.validate_lease_worker(lease)?;
+        let mut guard = self.connection().await?;
+        let connection = self.connection_mut(&mut guard)?;
+        let keys = self.keys();
+        let now = now().to_string();
+        let result: i64 = scheduler_eval(
+            connection,
+            SCHEDULER_REQUEUE_SCRIPT,
+            &[
+                keys.tasks.as_str(),
+                keys.ready.as_str(),
+                keys.ready_order.as_str(),
+                keys.delayed.as_str(),
+                keys.inflight.as_str(),
+                keys.inflight_deadlines.as_str(),
+                keys.inflight_workers.as_str(),
+                keys.inflight_leases.as_str(),
+                keys.sequence.as_str(),
+            ],
+            &[
+                lease.task_id().as_str(),
+                now.as_str(),
+                lease.worker_id(),
+                lease.lease_id(),
+            ],
+        )
+        .await?;
+        ensure_lease_transition("requeue", lease, result)
+    }
+
+    async fn heartbeat(&self, lease: &TaskLease) -> Result<(), SpiderError> {
+        self.validate_lease_worker(lease)?;
+        let mut guard = self.connection().await?;
+        let connection = self.connection_mut(&mut guard)?;
+        self.heartbeat_internal(connection, lease).await
+    }
+
+    fn heartbeat_interval(&self) -> Option<SignedDuration> {
+        let millis = self.heartbeat_interval_millis()?;
+        Some(SignedDuration::from_millis(
+            i64::try_from(millis).unwrap_or(i64::MAX),
+        ))
     }
 
     async fn has_pending(&self) -> Result<bool, SpiderError> {
@@ -534,6 +841,9 @@ struct Keys {
     ready_order: String,
     delayed: String,
     inflight: String,
+    inflight_deadlines: String,
+    inflight_workers: String,
+    inflight_leases: String,
     sequence: String,
 }
 
@@ -547,31 +857,130 @@ fn ready_task_ordering(left: &(Task, i64), right: &(Task, i64)) -> Ordering {
         .then_with(|| left.0.id.as_str().cmp(right.0.id.as_str()))
 }
 
-fn now_ms() -> i64 {
+fn now() -> i64 {
     Timestamp::now().as_millisecond()
+}
+
+fn non_negative_milliseconds(duration: SignedDuration) -> u64 {
+    let millis = duration.as_millis();
+    if millis <= 0 {
+        0
+    } else {
+        u64::try_from(millis).unwrap_or_default()
+    }
+}
+
+fn default_heartbeat_interval(lease_timeout: u64) -> u64 {
+    (lease_timeout / 2).max(1)
+}
+
+fn next_worker_id() -> String {
+    format!(
+        "worker-{}-{}-{}",
+        std::process::id(),
+        now(),
+        NEXT_WORKER_ID.fetch_add(1, AtomicOrdering::Relaxed)
+    )
+}
+
+fn next_lease_id(worker_id: &str) -> String {
+    format!(
+        "{worker_id}-lease-{}-{}",
+        now(),
+        NEXT_LEASE_ID.fetch_add(1, AtomicOrdering::Relaxed)
+    )
+}
+
+fn ensure_lease_transition(
+    action: &str,
+    lease: &TaskLease,
+    result: i64,
+) -> Result<(), SpiderError> {
+    match result {
+        1 => Ok(()),
+        -1 => Err(SpiderError::scheduler(format!(
+            "redis scheduler cannot {action} task `{}` because the lease is no longer owned by worker `{}`",
+            lease.task_id().as_str(),
+            lease.worker_id()
+        ))),
+        _ => Err(SpiderError::scheduler(format!(
+            "redis scheduler cannot {action} task `{}` because its lease is no longer active",
+            lease.task_id().as_str()
+        ))),
+    }
+}
+
+fn redis_command<T>(name: &'static str, args: impl IntoIterator<Item = T>) -> redis::Cmd
+where
+    T: AsRef<str>,
+{
+    let mut command = redis::cmd(name);
+    for arg in args {
+        command.arg(arg.as_ref());
+    }
+    command
+}
+
+async fn scheduler_query<T>(
+    connection: &mut Connection,
+    mut command: redis::Cmd,
+) -> Result<T, SpiderError>
+where
+    T: FromRedisValue,
+{
+    query(
+        connection,
+        &mut command,
+        "redis scheduler",
+        ErrorContext::Scheduler,
+    )
+    .await
+}
+
+async fn scheduler_eval<T>(
+    connection: &mut Connection,
+    script: &str,
+    keys: &[&str],
+    args: &[&str],
+) -> Result<T, SpiderError>
+where
+    T: FromRedisValue,
+{
+    let mut command = redis::cmd("EVAL");
+    command.arg(script).arg(keys.len());
+    for key in keys {
+        command.arg(key);
+    }
+    for arg in args {
+        command.arg(arg);
+    }
+    scheduler_query(connection, command).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::redis::test_support::spawn_redis_server;
     use crate::request::Request;
+    use crate::test_support::redis::spawn_redis_server;
     use jiff::SignedDuration;
 
     #[tokio::test]
     async fn redis_scheduler_supports_async_enqueue_and_take_ready() {
         let (url, _commands_rx, server_handle) = spawn_redis_server().await;
-        let mut scheduler = Redis::new(format!("redis://{url}"), "news");
+        let scheduler = Redis::new(format!("redis://{url}"), "news");
         let task = Task::new(Request::new("https://example.com"));
 
         scheduler.enqueue(task.clone()).await.unwrap();
         let taken = scheduler.take_ready().await.unwrap();
 
         assert_eq!(
-            taken.as_ref().map(|task| task.id.as_str()),
+            taken.as_ref().map(|task| task.task.id.as_str()),
             Some(task.id.as_str())
         );
-        assert_eq!(taken.map(|task| task.request.url), Some(task.request.url));
+        assert_eq!(
+            taken.map(|task| task.task.request.url),
+            Some(task.request.url)
+        );
 
         scheduler.close().await.unwrap();
         server_handle.await.unwrap().unwrap();
@@ -580,7 +989,7 @@ mod tests {
     #[tokio::test]
     async fn redis_scheduler_prefers_higher_priority_then_lower_depth() {
         let (url, _commands_rx, server_handle) = spawn_redis_server().await;
-        let mut scheduler = Redis::new(format!("redis://{url}"), "ordering");
+        let scheduler = Redis::new(format!("redis://{url}"), "ordering");
         scheduler
             .enqueue(
                 Task::new(Request::new("https://example.com/depth-2"))
@@ -610,9 +1019,9 @@ mod tests {
         let second = scheduler.take_ready().await.unwrap().unwrap();
         let third = scheduler.take_ready().await.unwrap().unwrap();
 
-        assert_eq!(first.request.url, "https://example.com/high-priority");
-        assert_eq!(second.request.url, "https://example.com/depth-0");
-        assert_eq!(third.request.url, "https://example.com/depth-2");
+        assert_eq!(first.task.request.url, "https://example.com/high-priority");
+        assert_eq!(second.task.request.url, "https://example.com/depth-0");
+        assert_eq!(third.task.request.url, "https://example.com/depth-2");
 
         scheduler.close().await.unwrap();
         server_handle.await.unwrap().unwrap();
@@ -621,9 +1030,9 @@ mod tests {
     #[tokio::test]
     async fn redis_scheduler_skips_delayed_task_until_ready() {
         let (url, _commands_rx, server_handle) = spawn_redis_server().await;
-        let mut scheduler = Redis::new(format!("redis://{url}"), "delayed");
+        let scheduler = Redis::new(format!("redis://{url}"), "delayed");
         scheduler
-            .enqueue(Task::with_delay_ms(
+            .enqueue(Task::with_delay(
                 Request::new("https://example.com/delayed"),
                 60,
             ))
@@ -635,7 +1044,7 @@ mod tests {
             .await;
 
         let taken = scheduler.take_ready().await.unwrap().unwrap();
-        assert_eq!(taken.request.url, "https://example.com/delayed");
+        assert_eq!(taken.task.request.url, "https://example.com/delayed");
 
         scheduler.close().await.unwrap();
         server_handle.await.unwrap().unwrap();
@@ -645,25 +1054,165 @@ mod tests {
     async fn redis_scheduler_restores_tasks_from_existing_namespace() {
         let (url, _commands_rx, server_handle) = spawn_redis_server().await;
         let namespace = "restore";
-        let mut first = Redis::new(format!("redis://{url}"), namespace);
+        let first = Redis::new(format!("redis://{url}"), namespace);
         first
             .enqueue(Task::new(Request::new("https://example.com/restored")))
             .await
             .unwrap();
         first.close().await.unwrap();
 
-        let mut second = Redis::new(format!("redis://{url}"), namespace);
+        let second = Redis::new(format!("redis://{url}"), namespace);
         let taken = second.take_ready().await.unwrap().unwrap();
 
-        assert_eq!(taken.request.url, "https://example.com/restored");
+        assert_eq!(taken.task.request.url, "https://example.com/restored");
 
         second.close().await.unwrap();
         server_handle.await.unwrap().unwrap();
     }
 
     #[tokio::test]
+    async fn redis_scheduler_reclaims_stale_inflight_after_lease_timeout() {
+        let (url, _commands_rx, server_handle) = spawn_redis_server().await;
+        let namespace = "lease_reclaim";
+        let first = Redis::new(format!("redis://{url}"), namespace)
+            .with_lease_timeout(SignedDuration::from_millis(20));
+        first
+            .enqueue(Task::new(Request::new("https://example.com/reclaim")))
+            .await
+            .unwrap();
+
+        let taken = first.take_ready().await.unwrap().unwrap();
+        first.close().await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::try_from(SignedDuration::from_millis(40)).unwrap())
+            .await;
+
+        let second = Redis::new(format!("redis://{url}"), namespace)
+            .with_lease_timeout(SignedDuration::from_millis(20));
+        let checkpoint = second.checkpoint().await.unwrap();
+
+        assert_eq!(checkpoint.ready.len(), 1);
+        assert!(checkpoint.inflight.is_empty());
+        assert_eq!(checkpoint.ready[0].id, taken.task.id);
+
+        let reclaimed = second.take_ready().await.unwrap().unwrap();
+        assert_eq!(reclaimed.task.id, taken.task.id);
+        assert_eq!(reclaimed.task.request.url, "https://example.com/reclaim");
+
+        second.close().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn redis_scheduler_claims_one_ready_task_across_concurrent_workers() {
+        let (url, _commands_rx, server_handle) = spawn_redis_server().await;
+        let namespace = "atomic_claim";
+        let producer = Redis::new(format!("redis://{url}"), namespace);
+        let task = Task::new(Request::new("https://example.com/claim-once"));
+        producer.enqueue(task.clone()).await.unwrap();
+
+        let first_worker = Redis::new(format!("redis://{url}"), namespace);
+        let second_worker = Redis::new(format!("redis://{url}"), namespace);
+
+        let (first, second) = tokio::join!(first_worker.take_ready(), second_worker.take_ready());
+        let first = first.unwrap();
+        let second = second.unwrap();
+
+        let taken = [first.as_ref(), second.as_ref()]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0].task.id, task.id);
+
+        producer.close().await.unwrap();
+        first_worker.close().await.unwrap();
+        second_worker.close().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn redis_scheduler_heartbeat_keeps_lease_active_past_initial_timeout() {
+        let (url, _commands_rx, server_handle) = spawn_redis_server().await;
+        let namespace = "heartbeat";
+        let first = Redis::new(format!("redis://{url}"), namespace)
+            .with_worker_id("worker-a")
+            .with_lease_timeout(SignedDuration::from_millis(20))
+            .with_heartbeat_interval(SignedDuration::from_millis(10));
+        first
+            .enqueue(Task::new(Request::new("https://example.com/heartbeat")))
+            .await
+            .unwrap();
+
+        let claimed = first.take_ready().await.unwrap().unwrap();
+        tokio::time::sleep(std::time::Duration::try_from(SignedDuration::from_millis(15)).unwrap())
+            .await;
+        first.heartbeat(&claimed.lease).await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::try_from(SignedDuration::from_millis(10)).unwrap())
+            .await;
+
+        let second = Redis::new(format!("redis://{url}"), namespace)
+            .with_worker_id("worker-b")
+            .with_lease_timeout(SignedDuration::from_millis(20));
+        let checkpoint = second.checkpoint().await.unwrap();
+
+        assert!(checkpoint.ready.is_empty());
+        assert_eq!(checkpoint.inflight.len(), 1);
+        assert_eq!(checkpoint.inflight[0].id, claimed.task.id);
+
+        first.close().await.unwrap();
+        second.close().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn redis_scheduler_rejects_stale_or_foreign_lease_resolution() {
+        let (url, _commands_rx, server_handle) = spawn_redis_server().await;
+        let namespace = "ownership";
+        let first = Redis::new(format!("redis://{url}"), namespace)
+            .with_worker_id("worker-a")
+            .with_lease_timeout(SignedDuration::from_millis(20));
+        first
+            .enqueue(Task::new(Request::new("https://example.com/ownership")))
+            .await
+            .unwrap();
+
+        let claimed = first.take_ready().await.unwrap().unwrap();
+
+        let second = Redis::new(format!("redis://{url}"), namespace)
+            .with_worker_id("worker-b")
+            .with_lease_timeout(SignedDuration::from_millis(20));
+        let error = second.complete(&claimed.lease).await.unwrap_err();
+        assert_eq!(
+            error,
+            SpiderError::scheduler(
+                "redis scheduler lease belongs to worker `worker-a`, current worker is `worker-b`"
+            )
+        );
+
+        tokio::time::sleep(std::time::Duration::try_from(SignedDuration::from_millis(40)).unwrap())
+            .await;
+
+        let reclaimed = second.take_ready().await.unwrap().unwrap();
+        let stale_error = first.complete(&claimed.lease).await.unwrap_err();
+        assert_eq!(
+            stale_error,
+            SpiderError::scheduler(format!(
+                "redis scheduler cannot complete task `{}` because the lease is no longer owned by worker `worker-a`",
+                claimed.task.id.as_str()
+            ))
+        );
+        second.complete(&reclaimed.lease).await.unwrap();
+
+        first.close().await.unwrap();
+        second.close().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn redis_scheduler_rejects_empty_namespace() {
-        let mut scheduler = Redis::new("redis://127.0.0.1:6379", "   ");
+        let scheduler = Redis::new("redis://127.0.0.1:6379", "   ");
 
         let error = scheduler
             .enqueue(Task::new(Request::new("https://example.com")))
@@ -673,6 +1222,21 @@ mod tests {
         assert_eq!(
             error,
             SpiderError::scheduler("redis scheduler namespace cannot be empty")
+        );
+    }
+
+    #[tokio::test]
+    async fn redis_scheduler_rejects_empty_worker_id() {
+        let scheduler = Redis::new("redis://127.0.0.1:6379", "news").with_worker_id("  ");
+
+        let error = scheduler
+            .enqueue(Task::new(Request::new("https://example.com")))
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            SpiderError::scheduler("redis scheduler worker_id cannot be empty")
         );
     }
 }

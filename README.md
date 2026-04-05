@@ -28,28 +28,33 @@ README 这里只保留总览；模块级细节统一放到 [docs/capabilities.md
 
 当前已落地的底层能力：
 
-- `Request` 已经是统一执行单元，覆盖 `method`、`headers`、`body`、`timeout`、`proxy`、`session`、request cookies 与 `follow` 继承语义
+- `Request` 已经是统一执行单元，覆盖 `method`、`headers`、`body`、`timeout`、`proxy`、`session`、request cookies、`callback`、`errback`、`kwargs` 与 `follow` 继承语义
 - `download::Http` 已接到真实的 timeout、proxy、redirect、cookie jar 与 session cookies 能力
 - `download::Browser` 已具备最小可用浏览器下载能力，并支持统一 `Request` 上的 `method` / `body` / `headers` / `timeout` / `proxy` / cookies / `session`
 - `Response.body` 与 `Response.text` 的语义已经明确并统一解码
-- `scheduler::Memory` 与 `scheduler::Redis` 已把任务状态收口为 `ready / delayed / inflight`，并支持 `priority / depth` 排序；其中 `scheduler::Memory` 仍支持 `scheduler::checkpoint::Checkpoint` 导出/恢复
+- `scheduler::Memory` 与 `scheduler::Redis` 已把任务状态收口为 `ready / delayed / inflight`，并支持 `priority / depth` 排序；其中 `scheduler::Memory` 仍支持 `scheduler::checkpoint::Checkpoint` 导出/恢复，`scheduler::Redis` 也已补最小 `lease_timeout` stale inflight reclaim，并把 `enqueue / claim / complete / requeue / reclaim` 这些关键状态迁移收口成 Redis 原子脚本
 - 已提供 `scheduler::checkpoint::File`、`scheduler::checkpoint::Redis` 与 `scheduler::checkpoint::Memory`，用于文件、Redis 的 scheduler checkpoint 持久化；也已提供直接基于 Redis 的 durable scheduler
+- `dedup` 已从默认 middleware 收口为显式 engine 组件；当前默认使用精确 `dedup::Memory`，也内置可选 `dedup::Bloom`，并可以通过 `Engine::with_dedup(...)` 切换为其它实现
+- `robots` 已提升为显式 engine 组件；当前默认使用 `robots::Memory`，也可以通过 `Engine::with_robots(...)` 切换为其它实现
 - `pipeline` 只负责 item 处理与过滤；最终持久化/投递走独立 `store` 边界，当前内置 `store::Memory`、`store::File`、`store::Sqlite`、`store::Webhook`、`store::Redis` 与 `store::Kafka`
 - `Engine::new()` 默认使用 `store::File::default()`，结果会写到 `output/<spider_name>.jsonl`
 - `Engine::default()` 等价于 `Engine::new()`
-- `Engine::stats()` 已提供最小运行时计数快照：`request_count`、`response_count`、`error_count`、`retry_count`、`item_count`、`pipeline_drop_count`
-- 已提供最小 `robots.txt` 策略：`Settings::with_robots_obey(true)` 开启后，会按 origin 缓存 `robots.txt`，并在下载前跳过不允许的请求
-- plugin 自动装载当前只支持 `middleware` kind，其它 kind 先保留命名空间
+- `Engine::stats()` 已提供累计运行时计数快照：除了 `request_count`、`response_count`、`error_count`、`retry_count`、`item_count`、`pipeline_drop_count`，现在也包含 `dedup_reject_count`、`robots_disallow_count`、`robots_delay_count`、`http_cache_hit_count`、`http_cache_revalidate_count`、`http_cache_store_count`、`http_cache_miss_count` 与 `store_error_count`
+- 已提供更完整一版 `robots.txt` 策略：`Settings::with_robots_obey(true)` 开启后，会按 origin 缓存 `robots.txt`，并在下载前处理 `Allow` / `Disallow`、`Crawl-delay`、更完整的 `User-agent group` 匹配，以及 `* / $` wildcard 规则；`robots::Robot::sitemaps(...)` 也可读取声明的 sitemap URL；默认 cache backend 是 `robots::cache::Memory`，也可以通过 `robots::Memory::with_cache(...)` 替换为 `robots::cache::File` 或自定义实现；`robots::cache::File::default()` 的路径是 `output/robots-cache.json`；`robots::Memory` 当前默认按 `24h` 的 `cache_ttl` 复用 policy，过期后会尝试刷新，刷新失败时优先回退旧缓存；如果再打开 `Settings::with_robots_sitemap_seeds(true)`，引擎启动时会把 robots 里声明的 sitemap / sitemapindex 解析成新的种子请求，并继续走同一条 dedup 链路，默认 `priority / depth` 仍保持 `0`
+- 已提供最小 `AutoThrottle`：`Settings::with_auto_throttle(true)` 开启后，会按 origin 基于延迟、错误和目标并发动态调整下一次下载间隔；此时 `download_delay` 表示初始/最小 delay，`with_auto_throttle_max_delay(...)` 表示最大 delay
+- 已提供一版更完整的 `HTTP cache / conditional request`：默认还是内存 backend，也已支持内置 `middleware::http_cache::File` 持久化 backend；`Settings::with_http_cache(true)` 开启后，同一 HTTP `GET` 请求会基于已缓存的 `ETag / Last-Modified` 自动补 `If-None-Match / If-Modified-Since`；命中 `304 Not Modified` 时，在 `response` 策略下会回填缓存 body，并给 `Response.flags` 增加 `http_cache`；当前也支持 `ttl` 和 `validators / response` 两种缓存策略
+- plugin 自动装载当前只支持 `middleware` kind；当前已知但暂未自动装载的 kind 统一收口为 `store`、`scheduler`、`dedup`、`robots`、`http`、`browser`
 - DSL 当前定位已经明确为“共享底层能力的配置化入口”，不是另一套独立运行时
 
 当前仍待补齐的底层能力：
 
+- 和 Scrapy 更完整的代码爬虫体验相比，当前优先继续补的缺口主要是：更高阶的 `robots.txt` / 站点策略，以及 `signals / extensions` 这一层
 - 共享 validation 已支持字段路径解析与逐值校验（例如 `meta.title`、`authors[0].name`、`tags[]`、`articles[].title`），也已补显式文本/列表/对象约束（例如 `with_min_length(...)`、`with_min_items(...)`、`with_required_fields(...)`）、`ValidationTransform` 链式转换后再校验（例如 `trim`、`normalize_whitespace`、`parse_number`、`parse_bool`、`parse_datetime`）、对象子规则/列表成员子规则、`any_of / all_of / one_of / mutually_exclusive` 这类组合约束、`when_exists / when_missing / when_equals / when_not_equals` 这类条件约束，以及 `validate_fields_report()` 这种 collect-all 报告能力；validation 语义是显式启用的，只有传入的规则才会执行，字段缺失时也只有 `required` 或显式 `required_when_*` 条件命中时才报错，其它规则默认跳过；更高阶的运行时失败策略映射和更复杂的派生条件还没统一
-- 当前已经有文件、Redis 两种 checkpoint 持久化，也已经有直接基于 Redis 的 durable scheduler；更强的分布式协调、事务语义与更高阶恢复策略还没统一
-- 当前 item 链路已经明确为 `parse -> item -> pipeline -> store`；当前已经有文件、数据库、Webhook、Redis 与 Kafka 这些内置 `store` 实现，更丰富的文件格式与更高阶消息能力仍待继续补齐
-- 当前 stats 还是内存内累计快照，尚未接 Prometheus/OpenTelemetry 这类 exporter；HTTP cache / conditional request 也还没补，并已明确放到 `P3`
-- 当前 `robots.txt` 只补了最小策略：默认关闭、按 origin 内存缓存、支持 `User-agent` / `Allow` / `Disallow` 的前缀匹配；`Crawl-delay`、`Sitemap`、更完整通配符语义还没补
-- HTML XPath、OCR、parse 后处理等 parser 能力仍未完全收敛；当前已补一组更完整的 query transform：`fallback(...)`、`fallback_many(...)`、`field(...)`、`index(...)`、`flatten()`、`compact()`、`trim()`、`first_non_empty()`、`skip(...)`、`take(...)`、`last()`、`dedup()`、`join(...)`、`split(...)`、`replace(...)`、`normalize_whitespace()`、`resolve_url(...)`、`parse_number()`、`parse_bool()`、`parse_json()`、`parse_datetime()`、`parse_datetime_with_format(...)`，以及最小 query 级断言：`require_non_empty()`、`require_one()`
+- 当前已经有文件、Redis 两种 checkpoint 持久化，也已经有直接基于 Redis 的 durable scheduler；`scheduler::Redis` 现在已经把关键任务状态迁移原子化，也已补 `worker_id` ownership、lease heartbeat 和 stale reclaim；后续如果继续往更强分布式协调演进，重点会是更高阶事务边界、观测与跨 job 运维能力
+- 当前 item 链路已经明确为 `parse -> item -> pipeline -> store`；这一轮已补 `store::File` 的 rotate / format 选项，以及 `store::Webhook` 的 retry/backoff 与 `store::Kafka` 的 key / headers；更高阶外部系统语义仍建议继续走自定义 `Store`
+- 当前 stats 仍是 engine 进程内累计快照；现在已经补了细粒度计数，并提供 `Engine::with_stats_reporter(...)` 作为最小观测钩子，但还没有直接内置 Prometheus / OpenTelemetry exporter
+- 当前 `robots.txt` 已支持默认关闭、按 origin 缓存、`User-agent` / `Allow` / `Disallow`、`Crawl-delay`、更完整 `group` 选择，以及 `* / $` wildcard 规则；默认 cache backend 仍是内存，也已补内置 `robots::cache::File`、`cache_ttl` 刷新和可选 sitemap 自动种子；当前仍未补的是更高阶语法细节与更复杂站点策略
+- HTML XPath、OCR 这两块 parser 能力仍未收敛；当前其余通用 query transform 已补到：`fallback(...)`、`fallback_many(...)`、`field(...)`、`filter_field_present(...)`、`filter_field_equals(...)`、`pick_fields([...])`、`index(...)`、`flatten()`、`compact()`、`trim()`、`first_non_empty()`、`skip(...)`、`take(...)`、`last()`、`dedup()`、`join(...)`、`split(...)`、`replace(...)`、`normalize_whitespace()`、`resolve_url(...)`、`parse_number()`、`parse_bool()`、`parse_json()`、`parse_datetime()`、`parse_datetime_with_format(...)`，以及最小 query 级断言：`require_non_empty()`、`require_one()`
 
 ## 快速开始
 
@@ -102,7 +107,7 @@ impl Spider for MySpider {
 async fn main() {
     tracing_subscriber::fmt().init();
 
-    let settings = Settings::default()
+let settings = Settings::default()
         .with_download_delay(SignedDuration::from_millis(200))
         .with_idle_timeout(SignedDuration::from_secs(5));
 
@@ -121,24 +126,45 @@ async fn main() {
 ## Scheduler 选择
 
 如果默认组件足够，直接用 `Engine::new()`。
-如果要自定义 `scheduler`、`http` 或 `browser`，再用 `Engine::from_parts(scheduler, http, browser)`。
+如果想保留默认 scheduler、只替换下载器，优先用 `.with_http(...)` / `.with_browser(...)`。
+如果要连 `scheduler` 一起自定义，再用 `Engine::from_parts(scheduler, http, browser)`。
+如果要替换默认去重实现，再继续链 `.with_dedup(...)`。
+如果要替换默认 robots policy，再继续链 `.with_robots(...)`。
 
-- `Engine::new()` 默认就是 `scheduler::Memory + download::Http + download::Browser`
+- `Engine::new()` 默认就是 `scheduler::Memory + download::Http + download::Browser + dedup::Memory + robots::Memory`
 - `Engine::default()` 与 `Engine::new()` 等价，只是更偏 Rust trait 风格
-- 如果你想保留默认 memory scheduler、但替换下载器，可以用 `Engine::with_downloaders(http, browser)`
+- 如果你想只替换 HTTP 下载器，可以用 `.with_http(...)`
+- 如果你想只替换 browser 下载器，可以用 `.with_browser(...)`
+- 如果你想同时替换两个下载器，可以链 `.with_http(...).with_browser(...)`
+- `Engine::with_downloaders(http, browser)` 继续保留，作为“默认 memory scheduler + 一次替换两个下载器”的快捷写法
+- 当前不再单独引入 `with_queue(...)`；任务排队、ready/delayed/inflight 流转与恢复边界，统一都收口在 `scheduler` 组件里
+- 如果你想关闭默认去重，可以显式用 `.with_dedup(dedup::Noop)`
+- 如果你想用有界内存的近似去重，可以显式用 `.with_dedup(dedup::Bloom::default())`
+- 如果你想保留框架接线、但替换 dedup 算法，可以显式用 `.with_dedup(...)`
+- 如果你是手动往引擎里塞 request，优先用 `engine.enqueue(request).await?`；直接调 `engine.scheduler.enqueue(...)` 属于低层 escape hatch，会绕过 dedup 组件
+- `robots` 是否启用和使用哪个 user-agent 仍由 `Settings::with_robots_obey(...)` / `Settings::with_robots_user_agent(...)` 控制；`.with_robots(...)` 负责替换具体 robots policy 实现
 - `checkpoint` 本身没有单独的 runtime 默认值；只有你显式启用 checkpoint 时，默认内置后端才是 `scheduler::checkpoint::File::default()`，路径是 `output/scheduler-checkpoint.json`
 - 如果你想要“内存调度 + 文件 checkpoint”的便捷组合，可以直接用 `scheduler::checkpoint::Memory::default()`
 - 如果你要从默认 checkpoint 文件恢复到 memory scheduler，使用 `scheduler::checkpoint::Memory::load_default().await?`
 - 如果你要真正的 durable scheduler，可以直接传 `scheduler::Redis::new(...)`
+- `scheduler::Redis` 默认会给 `inflight` task 一个最小 `lease_timeout`，worker 崩溃或长时间失联后，后续访问同 namespace 时会把 stale `inflight` task 回收到 `ready / delayed`
+- `scheduler::Redis` 现在会通过 Redis 脚本原子完成 `claim / complete / requeue / reclaim` 这类关键迁移；多个 worker 共享同一个 namespace 时，不会再因为本地“先读 ready 再分步搬运”而重复领取同一条 task
+- `scheduler::Redis` 现在还显式支持 `worker_id`、runtime lease ownership 校验，以及 engine 运行中的 heartbeat 续租
+- 如果你想调整这层恢复窗口，可以用 `.with_lease_timeout(...)`；如果你想显式指定 worker 身份或 heartbeat 节奏，可以再配 `.with_worker_id(...)`、`.with_heartbeat_interval(...)`；如果你明确不想要这层自动回收，也可以用 `.without_lease_timeout()`
 - 如果你想自定义 checkpoint 后端，可以用 `scheduler::checkpoint::Memory::load(scheduler::checkpoint::Redis::new(...)).await?`
+- `checkpoint` 仍然只是静态快照恢复边界；它不会替代 durable scheduler 的 runtime reclaim
 - 如果你想自定义 scheduler 或 checkpoint 后端，分别实现 `scheduler::Scheduler` 或 `scheduler::checkpoint::Persist` 即可
 - 如果你更喜欢链式写法，可以从 `Engine::new()` 开始，再用 `.with_scheduler(...)`、`.with_checkpoint(...)` 或 `.load_checkpoint(...).await?`
 - 完整 demo 见 `examples/custom_scheduler.rs`
+- 分布式运行说明见 `docs/distributed_scheduler.md`
 
 ```rust
+use halo_spider::dedup;
 use halo_spider::download::{Browser, Http};
 use halo_spider::engine::Engine;
+use halo_spider::robots;
 use halo_spider::scheduler;
+use halo_spider::settings::Settings;
 
 // 1. 默认推荐：纯内存 scheduler
 let engine = Engine::new();
@@ -149,14 +175,44 @@ let engine = Engine::default();
 // 3. 默认 memory scheduler，但自定义 downloaders
 let engine = Engine::with_downloaders(Http::default(), Browser::default());
 
-// 4. memory scheduler + file checkpoint
+// 4. 也可以按组件分别替换下载器
+let engine = Engine::new()
+    .with_http(Http::default())
+    .with_browser(Browser::default());
+
+// 5. 默认 dedup::Memory，但可以显式替换 dedup 组件
+let engine = Engine::new().with_dedup(
+    dedup::Memory::new().with_keys([dedup::Key::Url, dedup::Key::Method]),
+);
+
+// 6. 如果想禁用 dedup，也可以显式换成 Noop
+let engine = Engine::new().with_dedup(dedup::Noop);
+
+// 7. 如果想改成 Bloom dedup，也可以显式替换
+let engine = Engine::new().with_dedup(
+    dedup::Bloom::new()
+        .with_expected_items(500_000)
+        .with_false_positive_rate(0.01),
+);
+
+// 8. memory scheduler + file checkpoint
 let engine = Engine::new().with_checkpoint(scheduler::checkpoint::File::default());
 
-// 5. 原生 durable Redis scheduler
+// 9. 替换默认 robots policy；真正执行仍要开启 robots_obey
 let engine = Engine::new()
-    .with_scheduler(scheduler::Redis::new("redis://127.0.0.1:6379", "kun:scheduler"));
+    .with_robots(robots::Noop)
+    .with_settings(Settings::default().with_robots_obey(true));
 
-// 6. 内存 scheduler + 自定义 Redis checkpoint
+// 10. 原生 durable Redis scheduler
+let engine = Engine::new()
+    .with_scheduler(
+        scheduler::Redis::new("redis://127.0.0.1:6379", "kun:scheduler")
+            .with_worker_id("news-worker-a")
+            .with_lease_timeout(jiff::SignedDuration::from_secs(30))
+            .with_heartbeat_interval(jiff::SignedDuration::from_secs(10)),
+    );
+
+// 11. 内存 scheduler + 自定义 Redis checkpoint
 let scheduler = scheduler::checkpoint::Memory::load(
     scheduler::checkpoint::Redis::new(
         "redis://127.0.0.1:6379",
@@ -166,23 +222,24 @@ let scheduler = scheduler::checkpoint::Memory::load(
 .await?;
 let engine = Engine::new().with_scheduler(scheduler);
 
-// 7. 也可以先创建默认 engine，再链式替换 scheduler
+// 12. 也可以先创建默认 engine，再链式替换 scheduler
 let engine = Engine::new().with_scheduler(scheduler::Redis::new(
     "redis://127.0.0.1:6379",
     "kun:scheduler",
 ));
 
-// 8. 如果要从已有 checkpoint 恢复，也可以直接链式加载
+// 13. 如果要从已有 checkpoint 恢复，也可以直接链式加载
 let engine = Engine::new()
     .load_checkpoint(scheduler::checkpoint::File::default())
     .await?;
 
-// 9. 如果要自定义全部底层组件，用 from_parts(...)
+// 14. 如果要自定义全部底层组件，用 from_parts(...)
 let engine = Engine::from_parts(
     scheduler::Redis::new("redis://127.0.0.1:6379", "kun:scheduler"),
     Http::default(),
     Browser::default(),
-);
+)
+.with_dedup(dedup::Noop);
 ```
 
 ## 示例
@@ -197,6 +254,7 @@ cargo run --example webhook
 cargo run --example redis
 HALO_SPIDER_ES_URL=http://127.0.0.1:9200 cargo run --example elasticsearch
 HALO_SPIDER_KAFKA_BROKERS=127.0.0.1:9092 cargo run --example kafka
+cargo run --example custom_dedup
 cargo run --example custom_middleware
 cargo run --example custom_scheduler
 cargo run --example plugins_demo
@@ -221,7 +279,8 @@ parse -> item -> pipeline -> store
 - `pipeline` 只负责 item 处理与过滤，例如 normalize、补默认值、丢弃无效 item
 - `store` 负责最终持久化或投递，例如文件、数据库、HTTP API、消息队列
 
-Engine 现在保留一个显式 `with_pipeline(...)` 插槽和一个显式 `with_store(...)` 插槽。
+Engine 现在保留显式 `with_dedup(...)`、`with_robots(...)`、
+`with_pipeline(...)` 与 `with_store(...)` 这些组件插槽。
 当前不再推荐 `with_pipeline((A, B))` 这类元组组合写法；如果确实需要多个 item
 处理步骤，直接在你自己的 pipeline 类型里按顺序组合即可。
 
@@ -242,7 +301,15 @@ let engine = Engine::new();
 - `scheduler::Memory`
 - `download::Http`
 - `download::Browser`
+- `dedup::Memory`
+- `robots::Memory`
 - `store::File::default()`，输出到 `output/<spider_name>.jsonl`
+
+关于 dedup 默认值，这里也明确一下：
+
+- `Engine::new()` 继续默认用精确 `dedup::Memory`
+- `dedup::Bloom` 是显式 opt-in，不默认替换
+- 原因是默认行为优先保 correctness，不默认引入布隆误判导致的潜在漏抓
 
 `Store` 当前同时暴露 `write()` 和 `batch_write()` 两个入口：
 
@@ -283,6 +350,13 @@ let mut engine = Engine::from_parts(scheduler, http, browser)
 - `store::Redis`
 - `store::Kafka`
 
+当前 `store::File` 的最小增强语义是：
+
+- 默认仍然写紧凑的 JSON Lines
+- 可以通过 `with_format(store::FileFormat::PrettyJsonBlocks)` 切到更适合人工查看的 pretty block 形式
+- 可以通过 `with_rotate_items(...)` 或 `with_rotate_bytes(...)` 把输出切分成编号文件，例如 `items-0001.jsonl`
+- 这些增强仍然只发生在同一个 `store::File` 边界上，不引入第二套文件输出 runtime
+
 当前 SQLite store 的最小语义是：
 
 - `open()` 只负责建库建表，不会自动清空旧数据
@@ -294,6 +368,8 @@ let mut engine = Engine::from_parts(scheduler, http, browser)
 
 - 把完整 item JSON 通过 `POST` 或 `PUT` 推送到目标 HTTP endpoint
 - 支持追加固定请求头
+- 支持 `with_retry_limit(...)` 与 `with_retry_backoff(...)`
+- 当前只对请求错误和 `429 / 5xx` 做重试；其它非 `2xx` 仍然直接报错
 - 如果接口返回非 `2xx`，会返回显式 store error，而不是静默忽略失败
 
 当前 Redis store 的最小语义是：
@@ -306,9 +382,11 @@ let mut engine = Engine::from_parts(scheduler, http, browser)
 当前 Kafka store 的最小语义是：
 
 - `Kafka::new(brokers, topic)` 把完整 item JSON 作为消息 value 发到指定 topic
+- 支持 `with_key(...)` / `with_key_field(...)`
+- 支持 `with_header(...)` / `with_header_field(...)`
 - `batch_write()` 会在同一次 store 调用里连续发送多条 item JSON 消息
 - 如果 Kafka producer 返回投递错误，store 返回显式 store error
-- 当前不支持 message key、headers、显式 partition、事务、schema registry 或 consumer/group 这类更高阶 Kafka 语义
+- 当前仍不支持显式 partition、事务、schema registry 或 consumer/group 这类更高阶 Kafka 语义
 
 自定义 store 也走同一条主链。只要实现 `Store` trait，再通过
 `Engine::with_store(...)` 挂进去即可。
@@ -356,6 +434,11 @@ let mut engine = Engine::from_parts(scheduler, http, browser)
 
 如果你的自定义 store 底层本身支持批量写入，比如 Elasticsearch `_bulk`、ClickHouse
 批量 insert、对象存储批量上传，也推荐一起覆盖 `batch_write()`。
+
+当前内置维护范围也明确一下：
+
+- 框架内置继续维护 `Memory / File / Sqlite / Webhook / Redis / Kafka`
+- 更专门的数据库、对象存储、第三方 API、复杂 MQ 语义，优先继续通过用户自定义 `Store` 扩展
 
 后续更多文件格式与更完整消息语义也继续扩展在 `store` 这一层，而不是再拆新的输出运行时。
 
@@ -433,13 +516,13 @@ Spider / rules
 - request headers
 - request proxy
 - request session
-- built-in `fingerprint_profile = desktop_zh_cn | desktop_en_us`
-- minimal `stealth = true` bootstrap
+- built-in `fingerprint_profile = desktop_zh_cn | desktop_en_us | desktop_en_gb | desktop_ja_jp | desktop_de_de | desktop_fr_fr`
+- richer `stealth = true` bootstrap
 - browser response status / headers
 - 页面渲染后的 HTML 抓取
 
 其中 browser `session` 当前会把同一个 session id 映射到稳定的 Playwright user data dir，
-用于复用 cookies 和 local storage 这类浏览器态数据；相同 session id 的实际浏览器执行也会按 session 串行化，
+用于复用 cookies 和 local storage 这类浏览器态数据；user data dir、临时 profile 目录和会话锁这条实现路径也已经收口到更适合 async runtime 的处理方式；相同 session id 的实际浏览器执行会按 session 串行化，
 避免共享 profile 目录时出现竞态。
 
 当前 browser `Response` 会带上真实的导航 `status` 与响应头；`protocol` 继续表示
@@ -450,12 +533,14 @@ browser 执行路径，`ip_address` 与 `certificate` 由于 Playwright 当前�
 
 当前已经支持的 browser 指纹能力边界：
 
-- `fingerprint_profile` 当前只支持内置 profile：`desktop_zh_cn`、`desktop_en_us`
-- `stealth = true` 当前会注入最小 bootstrap，覆盖 `navigator.webdriver`、`navigator.languages`、`navigator.platform`、最小 `window.chrome` 与 notifications permissions 查询补丁
+- `fingerprint_profile` 当前只支持内置 profile：`desktop_zh_cn`、`desktop_en_us`、`desktop_en_gb`、`desktop_ja_jp`、`desktop_de_de`、`desktop_fr_fr`
+- 这些 profile 会稳定映射 `user_agent`、`locale`、`timezone`、`accept-language`、`languages`、`platform`
+- `stealth = true` 当前会注入一版更完整但仍然克制的 bootstrap，覆盖 `navigator.webdriver`、`navigator.language(s)`、`navigator.platform`、`navigator.vendor`、`hardwareConcurrency`、`deviceMemory`、`maxTouchPoints`、`plugins`、`mimeTypes`、`pdfViewerEnabled`、screen depth、notifications permissions 查询补丁，以及 Chromium 路线上的最小 `window.chrome` / `navigator.userAgentData`
+- 这组 profile 和 stealth 仍然只是稳定内置 preset，不追求跨所有 Playwright engine 的“完全品牌一致”高阶伪装能力
 
 当前仍未实现、并且会继续显式报错的能力：
 
-- 自定义 `fingerprint_profile` 名称
+- 自定义 `fingerprint_profile` 名称或结构化自定义 profile
 - 更完整的第三方 stealth 套件或更高阶浏览器指纹伪装能力
 
 如果当前构建没有启用 `browser` feature，browser request 会直接返回显式错误，不会再返回 stub response。
@@ -470,6 +555,23 @@ halo-spider = { version = "0.0.5", features = ["browser"] }
 
 ```bash
 npx playwright@1.58.2 install chromium firefox webkit
+```
+
+最小使用示例：
+
+```rust
+use halo_spider::request::{browser, Request};
+use jiff::SignedDuration;
+
+let request = Request::browser("https://example.com/app")
+    .with_timeout(SignedDuration::from_secs(15))
+    .with_browser(
+        browser::Config::default()
+            .with_engine(browser::Engine::Chromium)
+            .with_wait_for("#app")
+            .with_fingerprint_profile("desktop_ja_jp")
+            .with_stealth(true),
+    );
 ```
 
 **已知限制：**
@@ -531,6 +633,44 @@ let settings = Settings::default()
     .with_connection_pool_size(100)            // HTTP 连接池大小
     .with_download_delay(jiff::SignedDuration::from_millis(200));  // 请求间延迟
 ```
+
+如果你想改成按站点反馈动态调速，可以直接开启最小 `AutoThrottle`：
+
+```rust
+let settings = Settings::default()
+    .with_auto_throttle(true)
+    .with_download_delay(jiff::SignedDuration::from_millis(200))   // 初始/最小 delay
+    .with_auto_throttle_target_concurrency(1.0)
+    .with_auto_throttle_max_delay(jiff::SignedDuration::from_secs(5));
+```
+
+开启后，引擎会把固定 `interval_gate` 收口成 `auto_throttle` 中间件：同 origin 的慢响应、`429 / 5xx` 和下载异常都会抬高后续 delay，恢复正常后再逐步回落。
+
+如果你想让同一个 HTTP `GET` 请求自动走最小条件请求缓存，也可以直接开启：
+
+```rust
+use halo_spider::engine::Engine;
+use halo_spider::settings::Settings;
+
+let engine = Engine::new().with_settings(
+    Settings::default()
+        .with_http_cache(true)
+        .with_http_cache_ttl(jiff::SignedDuration::from_hours(12))
+        .with_http_cache_strategy(halo_spider::middleware::http_cache::Strategy::Response),
+);
+```
+
+当前这层 `http_cache` 的边界也比较明确：
+
+- 只作用于 HTTP `GET` 请求
+- 当前 key 语义是规范化后的完整 URL，包含 `request.http.query`
+- 默认 backend 是进程内 `middleware::http_cache::Memory`，也可以通过 `Settings::with_http_cache_file(...)` 或 `HttpCache::with_cache(...)` 换成文件或自定义 backend
+- 默认按 `24h` 的 `ttl` 复用缓存条目；也可以通过 `with_http_cache_ttl(...)` 覆盖，或 `without_http_cache_ttl()` 关闭自动过期
+- 当前支持 `validators` 和 `response` 两种策略：前者只缓存 `ETag / Last-Modified`，后者还会缓存响应 body，并在 `304 Not Modified` 时回填成正常 `Response`
+- 当前仍然不做 `Cache-Control` / `Expires` / `Vary` 这类更完整 HTTP 缓存语义
+
+完整可运行示例见 `examples/http_cache.rs`，里面把 `ttl`、`strategy`、`file backend` 和最终 `Engine::stats()` 一起串起来了。
+如果你想自己实现 cache backend，则看 `examples/custom_http_cache.rs`，它演示了如何实现 `middleware::http_cache::Cache`，再通过 `HttpCache::with_cache(...)` 接到引擎里。
 
 参考 `examples/concurrency_control.rs` 或 `examples/README.md` 查看当前保留示例。
 

@@ -237,6 +237,79 @@ impl ValueQuery {
         self
     }
 
+    pub fn filter_field_present(mut self, name: impl AsRef<str>) -> Result<Self, SpiderError> {
+        let source = self.source.clone();
+        let name = normalize_query_field_name(name.as_ref(), &source, "filter_field_present")?;
+
+        self.kind = Kind::Structured;
+        self.trim = false;
+        self.source = format!("{source}|filter_field_present({name})");
+        self.values = self
+            .values
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                filter_query_value_objects(value, &source, index, &name, &|field| {
+                    query_value_is_present(field, true)
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+        Ok(self)
+    }
+
+    pub fn filter_field_equals(
+        mut self,
+        name: impl AsRef<str>,
+        expected: Value,
+    ) -> Result<Self, SpiderError> {
+        let source = self.source.clone();
+        let name = normalize_query_field_name(name.as_ref(), &source, "filter_field_equals")?;
+
+        self.kind = Kind::Structured;
+        self.trim = false;
+        self.source = format!("{source}|filter_field_equals({name})");
+        self.values = self
+            .values
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                filter_query_value_objects(value, &source, index, &name, &|field| {
+                    field == &expected
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+        Ok(self)
+    }
+
+    pub fn pick_fields<I, S>(mut self, fields: I) -> Result<Self, SpiderError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let source = self.source.clone();
+        let fields = normalize_query_field_names(fields, &source, "pick_fields")?;
+
+        self.kind = Kind::Structured;
+        self.trim = false;
+        self.source = format!("{}|pick_fields({})", source, fields.join(","));
+        self.values = self
+            .values
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| project_query_value_fields(value, &source, index, &fields))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+        Ok(self)
+    }
+
     pub fn index(mut self, index: usize) -> Self {
         self.kind = Kind::Structured;
         self.trim = false;
@@ -339,10 +412,10 @@ impl ValueQuery {
     pub fn resolve_url(mut self, base_url: impl AsRef<str>) -> Result<Self, SpiderError> {
         let source = self.source.clone();
         let trim = self.trim;
-        let base_url_text = base_url.as_ref().to_string();
-        let base_url = Url::parse(&base_url_text).map_err(|error| {
+        let base_url = base_url.as_ref().to_string();
+        let parsed_base_url = Url::parse(&base_url).map_err(|error| {
             SpiderError::parse(format!(
-                "query {source} cannot resolve URLs against invalid base {base_url_text:?}: {error}"
+                "query {source} cannot resolve URLs against invalid base {base_url:?}: {error}"
             ))
         })?;
 
@@ -352,7 +425,9 @@ impl ValueQuery {
             .values
             .into_iter()
             .enumerate()
-            .map(|(index, value)| resolve_query_value_url(value, &base_url, &source, index, trim))
+            .map(|(index, value)| {
+                resolve_query_value_url(value, &parsed_base_url, &source, index, trim)
+            })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(self)
     }
@@ -483,9 +558,17 @@ pub(crate) fn trim_text(text: &str, trim: bool) -> String {
 }
 
 fn query_value_is_present(value: &Value, trim: bool) -> bool {
-    stringify(value, trim)
-        .map(|value| !value.is_empty())
-        .unwrap_or(false)
+    match value {
+        Value::Null => false,
+        Value::Bool(_) | Value::Number(_) => true,
+        Value::String(text) => !trim_text(text, trim).is_empty(),
+        Value::Array(values) => values
+            .iter()
+            .any(|value| query_value_is_present(value, trim)),
+        Value::Object(values) => values
+            .values()
+            .any(|value| query_value_is_present(value, trim)),
+    }
 }
 
 fn normalize_whitespace_text(text: &str) -> String {
@@ -523,6 +606,121 @@ fn extract_query_value_field(value: Value, name: &str) -> Vec<Value> {
             .collect(),
         _ => Vec::new(),
     }
+}
+
+fn normalize_query_field_name(
+    name: &str,
+    source: &str,
+    transform: &str,
+) -> Result<String, SpiderError> {
+    let normalized = name.trim();
+    if normalized.is_empty() {
+        return Err(SpiderError::parse(format!(
+            "query {source} {transform} requires a non-empty field name"
+        )));
+    }
+    Ok(normalized.to_string())
+}
+
+fn normalize_query_field_names<I, S>(
+    fields: I,
+    source: &str,
+    transform: &str,
+) -> Result<Vec<String>, SpiderError>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let fields = fields
+        .into_iter()
+        .map(|field| normalize_query_field_name(field.as_ref(), source, transform))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if fields.is_empty() {
+        return Err(SpiderError::parse(format!(
+            "query {source} {transform} requires at least one field"
+        )));
+    }
+
+    Ok(fields)
+}
+
+fn filter_query_value_objects(
+    value: Value,
+    source: &str,
+    index: usize,
+    field_name: &str,
+    predicate: &dyn Fn(&Value) -> bool,
+) -> Result<Option<Value>, SpiderError> {
+    match value {
+        Value::Object(values) => {
+            let keep = values.get(field_name).is_some_and(predicate);
+            Ok(keep.then_some(Value::Object(values)))
+        }
+        Value::Array(values) => {
+            let filtered = values
+                .into_iter()
+                .filter_map(|value| match value {
+                    Value::Object(values) => {
+                        let keep = values.get(field_name).is_some_and(predicate);
+                        keep.then_some(Value::Object(values))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+
+            Ok((!filtered.is_empty()).then_some(Value::Array(filtered)))
+        }
+        other => Err(SpiderError::parse(format!(
+            "failed to filter query value from {source}[{index}] by field {field_name:?}: expected object or array of objects, got {}",
+            value_type_name(&other)
+        ))),
+    }
+}
+
+fn project_query_value_fields(
+    value: Value,
+    source: &str,
+    index: usize,
+    fields: &[String],
+) -> Result<Option<Value>, SpiderError> {
+    match value {
+        Value::Object(values) => Ok(project_object_fields(values, fields).map(Value::Object)),
+        Value::Array(values) => {
+            let projected = values
+                .into_iter()
+                .filter_map(|value| match value {
+                    Value::Object(values) => {
+                        project_object_fields(values, fields).map(Value::Object)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+
+            Ok((!projected.is_empty()).then_some(Value::Array(projected)))
+        }
+        other => Err(SpiderError::parse(format!(
+            "failed to project query value from {source}[{index}] with pick_fields: expected object or array of objects, got {}",
+            value_type_name(&other)
+        ))),
+    }
+}
+
+fn project_object_fields(
+    values: BTreeMap<String, Value>,
+    fields: &[String],
+) -> Option<BTreeMap<String, Value>> {
+    let projected = fields
+        .iter()
+        .filter_map(|field| {
+            values
+                .get(field)
+                .cloned()
+                .map(|value| (field.clone(), value))
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    (!projected.is_empty()).then_some(projected)
 }
 
 fn extract_query_value_index(value: Value, index: usize) -> Option<Value> {
@@ -894,6 +1092,28 @@ mod tests {
     }
 
     #[test]
+    fn value_query_compact_drops_empty_arrays_and_objects() {
+        let query = ValueQuery::new(Kind::Structured, "$.items").with_values(vec![
+            Value::Array(Vec::new()),
+            Value::Object(BTreeMap::new()),
+            Value::Object(
+                [("title".to_string(), Value::String("Post".to_string()))]
+                    .into_iter()
+                    .collect(),
+            ),
+        ]);
+
+        assert_eq!(
+            query.compact().values,
+            vec![Value::Object(
+                [("title".to_string(), Value::String("Post".to_string()))]
+                    .into_iter()
+                    .collect()
+            )]
+        );
+    }
+
+    #[test]
     fn value_query_trim_trims_nested_string_values() {
         let query = ValueQuery::new(Kind::Structured, "$.data").with_values(vec![Value::Object(
             [(
@@ -1031,6 +1251,131 @@ mod tests {
         assert_eq!(
             query.field("title").all(),
             vec!["First".to_string(), "Second".to_string()]
+        );
+    }
+
+    #[test]
+    fn value_query_filter_field_present_keeps_objects_with_non_empty_field() {
+        let query =
+            ValueQuery::new(Kind::Structured, "$.items").with_values(vec![Value::Array(vec![
+                Value::Object(
+                    [("title".to_string(), Value::String("First".to_string()))]
+                        .into_iter()
+                        .collect(),
+                ),
+                Value::Object(
+                    [("title".to_string(), Value::String("   ".to_string()))]
+                        .into_iter()
+                        .collect(),
+                ),
+                Value::Object(
+                    [("other".to_string(), Value::String("x".to_string()))]
+                        .into_iter()
+                        .collect(),
+                ),
+            ])]);
+
+        assert_eq!(
+            query
+                .filter_field_present("title")
+                .unwrap()
+                .field("title")
+                .all(),
+            vec!["First".to_string()]
+        );
+    }
+
+    #[test]
+    fn value_query_filter_field_equals_keeps_matching_objects() {
+        let query =
+            ValueQuery::new(Kind::Structured, "$.items").with_values(vec![Value::Array(vec![
+                Value::Object(
+                    [
+                        ("title".to_string(), Value::String("First".to_string())),
+                        ("status".to_string(), Value::String("draft".to_string())),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+                Value::Object(
+                    [
+                        ("title".to_string(), Value::String("Second".to_string())),
+                        ("status".to_string(), Value::String("published".to_string())),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+            ])]);
+
+        assert_eq!(
+            query
+                .filter_field_equals("status", Value::String("published".to_string()))
+                .unwrap()
+                .field("title")
+                .all(),
+            vec!["Second".to_string()]
+        );
+    }
+
+    #[test]
+    fn value_query_pick_fields_projects_selected_object_keys() {
+        let query =
+            ValueQuery::new(Kind::Structured, "$.article").with_values(vec![Value::Object(
+                [
+                    ("title".to_string(), Value::String("Kun".to_string())),
+                    (
+                        "url".to_string(),
+                        Value::String("https://example.com".to_string()),
+                    ),
+                    ("status".to_string(), Value::String("published".to_string())),
+                ]
+                .into_iter()
+                .collect(),
+            )]);
+
+        assert_eq!(
+            query.pick_fields(["title", "url"]).unwrap().value(),
+            Some(Value::Object(
+                [
+                    ("title".to_string(), Value::String("Kun".to_string())),
+                    (
+                        "url".to_string(),
+                        Value::String("https://example.com".to_string())
+                    ),
+                ]
+                .into_iter()
+                .collect()
+            ))
+        );
+    }
+
+    #[test]
+    fn value_query_pick_fields_rejects_empty_field_list() {
+        let query =
+            ValueQuery::new(Kind::Structured, "$.article").with_values(vec![Value::Object(
+                [("title".to_string(), Value::String("Kun".to_string()))]
+                    .into_iter()
+                    .collect(),
+            )]);
+
+        assert_eq!(
+            query.pick_fields(Vec::<&str>::new()).unwrap_err(),
+            SpiderError::parse(
+                "query $.article pick_fields requires at least one field".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn value_query_filter_field_present_rejects_scalar_values() {
+        let query = ValueQuery::new(Kind::Text, "$.title")
+            .with_values(vec![Value::String("Kun".to_string())]);
+
+        assert_eq!(
+            query.filter_field_present("title").unwrap_err(),
+            SpiderError::parse(
+                "failed to filter query value from $.title[0] by field \"title\": expected object or array of objects, got string".to_string()
+            )
         );
     }
 
@@ -1472,6 +1817,19 @@ mod tests {
     fn value_query_fallback_uses_second_query_when_first_is_empty() {
         let primary = ValueQuery::new(Kind::Text, "h1.title")
             .with_values(vec![Value::String("".to_string())]);
+        let fallback = ValueQuery::new(Kind::Text, "title")
+            .with_values(vec![Value::String("Document Title".to_string())]);
+
+        assert_eq!(
+            primary.fallback(fallback).one().as_deref(),
+            Some("Document Title")
+        );
+    }
+
+    #[test]
+    fn value_query_fallback_treats_empty_structured_values_as_empty() {
+        let primary = ValueQuery::new(Kind::Structured, "$.items")
+            .with_values(vec![Value::Array(Vec::new())]);
         let fallback = ValueQuery::new(Kind::Text, "title")
             .with_values(vec![Value::String("Document Title".to_string())]);
 

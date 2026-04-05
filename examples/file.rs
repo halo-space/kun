@@ -4,7 +4,8 @@
 //! - Spider 只负责产出 item
 //! - 最终 item 直接在 `parse()` 里组装完整
 //! - 需要跨请求透传上下文时，优先走 `request.meta`，见 `period_xml_spider.rs`
-//! - 内置 `store::File` 把 item 逐行写入默认 JSON Lines 文件
+//! - 内置 `store::File` 仍然走同一条最终 store 边界
+//! - 也可以显式选择 pretty file format，而不影响主链语义
 //!
 //! 运行：cargo run --example file
 
@@ -15,7 +16,7 @@ use halo_spider::pipeline::Pipeline;
 use halo_spider::response::Response;
 use halo_spider::settings::Settings;
 use halo_spider::spider::{Output, Spider};
-use halo_spider::store::File as FileStore;
+use halo_spider::store::{File as FileStore, FileFormat};
 use halo_spider::value::Value;
 use jiff::SignedDuration;
 use std::path::Path;
@@ -83,8 +84,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_level(true)
         .init();
 
-    let output_path = std::env::temp_dir().join("halo-spider-period-items.jsonl");
-    let file_store = FileStore::new(output_path.clone());
+    let output_path = std::env::temp_dir().join("halo-spider-period-items.pretty.json");
+    let file_store = FileStore::new(output_path.clone()).with_format(FileFormat::PrettyJsonBlocks);
     let settings = Settings::default().with_idle_timeout(SignedDuration::from_millis(200));
 
     let engine = Engine::new().with_settings(settings);

@@ -1,6 +1,7 @@
 use crate::error::SpiderError;
 use crate::item::Item;
 use crate::store::Store;
+use jiff::SignedDuration;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,6 +24,8 @@ pub struct Webhook {
     url: String,
     method: WebhookMethod,
     headers: Vec<(String, String)>,
+    retry_limit: usize,
+    retry_backoff: SignedDuration,
     client: reqwest::Client,
 }
 
@@ -32,6 +35,8 @@ impl Webhook {
             url: url.into(),
             method: WebhookMethod::Post,
             headers: Vec::new(),
+            retry_limit: 0,
+            retry_backoff: SignedDuration::from_millis(250),
             client: reqwest::Client::new(),
         }
     }
@@ -51,6 +56,16 @@ impl Webhook {
 
     pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.push((name.into(), value.into()));
+        self
+    }
+
+    pub fn with_retry_limit(mut self, retry_limit: usize) -> Self {
+        self.retry_limit = retry_limit;
+        self
+    }
+
+    pub fn with_retry_backoff(mut self, retry_backoff: SignedDuration) -> Self {
+        self.retry_backoff = retry_backoff;
         self
     }
 
@@ -79,7 +94,26 @@ impl Webhook {
             SpiderError::engine(format!("invalid webhook store url `{}`: {error}", self.url))
         })?;
         self.build_headers()?;
+        to_std_duration(self.retry_backoff).map_err(|error| {
+            SpiderError::engine(format!("invalid webhook store retry_backoff: {error}"))
+        })?;
         Ok(())
+    }
+
+    fn retry_delay(&self, retry_number: usize) -> Result<std::time::Duration, SpiderError> {
+        let multiplier = i32::try_from(retry_number)
+            .map_err(|_| SpiderError::engine("webhook store retry number overflowed i32"))?;
+        let delay = self
+            .retry_backoff
+            .checked_mul(multiplier)
+            .ok_or_else(|| SpiderError::engine("webhook store retry_backoff overflowed"))?;
+        to_std_duration(delay).map_err(|error| {
+            SpiderError::engine(format!("invalid webhook store retry_backoff: {error}"))
+        })
+    }
+
+    fn should_retry_status(status: reqwest::StatusCode) -> bool {
+        status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
     }
 }
 
@@ -90,27 +124,50 @@ impl Store for Webhook {
 
     async fn write(&self, item: &Item, _spider_name: &str) -> Result<(), SpiderError> {
         self.validate()?;
-        let response = self
-            .client
-            .request(self.method.as_reqwest_method(), &self.url)
-            .headers(self.build_headers()?)
-            .json(&item.to_json())
-            .send()
-            .await
-            .map_err(|error| {
-                SpiderError::engine(format!("webhook store request failed: {error}"))
-            })?;
+        let headers = self.build_headers()?;
 
-        if !response.status().is_success() {
-            return Err(SpiderError::engine(format!(
-                "webhook store received non-success status {} from {}",
-                response.status(),
-                self.url
-            )));
+        for attempt in 0..=self.retry_limit {
+            let response = self
+                .client
+                .request(self.method.as_reqwest_method(), &self.url)
+                .headers(headers.clone())
+                .json(&item.to_json())
+                .send()
+                .await;
+
+            match response {
+                Ok(response) if response.status().is_success() => return Ok(()),
+                Ok(response) => {
+                    let status = response.status();
+                    if attempt < self.retry_limit && Self::should_retry_status(status) {
+                        tokio::time::sleep(self.retry_delay(attempt + 1)?).await;
+                        continue;
+                    }
+                    return Err(SpiderError::engine(format!(
+                        "webhook store received non-success status {} from {}",
+                        status, self.url
+                    )));
+                }
+                Err(error) => {
+                    if attempt < self.retry_limit {
+                        tokio::time::sleep(self.retry_delay(attempt + 1)?).await;
+                        continue;
+                    }
+                    return Err(SpiderError::engine(format!(
+                        "webhook store request failed: {error}"
+                    )));
+                }
+            }
         }
 
-        Ok(())
+        Err(SpiderError::engine(
+            "webhook store exhausted retries without a final result",
+        ))
     }
+}
+
+fn to_std_duration(duration: SignedDuration) -> Result<std::time::Duration, String> {
+    std::time::Duration::try_from(duration).map_err(|error| error.to_string())
 }
 
 #[cfg(test)]
@@ -119,13 +176,13 @@ mod tests {
     use crate::value::Value;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
-    use tokio::sync::oneshot;
+    use tokio::sync::mpsc;
 
     #[tokio::test]
     async fn webhook_store_posts_item_json_with_headers() {
-        let (url, request_rx, server_handle) = spawn_test_server(
+        let (url, mut requests, server_handle) = spawn_test_server(vec![
             "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
-        )
+        ])
         .await;
         let store = Webhook::new(url)
             .with_method(WebhookMethod::Put)
@@ -137,7 +194,7 @@ mod tests {
         store.open("news").await.unwrap();
         store.write(&item, "news").await.unwrap();
 
-        let request = request_rx.await.unwrap();
+        let request = requests.recv().await.unwrap();
         assert!(request.starts_with("PUT /items HTTP/1.1\r\n"));
         assert!(
             request
@@ -156,9 +213,9 @@ mod tests {
 
     #[tokio::test]
     async fn webhook_store_rejects_non_success_status() {
-        let (url, _request_rx, server_handle) = spawn_test_server(
+        let (url, _requests, server_handle) = spawn_test_server(vec![
             "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 5\r\nConnection: close\r\n\r\nerror",
-        )
+        ])
         .await;
         let store = Webhook::new(url);
         let item = Item::new().with_field("title", Value::String("period".to_string()));
@@ -173,6 +230,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn webhook_store_retries_retryable_status_with_backoff() {
+        let (url, mut requests, server_handle) = spawn_test_server(vec![
+            "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 5\r\nConnection: close\r\n\r\nerror",
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+        ])
+        .await;
+        let store = Webhook::new(url)
+            .with_retry_limit(1)
+            .with_retry_backoff(SignedDuration::from_millis(1));
+        let item = Item::new().with_field("title", Value::String("period".to_string()));
+
+        store.open("news").await.unwrap();
+        store.write(&item, "news").await.unwrap();
+
+        let first = requests.recv().await.unwrap();
+        let second = requests.recv().await.unwrap();
+
+        assert!(first.starts_with("POST /items HTTP/1.1\r\n"));
+        assert!(second.starts_with("POST /items HTTP/1.1\r\n"));
+
+        server_handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn webhook_store_does_not_retry_non_retryable_status() {
+        let (url, mut requests, server_handle) = spawn_test_server(vec![
+            "HTTP/1.1 400 Bad Request\r\nContent-Length: 3\r\nConnection: close\r\n\r\nbad",
+        ])
+        .await;
+        let store = Webhook::new(url)
+            .with_retry_limit(3)
+            .with_retry_backoff(SignedDuration::from_millis(1));
+        let item = Item::new().with_field("title", Value::String("period".to_string()));
+
+        store.open("news").await.unwrap();
+        let error = store.write(&item, "news").await.unwrap_err();
+
+        assert!(matches!(error, SpiderError::Engine(message)
+                if message.starts_with("webhook store received non-success status 400 Bad Request from http://127.0.0.1:")));
+        assert!(requests.recv().await.is_some());
+        assert!(requests.recv().await.is_none());
+
+        server_handle.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn webhook_store_rejects_invalid_header_name() {
         let store = Webhook::new("http://127.0.0.1:1").with_header("bad header", "value");
         let error = store.open("news").await.unwrap_err();
@@ -182,22 +285,24 @@ mod tests {
     }
 
     async fn spawn_test_server(
-        response: &'static str,
+        responses: Vec<&'static str>,
     ) -> (
         String,
-        oneshot::Receiver<String>,
+        mpsc::UnboundedReceiver<String>,
         tokio::task::JoinHandle<()>,
     ) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let (request_tx, request_rx) = oneshot::channel();
+        let (request_tx, request_rx) = mpsc::unbounded_channel();
 
         let server_handle = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let request = read_http_request(&mut stream).await;
-            request_tx.send(request).ok();
-            stream.write_all(response.as_bytes()).await.unwrap();
-            stream.shutdown().await.unwrap();
+            for response in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request = read_http_request(&mut stream).await;
+                request_tx.send(request).ok();
+                stream.write_all(response.as_bytes()).await.unwrap();
+                stream.shutdown().await.unwrap();
+            }
         });
 
         (format!("http://{address}/items"), request_rx, server_handle)

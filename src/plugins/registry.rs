@@ -114,7 +114,7 @@ mod tests {
             .register(make_manifest("middleware", "redis", false))
             .unwrap();
         registry
-            .register(make_manifest("rules", "redis", false))
+            .register(make_manifest("store", "redis", false))
             .unwrap();
 
         assert_eq!(registry.manifests.len(), 2);
@@ -130,18 +130,18 @@ mod tests {
             .register(make_manifest("middleware", "cookies", false))
             .unwrap();
         registry
-            .register(make_manifest("rules", "local", false))
+            .register(make_manifest("scheduler", "local", false))
             .unwrap();
 
         assert_eq!(registry.by_kind("middleware").len(), 2);
-        assert_eq!(registry.by_kind("rules").len(), 1);
+        assert_eq!(registry.by_kind("scheduler").len(), 1);
     }
 
     #[test]
     fn unknown_kind_is_rejected() {
         let mut registry = PluginRegistry::new();
         let error = registry
-            .register(make_manifest("scheduler", "cron", false))
+            .register(make_manifest("rules", "cron", false))
             .unwrap_err();
 
         assert!(error.to_string().contains("unsupported plugin kind"));

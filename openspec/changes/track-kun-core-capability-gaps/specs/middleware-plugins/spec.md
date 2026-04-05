@@ -48,6 +48,6 @@
 
 #### Scenario: Engine only auto-loads middleware plugins
 
-- **WHEN** plugin manifest 使用 `rules`、`provider` 或 `storage` kind
+- **WHEN** plugin manifest 使用 `store`、`scheduler`、`dedup`、`robots`、`http` 或 `browser` kind
 - **THEN** manifest 可以进入 registry 命名空间
 - **AND** `Engine::load_plugins()` 不会把它们当成已支持的运行时扩展点
