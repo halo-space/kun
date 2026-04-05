@@ -368,7 +368,7 @@ let engine = Engine::new().with_dedup(MethodUrlDedup {
 - `Redis` 现在还显式校验 `worker_id + lease_id` ownership；旧 lease 或错误 worker 不能再覆盖当前 inflight owner
 - `scheduler::checkpoint::Memory` 会在调度状态变化后自动把 checkpoint 保存到共享 `Persist`
 - `checkpoint` 恢复的仍然只是保存时那份静态 `ready / delayed / inflight` 快照，不承担 runtime reclaim
-- 当前 durable scheduler 的最小运行时语义已经完成：除了文件、Redis 两种 checkpoint 持久化，也已经提供直接基于 Redis 的 durable scheduler；当前这层已经覆盖最小 worker ownership、heartbeat 与 stale reclaim，后续如果继续增强，重点会是更高阶事务协调、观测与运维能力
+- 当前 durable scheduler 的最小运行时语义已经完成：除了文件、Redis 两种 checkpoint 持久化，也已经提供直接基于 Redis 的 durable scheduler；当前这层已经覆盖最小 worker ownership、heartbeat、stale reclaim、namespace snapshot 与跨 namespace 运维读取入口。
 
 后续如果补更多 scheduler / checkpoint 后端，也继续是“同一套 trait，不同存储实现”，而不是重写一套新的任务语义。
 
@@ -534,6 +534,7 @@ let engine = Engine::new().with_dedup(MethodUrlDedup {
 - 默认 robots 组件是 `robots::Memory`
 - 默认 cache backend 是 `robots::cache::Memory`
 - 默认 `robots::Memory` 会按 `24h` 的 `cache_ttl` 判断缓存是否过期；调用方也可以通过 `with_cache_ttl(...)` 覆盖，或通过 `without_cache_ttl()` 关闭这层自动过期
+- 当 `robots.txt` 临时不可用且当前 origin 没有可用缓存时，默认按 `robots::UnavailablePolicy::AllowAll` fail-open；如果调用方想更保守，可以显式切到 `robots::UnavailablePolicy::DisallowAll`
 - 当前也已提供内置 `robots::cache::File`，用于把 robots policy 持久化到磁盘 JSON 文件；`robots::cache::File::default()` 的路径是 `output/robots-cache.json`
 - 如果调用方想保留 `robots::Memory` 这套抓取与判定逻辑、但替换 cache backend，可以继续用 `robots::Memory::with_cache(...)`
 - 如果调用方要替换这层策略，可以通过 `Engine::with_robots(...)` 挂自己的实现
@@ -558,7 +559,7 @@ let engine = Engine::new().with_dedup(MethodUrlDedup {
 - 只覆盖 HTTP / HTTPS URL；其它 scheme 当前直接放行
 - `404 robots.txt` 当前视为允许全部
 - `401` / `403 robots.txt` 当前视为拒绝全部
-- 其它抓取失败或非成功状态当前走 fail-open，记录日志后允许继续请求
+- 其它抓取失败或非成功状态默认走 fail-open，记录日志后允许继续请求；调用方也可以用 `robots::Memory::with_unavailable_policy(robots::UnavailablePolicy::DisallowAll)` 改成更保守的 fail-closed
 - stale cache 刷新失败时，当前会优先回退旧缓存，而不是直接把旧 policy 冲掉
 - sitemap 自动种子当前只走最小 HTTP 抓取和 XML 解析；抓取失败时会记录日志并继续原有 start URL，不会中断整轮爬取
 - 更复杂的站点级策略还没补

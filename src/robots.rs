@@ -54,6 +54,15 @@ pub trait Robot: Send + Sync {
     }
 }
 
+/// Policy to apply when robots.txt is temporarily unavailable and there is no
+/// usable cached policy to fall back to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UnavailablePolicy {
+    #[default]
+    AllowAll,
+    DisallowAll,
+}
+
 /// Default in-memory robots.txt policy implementation.
 ///
 /// This implementation keeps a hot in-process cache per origin and uses a
@@ -62,6 +71,7 @@ pub trait Robot: Send + Sync {
 pub struct Memory<C = cache::Memory> {
     cache: C,
     cache_ttl: Option<u64>,
+    unavailable_policy: UnavailablePolicy,
     policies: tokio::sync::Mutex<BTreeMap<String, CachedPolicy>>,
     crawl_deadlines: tokio::sync::Mutex<BTreeMap<String, u64>>,
 }
@@ -83,6 +93,7 @@ impl Default for Memory<cache::Memory> {
         Self {
             cache: cache::Memory::default(),
             cache_ttl: Some(86_400_000),
+            unavailable_policy: UnavailablePolicy::AllowAll,
             policies: tokio::sync::Mutex::new(BTreeMap::new()),
             crawl_deadlines: tokio::sync::Mutex::new(BTreeMap::new()),
         }
@@ -94,6 +105,7 @@ impl<C> Memory<C> {
         Memory {
             cache,
             cache_ttl: self.cache_ttl,
+            unavailable_policy: self.unavailable_policy,
             policies: self.policies,
             crawl_deadlines: self.crawl_deadlines,
         }
@@ -106,6 +118,14 @@ impl<C> Memory<C> {
 
     pub fn without_cache_ttl(mut self) -> Self {
         self.cache_ttl = None;
+        self
+    }
+
+    /// Overrides how this policy behaves when robots.txt is temporarily
+    /// unavailable and there is no usable cached policy for the current
+    /// origin.
+    pub fn with_unavailable_policy(mut self, policy: UnavailablePolicy) -> Self {
+        self.unavailable_policy = policy;
         self
     }
 }
@@ -225,7 +245,7 @@ impl<C: Cache> Memory<C> {
                     .await;
                 Ok(policy)
             }
-            FetchResult::AllowAllFallback => {
+            FetchResult::Unavailable => {
                 if let Some(entry) = cached_entry {
                     tracing::warn!(
                         origin = origin.as_str(),
@@ -239,9 +259,10 @@ impl<C: Cache> Memory<C> {
 
                 tracing::warn!(
                     origin = origin.as_str(),
-                    "failed to fetch robots.txt, allowing requests without caching fallback policy"
+                    unavailable_policy = ?self.unavailable_policy,
+                    "failed to fetch robots.txt, applying configured unavailable policy without caching fallback"
                 );
-                Ok(Arc::new(Policy::AllowAll))
+                Ok(Arc::new(self.unavailable_policy.policy()))
             }
         }
     }
@@ -310,6 +331,14 @@ enum Policy {
 }
 
 impl Policy {
+    fn allow_all() -> Self {
+        Self::AllowAll
+    }
+
+    fn disallow_all() -> Self {
+        Self::DisallowAll
+    }
+
     fn parse(body: &str) -> Self {
         let rules = Rules::parse(body);
         if rules.groups.is_empty() && rules.sitemaps.is_empty() {
@@ -346,6 +375,15 @@ impl Policy {
         match self {
             Self::AllowAll | Self::DisallowAll => Vec::new(),
             Self::Parsed(rules) => rules.sitemaps.clone(),
+        }
+    }
+}
+
+impl UnavailablePolicy {
+    fn policy(self) -> Policy {
+        match self {
+            Self::AllowAll => Policy::allow_all(),
+            Self::DisallowAll => Policy::disallow_all(),
         }
     }
 }
@@ -574,7 +612,7 @@ enum RuleKind {
 
 enum FetchResult {
     Cacheable(cache::Entry),
-    AllowAllFallback,
+    Unavailable,
 }
 
 async fn fetch_policy_entry(
@@ -598,7 +636,7 @@ async fn fetch_policy_entry(
                 error = %error,
                 "failed to fetch robots.txt"
             );
-            return Ok(FetchResult::AllowAllFallback);
+            return Ok(FetchResult::Unavailable);
         }
     };
 
@@ -612,7 +650,7 @@ async fn fetch_policy_entry(
                         error = %error,
                         "failed to read robots.txt response body"
                     );
-                    return Ok(FetchResult::AllowAllFallback);
+                    return Ok(FetchResult::Unavailable);
                 }
             };
             Ok(FetchResult::Cacheable(cache::Entry::new(
@@ -637,7 +675,7 @@ async fn fetch_policy_entry(
                 status,
                 "robots.txt returned a non-success status"
             );
-            Ok(FetchResult::AllowAllFallback)
+            Ok(FetchResult::Unavailable)
         }
     }
 }
@@ -1025,6 +1063,35 @@ mod tests {
         let request = Request::new("http://127.0.0.1:9/private/page");
 
         assert!(!robot.is_allowed(&request, "kun").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn robot_can_disallow_when_robots_is_unavailable() {
+        let robot = Memory::new().with_unavailable_policy(UnavailablePolicy::DisallowAll);
+        let request = Request::new("http://127.0.0.1:9/private/page");
+
+        assert!(!robot.is_allowed(&request, "kun").await.unwrap());
+        assert_eq!(
+            robot.check(&request, "kun").await.unwrap(),
+            Decision::Disallow
+        );
+    }
+
+    #[tokio::test]
+    async fn robot_reuses_stale_cached_policy_before_unavailable_policy() {
+        let stale_at = now().saturating_sub(5_000);
+        let cache = SeededCache::with_entry(cache::Entry::new(
+            "http://127.0.0.1:9",
+            stale_at,
+            cache::Policy::Body("User-agent: *\nAllow: /\n".to_string()),
+        ));
+        let robot = Memory::new()
+            .with_cache(cache)
+            .with_cache_ttl(SignedDuration::from_secs(1))
+            .with_unavailable_policy(UnavailablePolicy::DisallowAll);
+        let request = Request::new("http://127.0.0.1:9/private/page");
+
+        assert!(robot.is_allowed(&request, "kun").await.unwrap());
     }
 
     #[tokio::test]

@@ -424,6 +424,13 @@
 - And 当 `robots.txt` 返回 `401` 或 `403` 时，当前 origin 视为拒绝抓取
 - And 其它抓取失败或非成功状态当前保持 fail-open
 
+#### Scenario: Robots memory policy can switch to strict unavailable handling
+
+- Given 调用方使用 `robots::Memory::with_unavailable_policy(robots::UnavailablePolicy::DisallowAll)`
+- And 当前 origin 没有可用 robots cache
+- When 这次 `robots.txt` 抓取失败或返回临时非成功状态
+- Then 该 origin 当前按拒绝抓取处理，而不是继续 fail-open
+
 #### Scenario: Robots matching supports wildcard and group specificity
 
 - Given 某个 robots policy 同时声明了多个 `User-agent` group 与带 `*` / `$` 的规则
@@ -477,6 +484,14 @@
 - When 引擎尝试刷新它，但这次抓取 `robots.txt` 失败或返回临时非成功状态
 - Then 引擎优先继续复用这条旧 cache policy
 - And 不会因为这次刷新失败直接把旧 policy 替换成新的 fail-open 缓存条目
+
+#### Scenario: Stale robots cache still has priority over strict unavailable policy
+
+- Given 调用方对 `robots::Memory` 配置了 `robots::UnavailablePolicy::DisallowAll`
+- And 当前 origin 已有一条过期的 robots cache
+- When 引擎尝试刷新它，但这次抓取 `robots.txt` 失败或返回临时非成功状态
+- Then 引擎优先继续复用这条旧 cache policy
+- And 不会直接放弃旧缓存并改用新的 strict unavailable policy
 
 ### Requirement: Scheduler 以 task identity 跟踪任务生命周期
 

@@ -386,6 +386,21 @@
 - **THEN** 引擎优先继续复用这条旧 cache policy
 - **AND** 不会因为这次刷新失败直接把旧 policy 替换成新的 fail-open 缓存条目
 
+#### Scenario: Robots memory policy can become strict when robots is unavailable
+
+- **WHEN** 调用方对 `robots::Memory` 配置 `with_unavailable_policy(robots::UnavailablePolicy::DisallowAll)`
+- **AND** 当前 origin 没有可用 robots cache
+- **AND** 这次 `robots.txt` 抓取失败或返回临时非成功状态
+- **THEN** 当前 origin 按拒绝抓取处理，而不是继续 fail-open
+
+#### Scenario: Stale robots cache still has priority over strict unavailable policy
+
+- **WHEN** 调用方对 `robots::Memory` 配置 `with_unavailable_policy(robots::UnavailablePolicy::DisallowAll)`
+- **AND** 当前 origin 已有过期的 robots cache
+- **AND** 这次刷新抓取失败或返回临时非成功状态
+- **THEN** 引擎继续复用旧 cache policy
+- **AND** 不会直接放弃旧缓存并改用新的 unavailable policy
+
 ### Requirement: HTTP Downloader Wires Shared Transport Semantics
 
 系统 MUST 在 HTTP downloader 中把 timeout、cookie jar、proxy 与 redirect 统一接到共享 request 语义上。

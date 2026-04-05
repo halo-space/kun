@@ -193,6 +193,8 @@
 - [x] 22.4 明确 `robots` cache 的过期、刷新与抓取失败回退语义，避免长期复用陈旧 policy。
   - 当前默认按 `24h` 的 `cache_ttl` 复用 robots policy；条目过期后会尝试刷新，刷新失败时优先回退旧缓存；如果调用方需要不同语义，可以通过 `with_cache_ttl(...)` 覆盖或 `without_cache_ttl()` 关闭自动过期。
 - [x] 22.5 同步 `README.md`、`docs/capabilities.md`、相关 specs 与测试。
+- [x] 22.6 为 `robots::Memory` 补最小站点策略开关，允许调用方在 `robots.txt` 临时不可用且无可用缓存时，显式选择 fail-open 或 fail-closed。
+  - 当前已补 `robots::UnavailablePolicy::{AllowAll, DisallowAll}` 与 `robots::Memory::with_unavailable_policy(...)`；默认保持原来的 fail-open，调用方也可以显式切到更保守的 `DisallowAll`，且 stale cache 刷新失败时仍优先复用旧 policy。
 
 ## 23. P0 Dedup 能力继续增强
 
