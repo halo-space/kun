@@ -569,6 +569,9 @@ let engine = Engine::new().with_extension(extensions::Summary);
 - 当 `robots.txt` 临时不可用且当前 origin 没有可用缓存时，默认按 `robots::UnavailablePolicy::AllowAll` fail-open；如果调用方想更保守，可以显式切到 `robots::UnavailablePolicy::DisallowAll`
 - 对这类“临时不可用且暂无可用 cache”的结果，默认还会按 `60s` 的 `unavailable_retry_delay` 做短暂退避；在这个窗口内，同一 origin 不会每次请求都重新抓一次 `robots.txt`
 - 当前也已提供内置 `robots::cache::File`，用于把 robots policy 持久化到磁盘 JSON 文件；`robots::cache::File::default()` 的路径是 `output/robots-cache.json`
+- `robots::Memory` 现在也支持 `with_site_policy(origin, robots::SitePolicy::new()...)` 这种 per-origin 站点策略 overlay
+- 这层 overlay 当前可以强制 `AllowAll / DisallowAll`、追加更严格的最小 delay、补充额外 sitemap，以及单独覆盖某个 origin 的 unavailable policy
+- `with_site_policy(...)` 里的 origin 以 `scheme://host[:port]` 为准；如果传完整 URL，当前会自动归一化回对应 origin
 - 如果调用方想保留 `robots::Memory` 这套抓取与判定逻辑、但替换 cache backend，可以继续用 `robots::Memory::with_cache(...)`
 - 如果调用方要替换这层策略，可以通过 `Engine::with_robots(...)` 挂自己的实现
 - `robots::Robot` 现在除了 `is_allowed(...)`，也可以通过 `check(...)` 返回 `Allow / Disallow / Delay(...)`，并通过 `sitemaps(...)` 读取当前 origin 声明的 sitemap URL
@@ -599,6 +602,7 @@ let engine = Engine::new().with_extension(extensions::Summary);
 - stale cache 刷新失败时，当前会优先回退旧缓存，而不是直接把旧 policy 冲掉
 - 如果当前 origin 没有可用 cache 且这次抓取临时失败，`robots::Memory` 默认会在 `60s` 的 retry delay 窗口里复用这次 unavailable 决策；调用方也可以通过 `with_unavailable_retry_delay(...)` 覆盖，或通过 `without_unavailable_retry_delay()` 关闭
 - sitemap 自动种子当前只走最小 HTTP 抓取和 XML 解析；抓取失败时会记录日志并继续原有 start URL，不会中断整轮爬取
+- 当前 site policy overlay 只支持 exact origin 级别，不支持域名模式、通配匹配或更复杂的多站点分组策略
 - 更复杂的站点级策略还没补
 
 如果只想用内置持久化 cache，可以直接这样挂：
@@ -643,6 +647,28 @@ use jiff::SignedDuration;
 let robots = robots::Memory::new()
     .with_unavailable_policy(robots::UnavailablePolicy::DisallowAll)
     .with_unavailable_retry_delay(SignedDuration::from_secs(120));
+
+let engine = Engine::new()
+    .with_robots(robots)
+    .with_settings(Settings::default().with_robots_obey(true));
+```
+
+如果你希望对某个 origin 叠加显式站点策略，而不是重写整套 `Robot`，可以这样写：
+
+```rust
+use halo_spider::engine::Engine;
+use halo_spider::robots;
+use halo_spider::settings::Settings;
+use jiff::SignedDuration;
+
+let robots = robots::Memory::new().with_site_policy(
+    "https://example.com/articles/1",
+    robots::SitePolicy::new()
+        .with_access(robots::SiteAccess::AllowAll)
+        .with_delay(SignedDuration::from_millis(500))
+        .with_sitemap("https://example.com/custom-sitemap.xml")
+        .with_unavailable_policy(robots::UnavailablePolicy::DisallowAll),
+);
 
 let engine = Engine::new()
     .with_robots(robots)

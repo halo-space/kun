@@ -206,6 +206,8 @@
   - 当前 `response.sitemap()` 与 engine 的 robots sitemap 自动种子都已支持 gzip magic 头的 sitemap body；普通 XML 与常见 `.xml.gz` 都能走同一条解析路径。
 - [x] 22.11 让 robots sitemap 抓取与自动种子继承 start request 的共享请求语义，而不是退回裸 `Request::new(...)`。
   - 当前 spider 已可通过 `build_start_requests()` 返回完整 `Request`；引擎抓取 sitemap 时会继承对应 start request 的 headers、cookies、timeout、proxy、session 等共享请求能力，并强制走 HTTP 下载；由 sitemap 生成的页面请求则继续继承原始 start request 的共享请求语义。
+- [x] 22.12 为内置 `robots::Memory` 补 per-origin 站点策略 overlay，允许调用方不重写整套 `Robot` 就能显式配置站点级 allow/disallow、delay、sitemap 与 unavailable 语义。
+  - 当前已补 `robots::SitePolicy`、`robots::SiteAccess` 与 `robots::Memory::with_site_policy(...)`；调用方可以对指定 origin 叠加显式站点策略，覆盖 allow/disallow、追加更严格 delay、合并额外 sitemap，并对单个 origin 单独覆盖 unavailable policy。
 
 ## 23. P0 Dedup 能力继续增强
 

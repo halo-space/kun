@@ -562,6 +562,27 @@
 - Then 引擎优先继续复用这条旧 cache policy
 - And 不会直接放弃旧缓存并改用新的 strict unavailable policy
 
+#### Scenario: Callers can overlay explicit per-origin site policy on robots memory
+
+- Given 调用方保留内置 `robots::Memory`
+- And 它通过 `robots::Memory::with_site_policy(...)` 为某个 origin 配置 `robots::SitePolicy`
+- When 引擎判断这个 origin 的 robots 决策
+- Then 这条显式站点策略会叠加在原始 `robots.txt` 语义之上
+
+#### Scenario: Site policy can force access or stricter delay
+
+- Given 某个 origin 同时存在 `robots.txt` 规则和显式 `robots::SitePolicy`
+- When 该站点策略配置了 `SiteAccess::AllowAll`、`SiteAccess::DisallowAll` 或额外 delay
+- Then 调用方可以显式覆盖该 origin 的允许/拒绝语义
+- And 最终 delay 取 robots delay 和站点策略 delay 里更严格的那个
+
+#### Scenario: Site policy can add sitemap and override unavailable handling per origin
+
+- Given 调用方对某个 origin 配置了额外 sitemap 或单独的 unavailable policy
+- When 引擎读取这个 origin 的 sitemap 列表，或该 origin 的 `robots.txt` 临时不可用
+- Then 额外 sitemap 会并入当前 origin 的 sitemap 集合
+- And unavailable 处理优先使用这个 origin 的站点策略，而不是全局默认值
+
 ### Requirement: Scheduler 以 task identity 跟踪任务生命周期
 
 库必须使用稳定的 task identity 跟踪 ready、delayed、inflight 与 retry 任务，而不是只依赖 URL。

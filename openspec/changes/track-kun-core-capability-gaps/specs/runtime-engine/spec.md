@@ -460,6 +460,25 @@
 - **THEN** 引擎继续复用旧 cache policy
 - **AND** 不会直接放弃旧缓存并改用新的 unavailable policy
 
+#### Scenario: Callers can overlay explicit per-origin site policy on robots memory
+
+- **WHEN** 调用方保留内置 `robots::Memory`
+- **AND** 它通过 `robots::Memory::with_site_policy(...)` 为某个 origin 配置 `robots::SitePolicy`
+- **THEN** 这条显式站点策略会叠加在原始 `robots.txt` 语义之上
+
+#### Scenario: Site policy can force access or stricter delay
+
+- **WHEN** 某个 origin 同时存在 `robots.txt` 规则和显式 `robots::SitePolicy`
+- **AND** 该站点策略配置了 `SiteAccess::AllowAll`、`SiteAccess::DisallowAll` 或额外 delay
+- **THEN** 调用方可以显式覆盖该 origin 的允许/拒绝语义
+- **AND** 最终 delay 取 robots delay 和站点策略 delay 里更严格的那个
+
+#### Scenario: Site policy can add sitemap and override unavailable handling per origin
+
+- **WHEN** 调用方对某个 origin 配置了额外 sitemap 或单独的 unavailable policy
+- **THEN** 额外 sitemap 会并入当前 origin 的 sitemap 集合
+- **AND** 当该 origin 的 `robots.txt` 临时不可用时，优先使用这个 origin 的站点策略 unavailable 处理
+
 ### Requirement: HTTP Downloader Wires Shared Transport Semantics
 
 系统 MUST 在 HTTP downloader 中把 timeout、cookie jar、proxy 与 redirect 统一接到共享 request 语义上。

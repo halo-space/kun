@@ -63,6 +63,49 @@ pub enum UnavailablePolicy {
     DisallowAll,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SiteAccess {
+    AllowAll,
+    DisallowAll,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SitePolicy {
+    access: Option<SiteAccess>,
+    delay: Option<u64>,
+    sitemaps: Vec<String>,
+    unavailable_policy: Option<UnavailablePolicy>,
+}
+
+impl SitePolicy {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_access(mut self, access: SiteAccess) -> Self {
+        self.access = Some(access);
+        self
+    }
+
+    pub fn with_delay(mut self, delay: SignedDuration) -> Self {
+        self.delay = Some(non_negative_milliseconds(delay));
+        self
+    }
+
+    pub fn with_sitemap(mut self, url: impl Into<String>) -> Self {
+        let url = url.into();
+        if !url.is_empty() && !self.sitemaps.iter().any(|entry| entry == &url) {
+            self.sitemaps.push(url);
+        }
+        self
+    }
+
+    pub fn with_unavailable_policy(mut self, policy: UnavailablePolicy) -> Self {
+        self.unavailable_policy = Some(policy);
+        self
+    }
+}
+
 /// Default in-memory robots.txt policy implementation.
 ///
 /// This implementation keeps a hot in-process cache per origin and uses a
@@ -73,6 +116,7 @@ pub struct Memory<C = cache::Memory> {
     cache_ttl: Option<u64>,
     unavailable_policy: UnavailablePolicy,
     unavailable_retry_delay: Option<u64>,
+    site_policies: BTreeMap<String, SitePolicy>,
     policies: tokio::sync::Mutex<BTreeMap<String, CachedPolicy>>,
     request_deadlines: tokio::sync::Mutex<BTreeMap<String, u64>>,
     unavailable_retry_at: tokio::sync::Mutex<BTreeMap<String, u64>>,
@@ -97,6 +141,7 @@ impl Default for Memory<cache::Memory> {
             cache_ttl: Some(86_400_000),
             unavailable_policy: UnavailablePolicy::AllowAll,
             unavailable_retry_delay: Some(60_000),
+            site_policies: BTreeMap::new(),
             policies: tokio::sync::Mutex::new(BTreeMap::new()),
             request_deadlines: tokio::sync::Mutex::new(BTreeMap::new()),
             unavailable_retry_at: tokio::sync::Mutex::new(BTreeMap::new()),
@@ -111,6 +156,7 @@ impl<C> Memory<C> {
             cache_ttl: self.cache_ttl,
             unavailable_policy: self.unavailable_policy,
             unavailable_retry_delay: self.unavailable_retry_delay,
+            site_policies: self.site_policies,
             policies: self.policies,
             request_deadlines: self.request_deadlines,
             unavailable_retry_at: self.unavailable_retry_at,
@@ -146,6 +192,12 @@ impl<C> Memory<C> {
         self.unavailable_retry_delay = None;
         self
     }
+
+    pub fn with_site_policy(mut self, origin: impl Into<String>, policy: SitePolicy) -> Self {
+        self.site_policies
+            .insert(normalize_site_origin(origin.into().as_str()), policy);
+        self
+    }
 }
 
 impl<C: Cache> Robot for Memory<C> {
@@ -162,8 +214,14 @@ impl<C: Cache> Robot for Memory<C> {
                 return Ok(true);
             }
 
+            let origin = origin_key(&url);
+            let site_policy = self.site_policy(origin.as_str());
             let policy = self.policy_for(&url, request, user_agent).await?;
-            Ok(policy.is_allowed(&url, user_agent))
+            Ok(match site_policy.and_then(|policy| policy.access) {
+                Some(SiteAccess::AllowAll) => true,
+                Some(SiteAccess::DisallowAll) => false,
+                None => policy.is_allowed(&url, user_agent),
+            })
         })
     }
 
@@ -181,13 +239,33 @@ impl<C: Cache> Robot for Memory<C> {
             }
 
             let origin = origin_key(&url);
+            let site_policy = self.site_policy(origin.as_str());
             let policy = self.policy_for(&url, request, user_agent).await?;
 
-            if !policy.is_allowed(&url, user_agent) {
+            if matches!(
+                site_policy.as_ref().and_then(|policy| policy.access),
+                Some(SiteAccess::DisallowAll)
+            ) {
                 return Ok(Decision::Disallow);
             }
 
-            let Some(required_delay) = policy.required_delay(user_agent) else {
+            if !matches!(
+                site_policy.as_ref().and_then(|policy| policy.access),
+                Some(SiteAccess::AllowAll)
+            ) && !policy.is_allowed(&url, user_agent)
+            {
+                return Ok(Decision::Disallow);
+            }
+
+            let required_delay = max_delay(
+                policy.required_delay(user_agent),
+                site_policy
+                    .as_ref()
+                    .and_then(|policy| policy.delay)
+                    .map(duration_from_millis),
+            );
+
+            let Some(required_delay) = required_delay else {
                 return Ok(Decision::Allow);
             };
 
@@ -222,8 +300,16 @@ impl<C: Cache> Robot for Memory<C> {
                 return Ok(Vec::new());
             }
 
+            let origin = origin_key(&url);
+            let site_policy = self.site_policy(origin.as_str());
             let policy = self.policy_for(&url, request, "").await?;
-            Ok(policy.sitemaps())
+            Ok(merge_sitemaps(
+                policy.sitemaps(),
+                site_policy
+                    .as_ref()
+                    .map(|policy| policy.sitemaps.as_slice())
+                    .unwrap_or_default(),
+            ))
         })
     }
 }
@@ -237,6 +323,7 @@ impl<C: Cache> Memory<C> {
     ) -> Result<Arc<Policy>, SpiderError> {
         let origin = origin_key(url);
         let current_time = now();
+        let site_policy = self.site_policy(origin.as_str());
 
         if let Some(policy) = self.fresh_hot_policy(origin.as_str(), current_time).await {
             return Ok(policy);
@@ -263,7 +350,11 @@ impl<C: Cache> Memory<C> {
                 return Ok(policy);
             }
 
-            return Ok(Arc::new(self.unavailable_policy.policy()));
+            let unavailable_policy = site_policy
+                .as_ref()
+                .and_then(|policy| policy.unavailable_policy)
+                .unwrap_or(self.unavailable_policy);
+            return Ok(Arc::new(unavailable_policy.policy()));
         }
 
         match fetch_policy_entry(url, request, user_agent).await? {
@@ -291,14 +382,22 @@ impl<C: Cache> Memory<C> {
 
                 self.remember_unavailable_retry(origin.as_str(), current_time)
                     .await;
+                let unavailable_policy = site_policy
+                    .as_ref()
+                    .and_then(|policy| policy.unavailable_policy)
+                    .unwrap_or(self.unavailable_policy);
                 tracing::warn!(
                     origin = origin.as_str(),
-                    unavailable_policy = ?self.unavailable_policy,
+                    unavailable_policy = ?unavailable_policy,
                     "failed to fetch robots.txt, applying configured unavailable policy without caching fallback"
                 );
-                Ok(Arc::new(self.unavailable_policy.policy()))
+                Ok(Arc::new(unavailable_policy.policy()))
             }
         }
+    }
+
+    fn site_policy(&self, origin: &str) -> Option<SitePolicy> {
+        self.site_policies.get(origin).cloned()
     }
 
     async fn fresh_hot_policy(&self, origin: &str, current_time: u64) -> Option<Arc<Policy>> {
@@ -820,6 +919,15 @@ fn origin_key(url: &Url) -> String {
     origin
 }
 
+fn normalize_site_origin(value: &str) -> String {
+    let trimmed = value.trim();
+    if let Ok(url) = Url::parse(trimmed) {
+        return origin_key(&url);
+    }
+
+    trimmed.trim_end_matches('/').to_ascii_lowercase()
+}
+
 fn request_path(url: &Url) -> String {
     match url.query() {
         Some(query) => format!("{}?{query}", url.path()),
@@ -917,6 +1025,28 @@ fn rule_specificity_len(pattern: &str) -> usize {
 
 fn duration_from_millis(milliseconds: u64) -> SignedDuration {
     SignedDuration::from_millis(i64::try_from(milliseconds).unwrap_or(i64::MAX))
+}
+
+fn max_delay(
+    left: Option<SignedDuration>,
+    right: Option<SignedDuration>,
+) -> Option<SignedDuration> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
+    }
+}
+
+fn merge_sitemaps(mut current: Vec<String>, extras: &[String]) -> Vec<String> {
+    for sitemap in extras {
+        if !current.iter().any(|entry| entry == sitemap) {
+            current.push(sitemap.clone());
+        }
+    }
+
+    current
 }
 
 fn non_negative_milliseconds(duration: SignedDuration) -> u64 {
@@ -1209,6 +1339,113 @@ mod tests {
         assert_eq!(
             sitemaps,
             vec!["https://example.com/sitemap.xml".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn robot_site_policy_can_force_disallow() {
+        let robot = Memory::new().with_site_policy(
+            "https://example.com/news",
+            SitePolicy::new().with_access(SiteAccess::DisallowAll),
+        );
+        robot
+            .seed_from_body("https://example.com/news/1", "User-agent: *\nAllow: /\n")
+            .await;
+
+        let request = Request::new("https://example.com/news/1");
+
+        assert!(!robot.is_allowed(&request, "kun").await.unwrap());
+        assert_eq!(
+            robot.check(&request, "kun").await.unwrap(),
+            Decision::Disallow
+        );
+    }
+
+    #[tokio::test]
+    async fn robot_site_policy_can_force_allow() {
+        let robot = Memory::new().with_site_policy(
+            "https://example.com",
+            SitePolicy::new().with_access(SiteAccess::AllowAll),
+        );
+        robot
+            .seed_from_body(
+                "https://example.com/private/page",
+                "User-agent: *\nDisallow: /private\n",
+            )
+            .await;
+
+        let request = Request::new("https://example.com/private/page");
+
+        assert!(robot.is_allowed(&request, "kun").await.unwrap());
+        assert_eq!(robot.check(&request, "kun").await.unwrap(), Decision::Allow);
+    }
+
+    #[tokio::test]
+    async fn robot_site_policy_can_apply_additional_delay() {
+        let robot = Memory::new().with_site_policy(
+            "https://example.com",
+            SitePolicy::new().with_delay(SignedDuration::from_millis(20)),
+        );
+        robot
+            .seed_from_body(
+                "https://example.com/news/1",
+                "User-agent: *\nAllow: /\nCrawl-delay: 0.01\n",
+            )
+            .await;
+
+        let first_request = Request::new("https://example.com/news/1");
+        let second_request = Request::new("https://example.com/news/2");
+
+        assert_eq!(
+            robot.check(&first_request, "kun").await.unwrap(),
+            Decision::Allow
+        );
+        let second = robot.check(&second_request, "kun").await.unwrap();
+
+        assert!(matches!(
+            second,
+            Decision::Delay(delay) if delay >= SignedDuration::from_millis(15)
+        ));
+    }
+
+    #[tokio::test]
+    async fn robot_site_policy_can_add_sitemaps() {
+        let robot = Memory::new().with_site_policy(
+            "https://example.com",
+            SitePolicy::new()
+                .with_sitemap("https://example.com/custom.xml")
+                .with_sitemap("https://example.com/news.xml"),
+        );
+        robot
+            .seed_from_body(
+                "https://example.com/news/1",
+                "User-agent: *\nAllow: /\nSitemap: https://example.com/news.xml\n",
+            )
+            .await;
+
+        let request = Request::new("https://example.com/news/1");
+
+        assert_eq!(
+            robot.sitemaps(&request).await.unwrap(),
+            vec![
+                "https://example.com/news.xml".to_string(),
+                "https://example.com/custom.xml".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn robot_site_policy_can_override_unavailable_policy_for_origin() {
+        let robot = Memory::new().with_site_policy(
+            "http://127.0.0.1:9/private/page",
+            SitePolicy::new().with_unavailable_policy(UnavailablePolicy::DisallowAll),
+        );
+        let request = Request::new("http://127.0.0.1:9/private/page");
+
+        assert!(!robot.is_allowed(&request, "kun").await.unwrap());
+        assert_eq!(
+            robot.check(&request, "kun").await.unwrap(),
+            Decision::Disallow
         );
     }
 
