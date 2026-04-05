@@ -454,6 +454,13 @@
 - Then 更具体的 group 优先于 wildcard group
 - And 路径匹配支持 `*` wildcard 与末尾 `$` end anchor
 
+#### Scenario: Robots matching normalizes rule targets before path matching
+
+- Given 某个 robots policy 的第一行带 UTF-8 BOM，或 `Allow` / `Disallow` 使用了 absolute URL / protocol-relative 规则值
+- When 引擎解析并匹配这些规则
+- Then 系统会先把这些规则值归一化到统一 URL 目标语义
+- And 只有 host 命中的 absolute 规则才会继续参与路径匹配
+
 #### Scenario: Robots component can expose sitemap URLs
 
 - Given 当前 origin 的 `robots.txt` 声明了一个或多个 `Sitemap`

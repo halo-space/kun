@@ -162,10 +162,8 @@ impl<C: Cache> Robot for Memory<C> {
                 return Ok(true);
             }
 
-            let path = request_path(&url);
             let policy = self.policy_for(&url, request, user_agent).await?;
-
-            Ok(policy.is_allowed(path.as_str(), user_agent))
+            Ok(policy.is_allowed(&url, user_agent))
         })
     }
 
@@ -183,10 +181,9 @@ impl<C: Cache> Robot for Memory<C> {
             }
 
             let origin = origin_key(&url);
-            let path = request_path(&url);
             let policy = self.policy_for(&url, request, user_agent).await?;
 
-            if !policy.is_allowed(path.as_str(), user_agent) {
+            if !policy.is_allowed(&url, user_agent) {
                 return Ok(Decision::Disallow);
             }
 
@@ -426,11 +423,11 @@ impl Policy {
         }
     }
 
-    fn is_allowed(&self, path: &str, user_agent: &str) -> bool {
+    fn is_allowed(&self, url: &Url, user_agent: &str) -> bool {
         match self {
             Self::AllowAll => true,
             Self::DisallowAll => false,
-            Self::Parsed(rules) => rules.is_allowed(path, user_agent),
+            Self::Parsed(rules) => rules.is_allowed(url, user_agent),
         }
     }
 
@@ -474,7 +471,7 @@ impl Rules {
         let mut current_request_interval = None;
 
         for raw_line in body.lines() {
-            let line = strip_comment(raw_line).trim();
+            let line = strip_utf8_bom(strip_comment(raw_line)).trim();
             if line.is_empty() {
                 finalize_group(
                     &mut groups,
@@ -548,8 +545,9 @@ impl Rules {
         Self { groups, sitemaps }
     }
 
-    fn is_allowed(&self, path: &str, user_agent: &str) -> bool {
+    fn is_allowed(&self, url: &Url, user_agent: &str) -> bool {
         let user_agent = user_agent.to_ascii_lowercase();
+        let path = request_path(url);
         let matching_rules = self
             .matching_groups(user_agent.as_str())
             .into_iter()
@@ -558,7 +556,7 @@ impl Rules {
 
         let mut best_match = None::<(usize, RuleKind)>;
         for rule in matching_rules {
-            let Some(match_length) = rule.match_length(path) else {
+            let Some(match_length) = rule.match_length(url, path.as_str()) else {
                 continue;
             };
 
@@ -577,6 +575,12 @@ impl Rules {
         }
 
         !matches!(best_match, Some((_, RuleKind::Disallow)))
+    }
+
+    #[cfg(test)]
+    fn is_allowed_path(&self, path: &str, user_agent: &str) -> bool {
+        let url = Url::parse(format!("https://example.com{path}").as_str()).unwrap();
+        self.is_allowed(&url, user_agent)
     }
 
     fn required_delay(&self, user_agent: &str) -> Option<SignedDuration> {
@@ -655,6 +659,7 @@ impl Group {
 #[derive(Debug, Clone)]
 struct Rule {
     kind: RuleKind,
+    host: Option<String>,
     pattern: String,
     match_regex: Option<PatternRegex>,
     specificity_len: usize,
@@ -670,17 +675,24 @@ impl Rule {
     }
 
     fn new(kind: RuleKind, path: &str) -> Self {
-        let pattern = normalize_rule_path(path);
+        let (host, pattern) = normalize_rule_target(path);
         Self {
             kind,
+            host,
             match_regex: compile_rule_regex(pattern.as_str()),
             specificity_len: rule_specificity_len(pattern.as_str()),
             pattern,
         }
     }
 
-    fn match_length(&self, path: &str) -> Option<usize> {
+    fn match_length(&self, url: &Url, path: &str) -> Option<usize> {
         if self.pattern.is_empty() {
+            return None;
+        }
+
+        if let Some(host) = &self.host
+            && !request_host(url).eq_ignore_ascii_case(host.as_str())
+        {
             return None;
         }
 
@@ -815,6 +827,10 @@ fn request_path(url: &Url) -> String {
     }
 }
 
+fn request_host(url: &Url) -> &str {
+    url.host_str().unwrap_or_default()
+}
+
 fn strip_comment(line: &str) -> &str {
     match line.split_once('#') {
         Some((content, _)) => content,
@@ -822,8 +838,33 @@ fn strip_comment(line: &str) -> &str {
     }
 }
 
-fn normalize_rule_path(path: &str) -> String {
-    path.trim().to_string()
+fn strip_utf8_bom(line: &str) -> &str {
+    line.strip_prefix('\u{feff}').unwrap_or(line)
+}
+
+fn normalize_rule_target(value: &str) -> (Option<String>, String) {
+    let value = value.trim();
+    if value.is_empty() {
+        return (None, String::new());
+    }
+
+    if let Ok(url) = Url::parse(value) {
+        return (
+            Some(request_host(&url).to_ascii_lowercase()),
+            request_path(&url),
+        );
+    }
+
+    if value.starts_with("//")
+        && let Ok(url) = Url::parse(format!("https:{value}").as_str())
+    {
+        return (
+            Some(request_host(&url).to_ascii_lowercase()),
+            request_path(&url),
+        );
+    }
+
+    (None, value.to_string())
 }
 
 fn parse_crawl_delay(value: &str) -> Option<u64> {
@@ -931,8 +972,8 @@ mod tests {
             "#,
         );
 
-        assert!(rules.is_allowed("/news", "kun-bot"));
-        assert!(!rules.is_allowed("/private/page", "kun-bot"));
+        assert!(rules.is_allowed_path("/news", "kun-bot"));
+        assert!(!rules.is_allowed_path("/private/page", "kun-bot"));
     }
 
     #[test]
@@ -947,8 +988,8 @@ mod tests {
             "#,
         );
 
-        assert!(rules.is_allowed("/anything", "kun-bot"));
-        assert!(!rules.is_allowed("/anything", "other-bot"));
+        assert!(rules.is_allowed_path("/anything", "kun-bot"));
+        assert!(!rules.is_allowed_path("/anything", "other-bot"));
     }
 
     #[test]
@@ -961,9 +1002,9 @@ mod tests {
             "#,
         );
 
-        assert!(!rules.is_allowed("/private/secret", "kun"));
-        assert!(rules.is_allowed("/private/public", "kun"));
-        assert!(rules.is_allowed("/private/public/page", "kun"));
+        assert!(!rules.is_allowed_path("/private/secret", "kun"));
+        assert!(rules.is_allowed_path("/private/public", "kun"));
+        assert!(rules.is_allowed_path("/private/public/page", "kun"));
     }
 
     #[test]
@@ -977,9 +1018,52 @@ mod tests {
             "#,
         );
 
-        assert!(!rules.is_allowed("/search?q=rust", "kun"));
-        assert!(rules.is_allowed("/feed/daily.xml", "kun"));
-        assert!(!rules.is_allowed("/feed/daily.xml.gz", "kun"));
+        assert!(!rules.is_allowed_path("/search?q=rust", "kun"));
+        assert!(rules.is_allowed_path("/feed/daily.xml", "kun"));
+        assert!(!rules.is_allowed_path("/feed/daily.xml.gz", "kun"));
+    }
+
+    #[test]
+    fn rules_strip_utf8_bom_before_parsing_directives() {
+        let rules = Rules::parse("\u{feff}User-agent: *\nDisallow: /private\nAllow: /public\n");
+
+        assert!(!rules.is_allowed_path("/private", "kun"));
+        assert!(rules.is_allowed_path("/public", "kun"));
+    }
+
+    #[test]
+    fn rules_support_absolute_url_targets_for_same_host() {
+        let rules = Rules::parse(
+            r#"
+            User-agent: *
+            Disallow: https://example.com/private
+            Allow: https://example.com/private/public
+            "#,
+        );
+
+        let private_url = Url::parse("https://example.com/private/report").unwrap();
+        let public_url = Url::parse("https://example.com/private/public/page").unwrap();
+        let other_host_url = Url::parse("https://other.example.com/private/report").unwrap();
+
+        assert!(!rules.is_allowed(&private_url, "kun"));
+        assert!(rules.is_allowed(&public_url, "kun"));
+        assert!(rules.is_allowed(&other_host_url, "kun"));
+    }
+
+    #[test]
+    fn rules_support_protocol_relative_targets_for_same_host() {
+        let rules = Rules::parse(
+            r#"
+            User-agent: *
+            Disallow: //example.com/search?*
+            "#,
+        );
+
+        let blocked_url = Url::parse("https://example.com/search?q=rust").unwrap();
+        let allowed_url = Url::parse("https://example.com/news").unwrap();
+
+        assert!(!rules.is_allowed(&blocked_url, "kun"));
+        assert!(rules.is_allowed(&allowed_url, "kun"));
     }
 
     #[test]

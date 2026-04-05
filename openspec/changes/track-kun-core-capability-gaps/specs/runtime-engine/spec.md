@@ -357,6 +357,12 @@
 - **THEN** 更具体的 group 优先于 wildcard group
 - **AND** 路径匹配支持 `*` wildcard 与末尾 `$` end anchor
 
+#### Scenario: Robots matching normalizes rule targets before path matching
+
+- **WHEN** 某个 robots policy 的第一行带 UTF-8 BOM，或 `Allow` / `Disallow` 使用了 absolute URL / protocol-relative 规则值
+- **THEN** 系统会先把这些规则值归一化到统一 URL 目标语义
+- **AND** 只有 host 命中的 absolute 规则才会继续参与路径匹配
+
 #### Scenario: Robots component can expose sitemap URLs
 
 - **WHEN** 当前 origin 的 `robots.txt` 声明了一个或多个 `Sitemap`

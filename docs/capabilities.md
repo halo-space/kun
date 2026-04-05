@@ -556,6 +556,7 @@ let engine = Engine::new().with_dedup(MethodUrlDedup {
 - 支持 `Sitemap`
 - 支持更完整的 `User-agent group` 选择：优先更具体的 agent token；同一 specificity 的 group 会合并规则
 - 支持 `*` wildcard 与末尾 `$` end anchor
+- 支持按统一 URL 语义解析规则目标：常见的 UTF-8 BOM、absolute URL 和 protocol-relative 规则值都会先归一化，再进入同一套匹配逻辑
 - 多个规则同时命中时，优先使用更长路径；同长度时 `Allow` 优先于 `Disallow`
 - 如果没有匹配规则，默认允许抓取
 
