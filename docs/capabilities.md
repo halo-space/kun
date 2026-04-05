@@ -366,7 +366,7 @@ let engine = Engine::new().with_dedup(MethodUrlDedup {
 - `Redis` 现在还显式校验 `worker_id + lease_id` ownership；旧 lease 或错误 worker 不能再覆盖当前 inflight owner
 - `scheduler::checkpoint::Memory` 会在调度状态变化后自动把 checkpoint 保存到共享 `Persist`
 - `checkpoint` 恢复的仍然只是保存时那份静态 `ready / delayed / inflight` 快照，不承担 runtime reclaim
-- 当前 durable 能力已经提供文件、Redis 两种 checkpoint 持久化，也已经提供直接基于 Redis 的 durable scheduler；当前这层已经覆盖最小 worker ownership、heartbeat 与 stale reclaim，后续如果继续增强，重点会是更高阶事务协调、观测与运维能力
+- 当前 durable scheduler 的最小运行时语义已经完成：除了文件、Redis 两种 checkpoint 持久化，也已经提供直接基于 Redis 的 durable scheduler；当前这层已经覆盖最小 worker ownership、heartbeat 与 stale reclaim，后续如果继续增强，重点会是更高阶事务协调、观测与运维能力
 
 后续如果补更多 scheduler / checkpoint 后端，也继续是“同一套 trait，不同存储实现”，而不是重写一套新的任务语义。
 
@@ -673,10 +673,6 @@ let engine = Engine::new()
 - Feed
 - AI selector
 
-当前仍待补齐的 parser 能力：
-
-- OCR
-
 `HTML XPath` 现在已经接入统一执行链路：框架会先用 HTML parser 构建 DOM，再把它规范化成 XML-safe markup，最后交给 `xrust` 执行 XPath；因此 `response.xpath(...)` 与 `response.xml(...)` 现在共享同一套 `one()`、`all()`、`text()`、`html()` 与 `attr()` 语义。
 
 最小用法示例：
@@ -718,7 +714,7 @@ let section_html = response.xpath("//section[@id='content']").html().one();
 - `require_non_empty()`：要求至少有一个非空结果，否则直接返回 parse error
 - `require_one()`：要求恰好只有一个非空结果，否则直接返回 parse error
 
-当前已经覆盖多 query 兜底、结构过滤/投影、数组拉平、结果切片/去重、string transform、URL resolve、embedded JSON parse、number/bool/datetime conversion 与 query-level assertions；剩余 parser 主缺口现在主要回到 OCR。
+当前已经覆盖多 query 兜底、结构过滤/投影、数组拉平、结果切片/去重、string transform、URL resolve、embedded JSON parse、number/bool/datetime conversion 与 query-level assertions。
 
 ## Validation
 

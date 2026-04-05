@@ -114,7 +114,6 @@ pub enum SelectorKind {
     Xml,
     Regex,
     Ai,
-    Ocr,
 }
 
 #[derive(Debug, Clone, PartialEq)]

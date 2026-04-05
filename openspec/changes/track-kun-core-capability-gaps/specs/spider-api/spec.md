@@ -175,11 +175,6 @@
 - **AND** `one()`、`all()`、`text()`、`html()` 与 `attr()` 在 HTML / XML 场景下保持一致的最小语义
 - **AND** 常见的非严格 HTML 仍能得到稳定、可测试的提取结果
 
-#### Scenario: OCR-capable selector type is not schema-only
-
-- **WHEN** 规则 schema 或解析能力暴露了 OCR 相关 selector/type
-- **THEN** 该能力必须有对应的运行时实现，或从公开 schema 中移除
-
 #### Scenario: Query transforms can resolve relative URLs against a base URL
 
 - **WHEN** 用户对 `ValueQuery` 调用 `resolve_url(base_url)`

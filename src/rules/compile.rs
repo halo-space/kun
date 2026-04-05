@@ -423,7 +423,6 @@ fn compile_selector_type(value: &str) -> Result<SelectorKind, SpiderError> {
         "xml" => Ok(SelectorKind::Xml),
         "regex" => Ok(SelectorKind::Regex),
         "ai" => Ok(SelectorKind::Ai),
-        "ocr" => Ok(SelectorKind::Ocr),
         other => Err(SpiderError::rules(format!(
             "unsupported selector_type: {other}"
         ))),
