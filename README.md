@@ -13,7 +13,7 @@
 
 ## 功能说明
 
-按功能模块整理的能力说明见 [docs/capabilities.md](/Users/xiaohan/soft/project/xiaohan/kun/docs/capabilities.md)。
+按功能模块整理的能力说明见 [docs/capabilities.md](docs/capabilities.md)。
 
 这份文档会集中解释：
 
@@ -24,7 +24,7 @@
 
 ## 底层能力概览
 
-README 这里只保留总览；模块级细节统一放到 [docs/capabilities.md](/Users/xiaohan/soft/project/xiaohan/kun/docs/capabilities.md)。
+README 这里只保留总览；模块级细节统一放到 [docs/capabilities.md](docs/capabilities.md)。
 
 当前已落地的底层能力：
 
