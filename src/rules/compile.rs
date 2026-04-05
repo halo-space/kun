@@ -2,7 +2,7 @@ use crate::error::SpiderError;
 use crate::middleware::{Config as MiddlewareConfig, Map as MiddlewareMap, Stage};
 use crate::request::browser::{Config as BrowserConfig, Driver, Engine, Viewport};
 use crate::request::http::Config as HttpConfig;
-use crate::request::{Headers, RequestMode};
+use crate::request::{Headers, ProxyConfig, RequestMode, SessionConfig};
 use crate::rules::schema::{
     Compiled, CompiledStep, Dsl, FetchConfig, FetchPlan, FieldConfig, FieldPlan, LinkConfig,
     LinkPlan, ParseConfig, ParsePlan, SelectorKind, SourceKind, StepConfig,
@@ -11,6 +11,7 @@ use crate::rules::validate::validate_rules;
 use crate::runtime::{Config as RuntimeConfig, merge as merge_runtime};
 use crate::validator::{Validation, ValidationRule, ValidationType};
 use crate::value::Value;
+use jiff::SignedDuration;
 use std::collections::BTreeMap;
 
 pub fn compile_rules(value: Value) -> Result<Compiled, SpiderError> {
@@ -190,27 +191,26 @@ fn compile_step(step: StepConfig) -> Result<CompiledStep, SpiderError> {
 }
 
 fn compile_fetch(fetch: FetchConfig) -> Result<FetchPlan, SpiderError> {
-    let mode = RequestMode::try_from(fetch.mode.as_deref().unwrap_or("http"))
+    let mode = fetch
+        .mode
+        .as_deref()
+        .map(RequestMode::try_from)
+        .transpose()
         .map_err(SpiderError::rules)?;
     let method = fetch
         .request
         .get("method")
         .and_then(Value::as_str)
-        .unwrap_or("GET")
-        .to_string();
+        .map(str::to_string);
     let headers = parse_headers(fetch.request.get("headers"))?;
     let body = parse_body(fetch.request.get("body"))?;
     let cookies = parse_request_cookies(&fetch.request)?;
-    let http = if mode == RequestMode::Http {
-        Some(parse_http_config(&fetch.request)?)
-    } else {
-        None
-    };
-    let browser = if mode == RequestMode::Browser {
-        Some(parse_browser_config(&fetch.browser)?)
-    } else {
-        None
-    };
+    let timeout = parse_request_timeout(fetch.request.get("timeout"))?;
+    let proxy = parse_request_proxy(fetch.request.get("proxy"))?;
+    let session = parse_request_session(fetch.request.get("session"))?;
+    let dont_filter = fetch.request.get("dont_filter").and_then(Value::as_bool);
+    let http = parse_http_config(&fetch.request)?;
+    let browser = parse_browser_config(&fetch.browser)?;
 
     Ok(FetchPlan {
         mode,
@@ -218,6 +218,10 @@ fn compile_fetch(fetch: FetchConfig) -> Result<FetchPlan, SpiderError> {
         headers,
         body,
         cookies,
+        timeout,
+        proxy,
+        session,
+        dont_filter,
         http,
         browser,
     })
@@ -429,7 +433,12 @@ fn compile_selector_type(value: &str) -> Result<SelectorKind, SpiderError> {
     }
 }
 
-fn parse_http_config(value: &BTreeMap<String, Value>) -> Result<HttpConfig, SpiderError> {
+fn parse_http_config(value: &BTreeMap<String, Value>) -> Result<Option<HttpConfig>, SpiderError> {
+    let has_http_fields = value.contains_key("query") || value.contains_key("allow_redirects");
+    if !has_http_fields {
+        return Ok(None);
+    }
+
     let mut config = HttpConfig::default();
 
     if let Some(query) = value.get("query") {
@@ -445,7 +454,7 @@ fn parse_http_config(value: &BTreeMap<String, Value>) -> Result<HttpConfig, Spid
         config = config.with_redirects(allow_redirects);
     }
 
-    Ok(config)
+    Ok(Some(config))
 }
 
 fn parse_request_cookies(
@@ -466,7 +475,13 @@ fn parse_request_cookies(
     Ok(parsed)
 }
 
-fn parse_browser_config(value: &BTreeMap<String, Value>) -> Result<BrowserConfig, SpiderError> {
+fn parse_browser_config(
+    value: &BTreeMap<String, Value>,
+) -> Result<Option<BrowserConfig>, SpiderError> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+
     let mut config = BrowserConfig::default();
 
     if let Some(driver) = value.get("driver").and_then(Value::as_str) {
@@ -502,7 +517,45 @@ fn parse_browser_config(value: &BTreeMap<String, Value>) -> Result<BrowserConfig
         config.viewport = Viewport { width, height };
     }
 
-    Ok(config)
+    Ok(Some(config))
+}
+
+fn parse_request_timeout(value: Option<&Value>) -> Result<Option<SignedDuration>, SpiderError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+
+    let Some(milliseconds) = value.as_f64() else {
+        return Err(SpiderError::rules("fetch.request.timeout must be a number"));
+    };
+
+    Ok(Some(SignedDuration::from_millis(
+        milliseconds.max(0.0) as i64
+    )))
+}
+
+fn parse_request_proxy(value: Option<&Value>) -> Result<Option<ProxyConfig>, SpiderError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+
+    let Some(url) = value.as_str() else {
+        return Err(SpiderError::rules("fetch.request.proxy must be a string"));
+    };
+
+    Ok(Some(ProxyConfig::new(url)))
+}
+
+fn parse_request_session(value: Option<&Value>) -> Result<Option<SessionConfig>, SpiderError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+
+    let Some(id) = value.as_str() else {
+        return Err(SpiderError::rules("fetch.request.session must be a string"));
+    };
+
+    Ok(Some(SessionConfig::new(id)))
 }
 
 fn parse_headers(value: Option<&Value>) -> Result<Headers, SpiderError> {

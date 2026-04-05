@@ -1,135 +1,45 @@
-# Rules DSL 规范
+# 规范增量
 
-## 目标
-
-定义 `rules()` 加载模型和 JSON DSL 的可执行结构，让规则抓取与代码抓取在一条引擎链路中共存。
-
-### Requirement: Spider 的 rules 使用来源描述对象
-
-库必须将 `rules()` 视为规则来源描述对象，而不是默认直接内嵌原始 DSL。
-
-#### Scenario: local rules 从路径加载
-
-- Given `rules().type = "local"`
-- When rules loader 运行
-- Then 它从 `options.path` 解析文件路径并加载 DSL 文档
-
-#### Scenario: inline rules 可直接接收
-
-- Given `rules().type = "inline"`
-- When rules loader 运行
-- Then 它把 inline DSL 文档归一化成编译后的规则格式
-
-### Requirement: rules 配置支持易用的来源构造函数
-
-库必须为公开的 rules 来源描述对象提供更易用的构造函数，让编写者无需手动拼装底层 map，就能声明 local 与 inline 规则来源。
-
-#### Scenario: local rules 配置可由路径构造
-
-- Given 用户希望从 JSON 文件加载 rules
-- When 用户调用 rules 配置类型上的 local 构造函数
-- Then 生成的配置使用 `local` 作为来源类型，并把文件路径写入预期的 options 字段
-
-#### Scenario: inline rules 配置可由值构造
-
-- Given 用户希望直接提供 inline rules
-- When 用户调用 rules 配置类型上的 inline 构造函数
-- Then 生成的配置使用 `inline` 作为来源类型，并把 inline rules 文档写入预期的 options 字段
-
-### Requirement: 官方 DSL 示例遵循引擎托管的 rules 流程
-
-项目必须将"由框架托管的 rules 加载与分发路径"作为推荐的 DSL 编写工作流。
-
-#### Scenario: DSL 示例不再手动编译 rules
-
-- Given 仓库中的某个 DSL spider 示例
-- When 维护者阅读或运行该示例
-- Then 示例使用 `Spider::rules()` 与引擎托管的分发路径，而不是手动调用 `compile_rules()` 与 `apply_dsl()`
+## MODIFIED Requirements
 
 ### Requirement: DSL 围绕可执行 step 组织
 
-库必须将 DSL 文档建模为 `steps`，每个 step 可以声明 `id`、`callback`、`fetch`、`parse`、`route`、`output`、`runtime` 与 `MIDDLEWARES`。
+库 MUST 将 DSL 中声明的运行时能力编译到共享底层链路，而不是在 rules 运行时内部发明独立能力实现。
 
-#### Scenario: DSL step 可以省略 callback
+#### Scenario: Validation compiles to shared core capability
 
-- Given 某个 step 未声明 `callback`
-- When 它被编译
-- Then 该 step 可以省略 `callback`，转而依赖其 parse plan
+- **WHEN** DSL step 声明 `validate`
+- **THEN** 该配置编译到共享 validation 能力，而不是停留在 DSL 私有字段
 
-#### Scenario: 代码 step 必须声明 callback
+#### Scenario: Validation failure stops the current DSL step explicitly
 
-- Given 某个 step 声明了 `callback`
-- When 它被编译或分发
-- Then 必须存在 callback 名称
+- **WHEN** DSL step 对提取字段执行共享 validation 且校验失败
+- **THEN** 当前 step 返回显式 parse error，并且不继续产出 item 或 follow request
 
-#### Scenario: step validate 编译到共享 Validation 定义
+#### Scenario: Request-related DSL options compile to shared request capability
 
-- Given 某个 step 声明了 `validate`
-- When rules compiler 构建该 step
-- Then `validate` 被编译为共享 `Validation` 定义，而不是保留为 DSL 私有原始 map
+- **WHEN** DSL step 声明 request、cookies、proxy、output 等能力
+- **THEN** 这些配置映射到与代码爬虫一致的底层能力模型
 
-### Requirement: Fetch plan 支持 request 与 browser 细节
+#### Scenario: DSL start requests apply the target step fetch on top of shared Request
 
-库必须把 step 的 fetch 配置编译成归一化的 fetch plan。
+- **GIVEN** spider 通过 DSL 入口启动，且起始请求命中的 step 声明了 `fetch`
+- **WHEN** 引擎准备 enqueue start request
+- **THEN** 引擎先构造普通共享 `Request`
+- **AND** 再把目标 step 的 `fetch.request` / `fetch.browser` 显式覆盖应用到这条 `Request`
 
-#### Scenario: HTTP fetch 编译成 HTTP request plan
+#### Scenario: DSL follow requests apply the next step fetch on top of shared follow semantics
 
-- Given 某个 step 声明 `fetch.mode = "http"`
-- When rules compiler 构建该 step
-- Then 编译后的 fetch plan 使用 `Http` 请求模式
-
-#### Scenario: browser fetch 保留 browser 配置
-
-- Given 某个 step 声明 `fetch.mode = "browser"` 且包含 browser 配置
-- When rules compiler 构建该 step
-- Then 编译后的 fetch plan 在 request plan 旁保留 browser 配置
+- **GIVEN** 某个 DSL step 产出了指向下一跳 step 的 request
+- **WHEN** 下一跳 step 声明了 `fetch`
+- **THEN** 子请求先遵循共享 `response.follow()` 继承语义
+- **AND** 再应用目标 step 的显式 request 覆盖，而不是发明 DSL 私有 request 结构
 
 ### Requirement: Parse plan 支持 fields 与 links
 
-库必须在 step 中支持 `parse.fields` 与 `parse.links`。
+库 MUST 保证 `parse.fields`、`parse.links` 以及 `next_url_config` 只负责描述抓取与路由意图，而不是承载一套与代码模式脱节的私有运行时。
 
-#### Scenario: 字段提取生成结构化输出
+#### Scenario: DSL runtime does not fork core execution semantics
 
-- Given 某条字段规则声明了 `name`、`source`、`selector_type`、`selector` 与 `attribute`
-- When DSL step 运行
-- Then 提取出的值写入输出 item 对应字段名下
-
-#### Scenario: 链接提取生成后续请求
-
-- Given 某条链接规则声明了选择器与 `next_step`
-- When DSL step 运行
-- Then 匹配到的链接会变成带有目标 step metadata 的后续请求
-
-#### Scenario: step validate 在运行时显式执行
-
-- Given 某个 step 声明了 `validate`
-- When DSL step 完成字段提取
-- Then 引擎在产出 item 或 request 前执行共享 validation，并在失败时返回 parse error
-
-#### Scenario: AI selector uses configured OpenAI settings
-
-- Given 某条字段规则声明 `selector_type = "ai"`
-- When DSL step 运行该字段规则
-- Then 系统使用当前 Settings 中的 OpenAI 配置执行 AI 提取
-
-#### Scenario: Missing AI feature or API key fails explicitly
-
-- Given 某条字段规则声明 `selector_type = "ai"`
-- When 当前构建未启用 `ai-selector` feature，或未提供可用的 OpenAI API key
-- Then 系统返回显式错误，而不是静默跳过该字段
-
-### Requirement: DSL 解析来源与选择器类型保持显式
-
-库必须在规则 schema 中显式保留来源类型与选择器类型。
-
-#### Scenario: 支持的来源类型可枚举
-
-- Given 任意字段规则或链接规则
-- When 它被编译
-- Then 来源从显式值中解析，例如 `html`、`text`、`json`、`xml`、`headers`、`final_url` 或 `meta.*`
-
-#### Scenario: 支持的选择器类型可枚举
-
-- Given 任意字段规则或链接规则
-- When 它被编译
-- Then 选择器类型从显式值中解析，例如 `css`、`xpath`、`json`、`xml`、`regex` 或 `ai`
+- **WHEN** DSL 生成 request、执行 validate、进入 runtime/middleware 或输出链路
+- **THEN** 它遵循与代码爬虫相同的底层执行语义

@@ -13,7 +13,8 @@
 
 - [x] 2.1 为 `Request` 补齐 timeout、proxy、cookies/session 等请求级能力建模。
 - [x] 2.2 重新梳理 `response.follow()` 的派生语义，明确哪些 request 属性应继承、哪些可覆盖。
-- [ ] 2.3 让代码爬虫与 DSL 生成的 request 都走同一套 request 能力模型。
+- [x] 2.3 让代码爬虫与 DSL 生成的 request 都走同一套 request 能力模型。
+  - DSL start request 与 follow request 现在都会先落成共享 `Request`，再按目标 step 的 `fetch` 显式覆盖 mode、method、headers、body、cookies、timeout、proxy、session、http/browser 配置。
 - [x] 2.4 同步 `openspec/specs/spider-api/spec.md` 与 request/follow 相关测试。
 - [x] 2.5 把 request-level cookies 从 `http` 私有配置进一步收口为真正的共享 request 能力，避免 browser request 使用 cookies 时退回 `Http` 模式。
 
@@ -72,9 +73,10 @@
 
 当前后置：先补齐并稳定代码爬虫与共享底层能力，再回头收口 DSL 配置面与运行时映射。
 
-- [ ] 9.1 逐项梳理 DSL 字段里哪些能力已经进入共享底层，哪些仍然只是配置占位。
-- [ ] 9.2 确保 `validate`、request、cookies、proxy、output 等能力优先作为底层能力实现，再映射到 DSL。
-- [ ] 9.3 同步 `openspec/specs/rules-dsl/spec.md`，明确 DSL 不应发明独立运行时。
+- [x] 9.1 逐项梳理 DSL 字段里哪些能力已经进入共享底层，哪些仍然只是配置占位。
+  - 当前已明确：`validate` 走共享 validation；`fetch.request` / `fetch.browser` 走共享 `Request`；item 输出仍走统一 `pipeline -> store`；DSL 不再维护独立 request/runtime 语义。
+- [x] 9.2 确保 `validate`、request、cookies、proxy、output 等能力优先作为底层能力实现，再映射到 DSL。
+- [x] 9.3 同步 `openspec/specs/rules-dsl/spec.md`，明确 DSL 不应发明独立运行时。
 
 ## 10. 文档与持续验证
 

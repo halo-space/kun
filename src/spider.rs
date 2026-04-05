@@ -226,16 +226,5 @@ fn resolve_step<'a>(
         return Ok(None);
     };
 
-    let step_id = response
-        .meta
-        .get("next_step")
-        .and_then(|value| value.as_str())
-        .unwrap_or("parse");
-
-    compiled
-        .steps
-        .iter()
-        .find(|step| step.id == step_id)
-        .map(Some)
-        .ok_or_else(|| SpiderError::engine(format!("step not found: {step_id}")))
+    compiled.step_from_meta(&response.meta).map(Some)
 }

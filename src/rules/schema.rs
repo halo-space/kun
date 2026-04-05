@@ -1,5 +1,8 @@
+use crate::error::SpiderError;
+use crate::request::{Headers, Metadata, ProxyConfig, Request, RequestMode, SessionConfig};
 use crate::validator::Validation;
 use crate::value::Value;
+use jiff::SignedDuration;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone)]
@@ -121,6 +124,20 @@ pub struct Compiled {
     pub steps: Vec<CompiledStep>,
 }
 
+impl Compiled {
+    pub fn step_from_meta(&self, meta: &Metadata) -> Result<&CompiledStep, SpiderError> {
+        let step_id = meta
+            .get("next_step")
+            .and_then(Value::as_str)
+            .unwrap_or("parse");
+
+        self.steps
+            .iter()
+            .find(|step| step.id == step_id)
+            .ok_or_else(|| SpiderError::engine(format!("step not found: {step_id}")))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompiledStep {
     pub id: String,
@@ -139,13 +156,63 @@ pub struct CompiledStep {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FetchPlan {
-    pub mode: crate::request::RequestMode,
-    pub method: String,
-    pub headers: crate::request::Headers,
+    pub mode: Option<RequestMode>,
+    pub method: Option<String>,
+    pub headers: Headers,
     pub body: Option<Vec<u8>>,
     pub cookies: BTreeMap<String, String>,
+    pub timeout: Option<SignedDuration>,
+    pub proxy: Option<ProxyConfig>,
+    pub session: Option<SessionConfig>,
+    pub dont_filter: Option<bool>,
     pub http: Option<crate::request::http::Config>,
     pub browser: Option<crate::request::browser::Config>,
+}
+
+impl FetchPlan {
+    pub fn apply_to_request(&self, mut request: Request) -> Request {
+        if let Some(http) = &self.http {
+            request = request.with_http(http.clone());
+        } else if let Some(browser) = &self.browser {
+            request = request.with_browser(browser.clone());
+        } else if let Some(mode) = self.mode {
+            request = request.with_mode(mode);
+        }
+
+        if let Some(method) = &self.method {
+            request.method = method.clone();
+        }
+
+        for (key, values) in &self.headers {
+            request.headers.insert(key.clone(), values.clone());
+        }
+
+        if let Some(body) = &self.body {
+            request.body = Some(body.clone());
+        }
+
+        for (key, value) in &self.cookies {
+            request.cookies.insert(key.clone(), value.clone());
+        }
+
+        if let Some(timeout) = self.timeout {
+            request.timeout = Some(timeout);
+        }
+
+        if let Some(proxy) = &self.proxy {
+            request.proxy = Some(proxy.clone());
+        }
+
+        if let Some(session) = &self.session {
+            request.session = Some(session.clone());
+        }
+
+        if let Some(dont_filter) = self.dont_filter {
+            request.dont_filter = dont_filter;
+        }
+
+        request
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

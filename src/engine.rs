@@ -465,8 +465,13 @@ where
         &mut self,
         spider: &Sp,
         allowed_domains: &[String],
+        compiled: Option<&Compiled>,
     ) -> Result<(), SpiderError> {
-        let start_requests = spider.build_start_requests();
+        let start_requests = spider
+            .build_start_requests()
+            .into_iter()
+            .map(|request| apply_compiled_fetch_to_request(request, compiled))
+            .collect::<Result<Vec<_>, _>>()?;
 
         tracing::info!(
             spider = spider.name(),
@@ -691,7 +696,7 @@ where
 
         let step_middlewares = self.build_step_middlewares(compiled.as_ref())?;
 
-        self.enqueue_start_requests(spider, &allowed_domains)
+        self.enqueue_start_requests(spider, &allowed_domains, compiled.as_ref())
             .await?;
 
         let max_concurrent = self.settings.concurrent_requests;
@@ -1056,6 +1061,18 @@ fn step_id_from_request(request: &crate::request::Request) -> String {
         .to_string()
 }
 
+fn apply_compiled_fetch_to_request(
+    request: crate::request::Request,
+    compiled: Option<&Compiled>,
+) -> Result<crate::request::Request, SpiderError> {
+    let Some(compiled) = compiled else {
+        return Ok(request);
+    };
+
+    let step = compiled.step_from_meta(&request.meta)?;
+    Ok(step.fetch.apply_to_request(request))
+}
+
 fn effective_runtime(
     spider_runtime: RuntimeConfig,
     compiled: Option<&Compiled>,
@@ -1273,6 +1290,7 @@ mod tests {
     use crate::plugins::{PluginManifest, PluginRegistry};
     use crate::request::{Headers, Request};
     use crate::response::Response;
+    use crate::rules::Config as RulesConfig;
     use crate::scheduler::checkpoint::{Checkpoint, Persist};
     use crate::scheduler::memory::Memory;
     use crate::scheduler::{Scheduler, Task};
@@ -1284,6 +1302,7 @@ mod tests {
     use crate::test_support::redis::spawn_redis_server;
     use crate::value::Value;
     use jiff::SignedDuration;
+    use serde_json::json;
     use std::collections::BTreeMap;
     use std::future::Future;
     use std::pin::Pin;
@@ -2495,7 +2514,7 @@ mod tests {
         .with_settings(Settings::default().with_robots_sitemap_seeds(true))
         .with_store(MemoryStore::default());
 
-        block_on(engine.enqueue_start_requests(&StartUrlSpider, &[])).unwrap();
+        block_on(engine.enqueue_start_requests(&StartUrlSpider, &[], None)).unwrap();
 
         let checkpoint = engine.scheduler.checkpoint();
         let urls = checkpoint
@@ -2541,7 +2560,7 @@ mod tests {
         .with_settings(Settings::default().with_robots_sitemap_seeds(true))
         .with_store(MemoryStore::default());
 
-        block_on(engine.enqueue_start_requests(&StartUrlSpider, &[])).unwrap();
+        block_on(engine.enqueue_start_requests(&StartUrlSpider, &[], None)).unwrap();
 
         let checkpoint = engine.scheduler.checkpoint();
         let urls = checkpoint
@@ -2581,7 +2600,7 @@ mod tests {
         )
         .with_store(MemoryStore::default());
 
-        block_on(engine.enqueue_start_requests(&StartUrlSpider, &[])).unwrap();
+        block_on(engine.enqueue_start_requests(&StartUrlSpider, &[], None)).unwrap();
 
         let checkpoint = engine.scheduler.checkpoint();
         let sitemap_task = checkpoint
@@ -2599,7 +2618,7 @@ mod tests {
         let mut engine = Engine::from_parts(Memory::default(), HtmlHttp, StubBrowser)
             .with_store(MemoryStore::default());
 
-        block_on(engine.enqueue_start_requests(&CustomStartRequestSpider, &[])).unwrap();
+        block_on(engine.enqueue_start_requests(&CustomStartRequestSpider, &[], None)).unwrap();
 
         let checkpoint = engine.scheduler.checkpoint();
         let request = &checkpoint.ready[0].request;
@@ -2626,6 +2645,50 @@ mod tests {
     }
 
     #[test]
+    fn engine_applies_rules_step_fetch_to_start_requests() {
+        let mut engine = Engine::from_parts(Memory::default(), HtmlHttp, StubBrowser)
+            .with_store(MemoryStore::default());
+        let compiled = block_on(crate::rules::load(
+            &RulesStartRequestSpider.rules().expect("rules should exist"),
+        ))
+        .expect("rules should load");
+
+        block_on(engine.enqueue_start_requests(&RulesStartRequestSpider, &[], Some(&compiled)))
+            .unwrap();
+
+        let checkpoint = engine.scheduler.checkpoint();
+        let request = &checkpoint.ready[0].request;
+
+        assert_eq!(request.url, "https://example.com/start");
+        assert_eq!(request.mode, RequestMode::Browser);
+        assert_eq!(
+            request.headers.get("x-token"),
+            Some(&vec!["abc".to_string()])
+        );
+        assert_eq!(
+            request.cookies.get("sid").map(String::as_str),
+            Some("cookie-1")
+        );
+        assert_eq!(request.timeout, Some(SignedDuration::from_secs(5)));
+        assert_eq!(
+            request.proxy.as_ref().map(|proxy| proxy.url.as_str()),
+            Some("http://proxy.internal:8080")
+        );
+        assert_eq!(
+            request.session.as_ref().map(|session| session.id.as_str()),
+            Some("shared-session")
+        );
+        assert!(
+            request
+                .browser
+                .as_ref()
+                .and_then(|browser| browser.wait_for.as_deref())
+                == Some("#app")
+        );
+        assert!(request.http.is_none());
+    }
+
+    #[test]
     fn engine_enqueues_robots_sitemap_seed_requests_inheriting_start_request_semantics() {
         let mut engine = Engine::from_parts(
             Memory::default(),
@@ -2642,7 +2705,7 @@ mod tests {
         .with_settings(Settings::default().with_robots_sitemap_seeds(true))
         .with_store(MemoryStore::default());
 
-        block_on(engine.enqueue_start_requests(&CustomStartRequestSpider, &[])).unwrap();
+        block_on(engine.enqueue_start_requests(&CustomStartRequestSpider, &[], None)).unwrap();
 
         let checkpoint = engine.scheduler.checkpoint();
         let request = checkpoint
@@ -2690,7 +2753,7 @@ mod tests {
         .with_settings(Settings::default().with_robots_sitemap_seeds(true))
         .with_store(MemoryStore::default());
 
-        block_on(engine.enqueue_start_requests(&CustomStartRequestSpider, &[])).unwrap();
+        block_on(engine.enqueue_start_requests(&CustomStartRequestSpider, &[], None)).unwrap();
 
         let request = recorder.lock().unwrap().clone().unwrap();
         assert_eq!(request.url, "https://example.com/sitemap.xml");
@@ -2980,7 +3043,7 @@ mod tests {
         .with_settings(Settings::default().with_robots_sitemap_seeds(true))
         .with_store(MemoryStore::default());
 
-        block_on(engine.enqueue_start_requests(&StartUrlSpider, &[])).unwrap();
+        block_on(engine.enqueue_start_requests(&StartUrlSpider, &[], None)).unwrap();
 
         let checkpoint = engine.scheduler.checkpoint();
         let urls = checkpoint
@@ -3131,6 +3194,42 @@ mod tests {
                     .with_proxy("http://proxy.internal:8080")
                     .with_session("shared-session"),
             ]
+        }
+    }
+
+    struct RulesStartRequestSpider;
+
+    impl Spider for RulesStartRequestSpider {
+        fn name(&self) -> &str {
+            "rules_start_request_spider"
+        }
+
+        fn start_urls(&self) -> Vec<String> {
+            vec!["https://example.com/start".to_string()]
+        }
+
+        fn rules(&self) -> Option<RulesConfig> {
+            Some(RulesConfig::inline(Value::from(json!({
+                "steps": [
+                    {
+                        "id": "parse",
+                        "fetch": {
+                            "mode": "browser",
+                            "request": {
+                                "headers": { "x-token": "abc" },
+                                "cookies": { "sid": "cookie-1" },
+                                "timeout": 5000,
+                                "proxy": "http://proxy.internal:8080",
+                                "session": "shared-session"
+                            },
+                            "browser": {
+                                "wait_for": "#app"
+                            }
+                        },
+                        "parse": {}
+                    }
+                ]
+            }))))
         }
     }
 

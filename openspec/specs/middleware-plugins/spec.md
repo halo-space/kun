@@ -1,92 +1,53 @@
-# Middleware 与 Plugins 规范
+# 规范增量
 
-## 目标
+## ADDED Requirements
 
-统一中间件配置、内建扩展点和 `plugins.toml` 清单语义，让扩展行为在 Engine 层可组合、可验证。
+### Requirement: Built-in Network Middleware Must Have Concrete Behavior
 
-### Requirement: Middleware 配置使用统一结构
+系统 MUST 让内建 `cookies` 与 `proxy` middleware 具备真实、可验证的运行时行为，而不是仅保留注册入口。
 
-库必须使用 `enabled`、`type`、`order` 与 `options` 表示 middleware 配置。
+#### Scenario: Cookies middleware applies request/session behavior
 
-#### Scenario: Middleware 配置声明 download 或 spider 类型
+- **WHEN** 请求启用了 cookies 或 session 相关能力
+- **THEN** middleware 对请求和后续链路产生真实影响
 
-- Given middleware 配置来自 settings、runtime 或 DSL
-- When 配置被校验
-- Then middleware 类型只能是 `download` 或 `spider`
+#### Scenario: Cookies middleware can assign a stable default session
 
-#### Scenario: Middleware 顺序保持显式
+- **WHEN** middleware 配置了默认 session，而请求没有显式 session
+- **THEN** 请求会进入该默认 session 语义，而不是退化成一次性 cookies 占位
 
-- Given 同时启用了多个 middleware 项
-- When 构建中间件链
-- Then 每个 middleware 都根据自己的 `order` 决定执行位置
+#### Scenario: Proxy middleware applies proxy routing behavior
+
+- **WHEN** 请求启用了 proxy 相关能力
+- **THEN** middleware 对请求路由或代理选择产生真实影响
+
+#### Scenario: Proxy pool boundary is explicit
+
+- **WHEN** middleware 配置了 proxy pool
+- **THEN** 系统至少支持请求时的固定代理或 round-robin 选择，并明确失败健康检查仍由现有 retry 链路负责
+
+## MODIFIED Requirements
 
 ### Requirement: Engine 支持内建与自定义 middleware
 
-库必须允许 middleware 既可以直接以实例形式提供，也可以以注册工厂形式提供。
+库 MUST 允许 middleware 既可以直接以实例形式提供，也可以以注册工厂形式提供；对于内建 middleware，公开名称必须对应真实实现而不是空壳占位。
 
-#### Scenario: 直接注册 middleware 会影响引擎链路
+#### Scenario: Built-in middleware keys map to concrete behavior
 
-- Given 调用了 `Engine::add_middleware()`
-- When 引擎准备 middleware 链
-- Then 提供的实例会参与 request 与 response 处理
-
-#### Scenario: 已注册的 middleware 工厂支撑具名配置项
-
-- Given `Engine::register_middleware()` 以某个 key 注册了工厂
-- When settings 或 DSL 引用了这个 key
-- Then 引擎根据提供的 options 构建 middleware 实例
-
-### Requirement: Built-in Network Middleware Has Concrete Runtime Behavior
-
-库必须让内建 `cookies` 与 `proxy` middleware 具备真实、可验证的运行时语义，而不是只保留注册入口。
-
-#### Scenario: Cookies middleware normalizes request cookie semantics
-
-- Given 启用了 `cookies` middleware，且请求包含 `Cookie` header 或 middleware 配置了默认 session
-- When download middleware 链处理该请求
-- Then middleware 会把原始 `Cookie` header 归一到 request cookies 语义，并在缺少显式 session 时应用配置的 session 标识
-
-#### Scenario: Proxy middleware selects request proxy before download
-
-- Given 启用了 `proxy` middleware，且请求本身未显式声明 proxy
-- When download middleware 链处理该请求
-- Then middleware 会按固定 proxy 或 round-robin proxy pool 为该请求选择代理；失败重试仍由现有 retry 能力负责
+- **WHEN** settings、runtime 或 DSL 使用内建 middleware key
+- **THEN** 引擎加载的 middleware 具备可验证的运行时语义
 
 ### Requirement: Plugin manifest 来自 plugins.toml
 
-库必须从 `plugins.toml` 加载 plugin manifest，并以 `(kind, name)` 作为 key 存入 registry。
-当前 Engine 只支持 `kind = "middleware"` 的插件自动装载；其它已知 kind 必须和稳定的 engine 组件 owner 对齐，但不代表运行时已具备对应装配能力。
+库 MUST 从 `plugins.toml` 加载 plugin manifest，并明确 engine 当前真正支持的 plugin kind 边界。
 
-#### Scenario: middleware manifest 必须有对应的已注册工厂
+#### Scenario: Unsupported plugin kind is explicit
 
-- Given 某个 plugin manifest 声明 `kind = "middleware"`
-- When `Engine::load_plugins()` 校验 registry
-- Then 引擎要求存在同名的 middleware 工厂
+- **WHEN** registry 中存在 engine 尚未支持的 plugin kind
+- **THEN** 系统给出显式、稳定的边界说明，而不是留下隐含能力错觉
 
-#### Scenario: engine 对未自动装载的组件 plugin kind 显式失败
+#### Scenario: Engine only auto-loads middleware plugins
 
-- Given registry 中存在 `kind = "store"`、`"scheduler"`、`"dedup"`、`"robots"`、`"http"` 或 `"browser"` 的 manifest
-- When `Engine::load_plugins()` 校验 registry
-- Then 引擎返回显式错误，说明当前只支持 `middleware` kind 自动装载
-
-#### Scenario: 不同 plugin kind 可以复用同名
-
-- Given 两个 manifest 使用相同的 `name`
-- When 它们的 `kind` 不同
-- Then 两个 manifest 可以在 registry 中共存
-
-### Requirement: Plugin 替换必须显式声明 override
-
-库必须拒绝重复的 `(kind, name)` 注册，除非新 manifest 明确设置了 `override = true`。
-
-#### Scenario: 重复 plugin 且未声明 override 时失败
-
-- Given plugin registry 已经包含某个 `(kind, name)` 的 manifest
-- When 又注册一个相同 `(kind, name)` 但未声明 override 的 manifest
-- Then registry 返回 plugin conflict error
-
-#### Scenario: 重复 plugin 且声明 override 时成功
-
-- Given plugin registry 已经包含某个 `(kind, name)` 的 manifest
-- When 又注册一个相同 `(kind, name)` 且声明了 `override = true` 的 manifest
-- Then 新 manifest 替换旧 manifest
+- **WHEN** plugin manifest 使用 `store`、`scheduler`、`dedup`、`robots`、`http` 或 `browser` kind
+- **THEN** manifest 可以进入 registry 命名空间
+- **AND** `Engine::load_plugins()` 不会把它们当成已支持的运行时扩展点

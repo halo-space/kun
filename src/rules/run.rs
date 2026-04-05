@@ -49,8 +49,14 @@ pub async fn apply(
         }
         _ => {
             // 默认行为：使用 links
-            let requests =
-                build_requests(response, &step.parse.links, step, &parsed_fields).await?;
+            let requests = build_requests(
+                response,
+                &step.parse.links,
+                step,
+                &compiled.steps,
+                &parsed_fields,
+            )
+            .await?;
             Ok(Output {
                 items: item.into_iter().collect(),
                 requests,
@@ -86,6 +92,7 @@ async fn build_requests(
     response: &Response,
     links: &[LinkPlan],
     current_step: &CompiledStep,
+    all_steps: &[CompiledStep],
     parsed_fields: &BTreeMap<String, Value>,
 ) -> Result<Vec<Request>, SpiderError> {
     let mut requests = Vec::new();
@@ -120,7 +127,8 @@ async fn build_requests(
                 &link.meta,
                 link.next_step.as_deref(),
             );
-            requests.push(response.follow_with_meta(url, &meta));
+            let request = response.follow_with_meta(url, &meta);
+            requests.push(apply_target_step_fetch(request, all_steps)?);
         }
     }
 
@@ -161,9 +169,26 @@ async fn build_request_from_next_url_config(
         .into_iter()
         .map(|url| {
             let meta = build_request_meta(current_step, parsed_fields, &BTreeMap::new(), next_step);
-            response.follow_with_meta(url, &meta)
+            let request = response.follow_with_meta(url, &meta);
+            apply_target_step_fetch(request, all_steps)
         })
-        .collect())
+        .collect::<Result<Vec<_>, _>>()?)
+}
+
+fn apply_target_step_fetch(
+    request: Request,
+    all_steps: &[CompiledStep],
+) -> Result<Request, SpiderError> {
+    let step_id = request
+        .meta
+        .get("next_step")
+        .and_then(Value::as_str)
+        .unwrap_or("parse");
+    let step = all_steps
+        .iter()
+        .find(|step| step.id == step_id)
+        .ok_or_else(|| SpiderError::engine(format!("step not found: {step_id}")))?;
+    Ok(step.fetch.apply_to_request(request))
 }
 
 fn build_request_meta(
@@ -756,4 +781,137 @@ fn resolve_url(base: &str, url: &str) -> String {
     }
 
     url.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::request::{Request, RequestMode};
+    use jiff::SignedDuration;
+    use serde_json::json;
+
+    fn compile_test_rules() -> Compiled {
+        crate::rules::compile::compile_rules(Value::from(json!({
+            "steps": [
+                {
+                    "id": "parse",
+                    "fetch": {
+                        "mode": "browser",
+                        "request": {
+                            "headers": { "x-parent": "parent" },
+                            "cookies": { "sid": "cookie-1" },
+                            "timeout": 1000,
+                            "proxy": "http://proxy.parent:8080",
+                            "session": "parent-session"
+                        },
+                        "browser": {
+                            "wait_for": "#list"
+                        }
+                    },
+                    "parse": {
+                        "links": [
+                            {
+                                "name": "detail",
+                                "source": "html",
+                                "selector_type": "css",
+                                "selector": [".detail-link"],
+                                "attribute": "attr:href",
+                                "next_step": "detail"
+                            }
+                        ]
+                    }
+                },
+                {
+                    "id": "detail",
+                    "fetch": {
+                        "mode": "http",
+                        "request": {
+                            "method": "POST",
+                            "headers": { "x-step": "detail" },
+                            "body": "payload",
+                            "cookies": { "token": "cookie-2" },
+                            "timeout": 5000,
+                            "proxy": "http://proxy.detail:8080",
+                            "session": "detail-session",
+                            "dont_filter": true,
+                            "query": { "page": "2" },
+                            "allow_redirects": false
+                        }
+                    },
+                    "parse": {}
+                }
+            ]
+        })))
+        .expect("rules should compile")
+    }
+
+    #[tokio::test]
+    async fn dsl_follow_requests_apply_target_step_fetch_overrides() {
+        let compiled = compile_test_rules();
+        let parse_step = compiled
+            .steps
+            .iter()
+            .find(|step| step.id == "parse")
+            .expect("parse step should exist");
+        let request = Request::browser("https://example.com/list")
+            .with_header("x-parent", "parent")
+            .with_cookie("sid", "cookie-1")
+            .with_timeout(SignedDuration::from_secs(1))
+            .with_proxy("http://proxy.parent:8080")
+            .with_session("parent-session");
+        let response = Response::from_request(
+            request,
+            200,
+            Default::default(),
+            br#"<html><body><a class="detail-link" href="/detail/1">detail</a></body></html>"#
+                .to_vec(),
+        );
+
+        let output = apply(&response, parse_step, &compiled)
+            .await
+            .expect("dsl step should succeed");
+        let request = output
+            .requests
+            .first()
+            .expect("follow request should exist");
+
+        assert_eq!(request.url, "https://example.com/detail/1");
+        assert_eq!(request.mode, RequestMode::Http);
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.body.as_deref(), Some(&b"payload"[..]));
+        assert_eq!(
+            request.meta.get("next_step").and_then(Value::as_str),
+            Some("detail")
+        );
+        assert_eq!(
+            request.headers.get("x-parent"),
+            Some(&vec!["parent".to_string()])
+        );
+        assert_eq!(
+            request.headers.get("x-step"),
+            Some(&vec!["detail".to_string()])
+        );
+        assert_eq!(
+            request.cookies.get("sid").map(String::as_str),
+            Some("cookie-1")
+        );
+        assert_eq!(
+            request.cookies.get("token").map(String::as_str),
+            Some("cookie-2")
+        );
+        assert_eq!(request.timeout, Some(SignedDuration::from_secs(5)));
+        assert_eq!(
+            request.proxy.as_ref().map(|proxy| proxy.url.as_str()),
+            Some("http://proxy.detail:8080")
+        );
+        assert_eq!(
+            request.session.as_ref().map(|session| session.id.as_str()),
+            Some("detail-session")
+        );
+        assert!(request.dont_filter);
+        assert!(request.http.as_ref().is_some_and(
+            |http| !http.allow_redirects && http.query.get("page") == Some(&"2".to_string())
+        ));
+        assert!(request.browser.is_none());
+    }
 }

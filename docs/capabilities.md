@@ -23,6 +23,7 @@ README 负责总览，这里负责把每个模块现在到底能做什么、还�
 
 - 代码爬虫里手写的请求，和后续 DSL 生成的请求，本质上都应该落成同一个 `Request`
 - 如果 spider 需要从入口就带上 cookies、proxy、session、browser mode 这类能力，可以直接覆写 `build_start_requests()` 返回完整 `Request`；默认实现仍然只是把 `build_start_urls()` 包成 `Request::new(...)`
+- rules / DSL 这条线现在也不会再单独发明请求结构：start request 与 step follow request 都会先走共享 `Request` / `response.follow()` 语义，再把目标 step 的 `fetch.request` / `fetch.browser` 覆盖应用上去
 - 当前已经接线的共享请求语义包括：`method`、`headers`、`body`、`timeout`、`proxy`、`session`、request cookies
 - `meta` 是请求级上下文参数，用来挂当前请求和后续链路要透传的数据；它更接近 Scrapy 的函数参数/上下文，而不是框架私自塞内部控制字段的地方
 - `kwargs` 是显式给 callback / errback 使用的回调上下文参数；它和 `meta` 分开建模，不拿来承载框架内部控制字段
@@ -862,6 +863,9 @@ let section_html = response.xpath("//section[@id='content']").html().one();
 - 不是另一套运行时
 - 不是重新发明一套调度、重试、去重、输出机制
 - 而是把代码爬虫已有的底层能力配置化
+- `validate` 走共享 validation
+- `fetch.request` / `fetch.browser` 走共享 `Request`
+- item 输出继续走统一 `pipeline -> store`
 
 也就是说，正确方向应该是：
 
