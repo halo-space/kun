@@ -410,6 +410,14 @@
 - When 引擎准备继续下载同一个 origin 的下一个请求
 - Then 引擎按该 delay 退避并重试，而不是把请求当成永久拒绝
 
+#### Scenario: Engine also enforces robots request-rate as a runtime delay
+
+- Given 调用方通过 `Settings::with_robots_obey(true)` 开启 robots 策略
+- And 当前 origin 的 `robots.txt` 为匹配到的 user-agent group 声明了 `Request-rate`
+- When 引擎准备继续下载同一个 origin 的下一个请求
+- Then 引擎按 `window / requests` 计算出的均匀间隔最小 delay 退避并重试
+- And 如果同一个 group 同时声明了 `Crawl-delay` 与 `Request-rate`，当前取更严格的 delay
+
 #### Scenario: robots user-agent falls back to spider name
 
 - Given 调用方开启 robots 策略但没有显式设置 robots user-agent

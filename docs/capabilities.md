@@ -15,7 +15,7 @@ README 负责总览，这里负责把每个模块现在到底能做什么、还�
 
 如果只看“代码爬虫底层能力”这一层，而不看 DSL，当前和 Scrapy 更完整运行时相比，最主要的剩余缺口是：
 
-- `robots.txt` 这层虽然已经补到 `Crawl-delay`、wildcard / group、持久化 cache、`cache_ttl` 刷新与可选 sitemap 自动种子，但更高阶站点策略还没补完
+- `robots.txt` 这层虽然已经补到 `Crawl-delay`、`Request-rate`、wildcard / group、持久化 cache、`cache_ttl` 刷新与可选 sitemap 自动种子，但更高阶站点策略还没补完
 
 `signals / extensions` 这一层当前已经明确后置，不作为这一轮底层能力实现范围。其它缺口已经继续落到 OpenSpec 的任务台账里，后续会按优先级往下补。
 
@@ -528,7 +528,8 @@ let engine = Engine::new().with_dedup(MethodUrlDedup {
 
 - 默认关闭；需要显式调用 `Settings::with_robots_obey(true)` 才会启用
 - 开启后，引擎会在真正下载前检查当前请求是否被目标站点的 `robots.txt` 允许
-- 如果命中 `Crawl-delay`，引擎不会把请求当成永久拒绝，而是按 delay 退避后再重试
+- 如果命中 `Crawl-delay` 或 `Request-rate`，引擎不会把请求当成永久拒绝，而是按 delay 退避后再重试
+- `Request-rate` 当前按 `window / requests` 的均匀间隔最小 delay 解释；如果同时声明 `Crawl-delay` 和 `Request-rate`，当前取更严格的那个 delay
 - 当前按 `scheme://host[:port]` 做 origin 级缓存；默认会在 `24h` 的 `cache_ttl` 内直接复用，超出后尝试刷新
 - `robots` 使用的 user-agent 优先取 `Settings::with_robots_user_agent(...)`；如果没有显式设置，就回退到当前 `spider.name()`
 - 默认 robots 组件是 `robots::Memory`
@@ -548,6 +549,7 @@ let engine = Engine::new().with_dedup(MethodUrlDedup {
 - 支持 `Allow`
 - 支持 `Disallow`
 - 支持 `Crawl-delay`
+- 支持 `Request-rate`
 - 支持 `Sitemap`
 - 支持更完整的 `User-agent group` 选择：优先更具体的 agent token；同一 specificity 的 group 会合并规则
 - 支持 `*` wildcard 与末尾 `$` end anchor

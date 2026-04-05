@@ -73,7 +73,7 @@ pub struct Memory<C = cache::Memory> {
     cache_ttl: Option<u64>,
     unavailable_policy: UnavailablePolicy,
     policies: tokio::sync::Mutex<BTreeMap<String, CachedPolicy>>,
-    crawl_deadlines: tokio::sync::Mutex<BTreeMap<String, u64>>,
+    request_deadlines: tokio::sync::Mutex<BTreeMap<String, u64>>,
 }
 
 #[derive(Debug, Clone)]
@@ -95,7 +95,7 @@ impl Default for Memory<cache::Memory> {
             cache_ttl: Some(86_400_000),
             unavailable_policy: UnavailablePolicy::AllowAll,
             policies: tokio::sync::Mutex::new(BTreeMap::new()),
-            crawl_deadlines: tokio::sync::Mutex::new(BTreeMap::new()),
+            request_deadlines: tokio::sync::Mutex::new(BTreeMap::new()),
         }
     }
 }
@@ -107,7 +107,7 @@ impl<C> Memory<C> {
             cache_ttl: self.cache_ttl,
             unavailable_policy: self.unavailable_policy,
             policies: self.policies,
-            crawl_deadlines: self.crawl_deadlines,
+            request_deadlines: self.request_deadlines,
         }
     }
 
@@ -172,25 +172,25 @@ impl<C: Cache> Robot for Memory<C> {
                 return Ok(Decision::Disallow);
             }
 
-            let Some(crawl_delay) = policy.crawl_delay(user_agent) else {
+            let Some(required_delay) = policy.required_delay(user_agent) else {
                 return Ok(Decision::Allow);
             };
 
-            if !crawl_delay.is_positive() {
+            if !required_delay.is_positive() {
                 return Ok(Decision::Allow);
             }
 
             let now = now();
-            let crawl_delay = u64::try_from(crawl_delay.as_millis()).unwrap_or_default();
-            let mut crawl_deadlines = self.crawl_deadlines.lock().await;
-            let next_allowed_at = crawl_deadlines.get(&origin).copied().unwrap_or_default();
+            let required_delay = u64::try_from(required_delay.as_millis()).unwrap_or_default();
+            let mut request_deadlines = self.request_deadlines.lock().await;
+            let next_allowed_at = request_deadlines.get(&origin).copied().unwrap_or_default();
 
             if next_allowed_at > now {
                 let remaining = next_allowed_at.saturating_sub(now);
                 return Ok(Decision::Delay(duration_from_millis(remaining)));
             }
 
-            crawl_deadlines.insert(origin, now.saturating_add(crawl_delay));
+            request_deadlines.insert(origin, now.saturating_add(required_delay));
             Ok(Decision::Allow)
         })
     }
@@ -364,10 +364,10 @@ impl Policy {
         }
     }
 
-    fn crawl_delay(&self, user_agent: &str) -> Option<SignedDuration> {
+    fn required_delay(&self, user_agent: &str) -> Option<SignedDuration> {
         match self {
             Self::AllowAll | Self::DisallowAll => None,
-            Self::Parsed(rules) => rules.crawl_delay(user_agent),
+            Self::Parsed(rules) => rules.required_delay(user_agent),
         }
     }
 
@@ -401,6 +401,7 @@ impl Rules {
         let mut current_agents: Vec<String> = Vec::new();
         let mut current_rules: Vec<Rule> = Vec::new();
         let mut current_crawl_delay = None;
+        let mut current_request_interval = None;
 
         for raw_line in body.lines() {
             let line = strip_comment(raw_line).trim();
@@ -410,6 +411,7 @@ impl Rules {
                     &mut current_agents,
                     &mut current_rules,
                     &mut current_crawl_delay,
+                    &mut current_request_interval,
                 );
                 continue;
             }
@@ -431,6 +433,7 @@ impl Rules {
                             &mut current_agents,
                             &mut current_rules,
                             &mut current_crawl_delay,
+                            &mut current_request_interval,
                         );
                     }
                     current_agents.push(value.to_ascii_lowercase());
@@ -450,6 +453,11 @@ impl Rules {
                         current_crawl_delay = parse_crawl_delay(value);
                     }
                 }
+                "request-rate" => {
+                    if !current_agents.is_empty() {
+                        current_request_interval = parse_request_rate(value);
+                    }
+                }
                 "sitemap" => {
                     if !value.is_empty() && !sitemaps.iter().any(|entry| entry == value) {
                         sitemaps.push(value.to_string());
@@ -464,6 +472,7 @@ impl Rules {
             &mut current_agents,
             &mut current_rules,
             &mut current_crawl_delay,
+            &mut current_request_interval,
         );
 
         Self { groups, sitemaps }
@@ -500,10 +509,10 @@ impl Rules {
         !matches!(best_match, Some((_, RuleKind::Disallow)))
     }
 
-    fn crawl_delay(&self, user_agent: &str) -> Option<SignedDuration> {
+    fn required_delay(&self, user_agent: &str) -> Option<SignedDuration> {
         self.matching_groups(user_agent.to_ascii_lowercase().as_str())
             .into_iter()
-            .filter_map(|group| group.crawl_delay)
+            .filter_map(Group::required_delay)
             .max()
             .map(duration_from_millis)
     }
@@ -544,6 +553,7 @@ struct Group {
     agents: Vec<String>,
     rules: Vec<Rule>,
     crawl_delay: Option<u64>,
+    request_interval: Option<u64>,
 }
 
 impl Group {
@@ -560,6 +570,15 @@ impl Group {
                 }
             })
             .max()
+    }
+
+    fn required_delay(&self) -> Option<u64> {
+        match (self.crawl_delay, self.request_interval) {
+            (Some(crawl_delay), Some(request_interval)) => Some(crawl_delay.max(request_interval)),
+            (Some(crawl_delay), None) => Some(crawl_delay),
+            (None, Some(request_interval)) => Some(request_interval),
+            (None, None) => None,
+        }
     }
 }
 
@@ -746,6 +765,18 @@ fn parse_crawl_delay(value: &str) -> Option<u64> {
     Some((seconds * 1000.0).round() as u64)
 }
 
+fn parse_request_rate(value: &str) -> Option<u64> {
+    let (requests, window_seconds) = value.split_once('/')?;
+    let requests = requests.trim().parse::<u64>().ok()?;
+    let window_seconds = window_seconds.trim().parse::<f64>().ok()?;
+
+    if requests == 0 || !window_seconds.is_finite() || window_seconds < 0.0 {
+        return None;
+    }
+
+    Some(((window_seconds * 1000.0) / requests as f64).ceil() as u64)
+}
+
 fn compile_rule_regex(pattern: &str) -> Option<PatternRegex> {
     if pattern.is_empty() || (!pattern.contains('*') && !pattern.ends_with('$')) {
         return None;
@@ -794,10 +825,12 @@ fn finalize_group(
     current_agents: &mut Vec<String>,
     current_rules: &mut Vec<Rule>,
     current_crawl_delay: &mut Option<u64>,
+    current_request_interval: &mut Option<u64>,
 ) {
     if current_agents.is_empty() {
         current_rules.clear();
         *current_crawl_delay = None;
+        *current_request_interval = None;
         return;
     }
 
@@ -805,6 +838,7 @@ fn finalize_group(
         agents: std::mem::take(current_agents),
         rules: std::mem::take(current_rules),
         crawl_delay: current_crawl_delay.take(),
+        request_interval: current_request_interval.take(),
     });
 }
 
@@ -889,12 +923,43 @@ mod tests {
         );
 
         assert_eq!(
-            rules.crawl_delay("kun-bot"),
+            rules.required_delay("kun-bot"),
             Some(SignedDuration::from_millis(500))
         );
         assert_eq!(
-            rules.crawl_delay("other-bot"),
+            rules.required_delay("other-bot"),
             Some(SignedDuration::from_secs(2))
+        );
+    }
+
+    #[test]
+    fn rules_support_request_rate_as_even_spacing_delay() {
+        let rules = Rules::parse(
+            r#"
+            User-agent: *
+            Request-rate: 3 / 20
+            "#,
+        );
+
+        assert_eq!(
+            rules.required_delay("kun-bot"),
+            Some(SignedDuration::from_millis(6667))
+        );
+    }
+
+    #[test]
+    fn rules_use_stricter_delay_when_crawl_delay_and_request_rate_both_exist() {
+        let rules = Rules::parse(
+            r#"
+            User-agent: *
+            Crawl-delay: 1
+            Request-rate: 3/1
+            "#,
+        );
+
+        assert_eq!(
+            rules.required_delay("kun-bot"),
+            Some(SignedDuration::from_secs(1))
         );
     }
 
@@ -939,6 +1004,26 @@ mod tests {
             .seed_from_body(
                 "https://example.com/news/1",
                 "User-agent: *\nAllow: /\nCrawl-delay: 0.01\n",
+            )
+            .await;
+
+        let first_request = Request::new("https://example.com/news/1");
+        let second_request = Request::new("https://example.com/news/2");
+
+        let first = robot.check(&first_request, "kun").await.unwrap();
+        let second = robot.check(&second_request, "kun").await.unwrap();
+
+        assert_eq!(first, Decision::Allow);
+        assert!(matches!(second, Decision::Delay(delay) if delay.is_positive()));
+    }
+
+    #[tokio::test]
+    async fn robot_returns_delay_for_request_rate_window() {
+        let robot = Memory::default();
+        robot
+            .seed_from_body(
+                "https://example.com/news/1",
+                "User-agent: *\nAllow: /\nRequest-rate: 2/1\n",
             )
             .await;
 

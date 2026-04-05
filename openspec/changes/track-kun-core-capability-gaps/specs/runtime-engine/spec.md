@@ -325,6 +325,13 @@
 - **THEN** 引擎会按该 delay 退避并重试同 origin 的后续请求
 - **AND** 不会把这类请求误当成永久 `Disallow`
 
+#### Scenario: Request-rate is enforced as a real runtime delay
+
+- **WHEN** 调用方通过 `Settings::with_robots_obey(true)` 开启 robots 策略
+- **AND** 当前 origin 的 `robots.txt` 为匹配到的 user-agent group 声明了 `Request-rate`
+- **THEN** 引擎会按 `window / requests` 计算出的均匀间隔最小 delay 退避并重试同 origin 的后续请求
+- **AND** 如果同一个 group 同时声明了 `Crawl-delay` 与 `Request-rate`，当前取更严格的 delay
+
 #### Scenario: robots user-agent defaults to spider name
 
 - **WHEN** 调用方开启 robots 策略但未显式设置 robots user-agent

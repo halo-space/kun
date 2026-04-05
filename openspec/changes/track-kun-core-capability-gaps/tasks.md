@@ -195,6 +195,8 @@
 - [x] 22.5 同步 `README.md`、`docs/capabilities.md`、相关 specs 与测试。
 - [x] 22.6 为 `robots::Memory` 补最小站点策略开关，允许调用方在 `robots.txt` 临时不可用且无可用缓存时，显式选择 fail-open 或 fail-closed。
   - 当前已补 `robots::UnavailablePolicy::{AllowAll, DisallowAll}` 与 `robots::Memory::with_unavailable_policy(...)`；默认保持原来的 fail-open，调用方也可以显式切到更保守的 `DisallowAll`，且 stale cache 刷新失败时仍优先复用旧 policy。
+- [x] 22.7 为 robots 补 `Request-rate` 运行时语义，并明确与 `Crawl-delay` 的协同规则。
+  - 当前已支持解析 `Request-rate: requests / window`，并把它按 `window / requests` 的均匀间隔最小 delay 接入运行时；如果同一个 group 同时声明 `Crawl-delay` 与 `Request-rate`，则取更严格的 delay。
 
 ## 23. P0 Dedup 能力继续增强
 
