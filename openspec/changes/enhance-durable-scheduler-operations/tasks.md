@@ -2,9 +2,12 @@
 
 ## 1. 事务边界
 
-- [ ] 1.1 设计并实现 Redis durable scheduler 的显式结果语义，区分 `complete / requeue / heartbeat` 中的成功、ownership 冲突、stale lease 与缺失 inflight 状态。
-- [ ] 1.2 评估这些结果语义如何和当前 `SpiderError` / engine task runtime 对齐，避免继续只靠字符串错误分支判断。
-- [ ] 1.3 为事务边界补最小单元测试或契约测试，覆盖 ownership 冲突、旧 lease 与缺失状态场景。
+- [x] 1.1 设计并实现 Redis durable scheduler 的显式结果语义，区分 `complete / requeue / heartbeat` 中的成功、ownership 冲突、stale lease 与缺失 inflight 状态。
+  - 当前已把 Redis lease 结果收口为结构化 scheduler error，并把脚本返回码细分成 ownership 冲突、stale lease 与 inactive lease。
+- [x] 1.2 评估这些结果语义如何和当前 `SpiderError` / engine task runtime 对齐，避免继续只靠字符串错误分支判断。
+  - 当前 `SpiderError::Scheduler` 已承载结构化 `SchedulerError`；engine task runtime 也已按 lease-resolution error 与普通 scheduler error 分流处理。
+- [x] 1.3 为事务边界补最小单元测试或契约测试，覆盖 ownership 冲突、旧 lease 与缺失状态场景。
+  - 当前已补 Redis 调度测试，覆盖错误 worker、ownership 冲突、stale lease、inactive lease 与 heartbeat 的旧 lease 边界。
 
 ## 2. 观测能力
 

@@ -80,7 +80,15 @@ where
                 )
                 .await?;
             }
-            scheduler.complete(&lease).await?;
+            resolve_scheduler_transition(
+                scheduler.complete(&lease),
+                &lease,
+                "complete",
+                url.as_str(),
+                spider_name,
+                stats,
+            )
+            .await?;
             outputs.push(SpiderOutput {
                 items: output.items,
                 requests: output.follows,
@@ -89,15 +97,39 @@ where
         TaskOutcome::Retry(retry_task) => {
             stats.record_retry();
             scheduler.enqueue(*retry_task).await?;
-            scheduler.complete(&lease).await?;
+            resolve_scheduler_transition(
+                scheduler.complete(&lease),
+                &lease,
+                "complete",
+                url.as_str(),
+                spider_name,
+                stats,
+            )
+            .await?;
         }
         TaskOutcome::Drop => {
-            scheduler.complete(&lease).await?;
+            resolve_scheduler_transition(
+                scheduler.complete(&lease),
+                &lease,
+                "complete",
+                url.as_str(),
+                spider_name,
+                stats,
+            )
+            .await?;
         }
         TaskOutcome::Error(error) => {
             stats.record_error();
             tracing::error!(spider = spider_name, url = url.as_str(), error = %error, "task failed");
-            scheduler.requeue(&lease).await?;
+            resolve_scheduler_transition(
+                scheduler.requeue(&lease),
+                &lease,
+                "requeue",
+                url.as_str(),
+                spider_name,
+                stats,
+            )
+            .await?;
         }
         TaskOutcome::LeaseLost(error) => {
             stats.record_error();
@@ -112,6 +144,33 @@ where
         }
     }
     Ok(())
+}
+
+async fn resolve_scheduler_transition(
+    transition: impl std::future::Future<Output = Result<(), SpiderError>>,
+    lease: &TaskLease,
+    action: &'static str,
+    url: &str,
+    spider_name: &str,
+    stats: &crate::stats::Tracker,
+) -> Result<(), SpiderError> {
+    match transition.await {
+        Ok(()) => Ok(()),
+        Err(error) if error.is_scheduler_lease_resolution_error() => {
+            stats.record_error();
+            tracing::warn!(
+                spider = spider_name,
+                task_id = lease.task_id().as_str(),
+                worker_id = lease.worker_id(),
+                action,
+                url,
+                error = %error,
+                "task lease could not be resolved after task execution"
+            );
+            Ok(())
+        }
+        Err(error) => Err(error),
+    }
 }
 
 pub(super) struct TaskRunReservation {
@@ -455,7 +514,10 @@ where
             outcome = task_future.as_mut() => return outcome,
             _ = &mut sleep => {
                 if let Err(error) = scheduler.heartbeat(lease).await {
-                    return TaskOutcome::LeaseLost(error);
+                    if error.is_scheduler_lease_resolution_error() {
+                        return TaskOutcome::LeaseLost(error);
+                    }
+                    return TaskOutcome::Error(error);
                 }
             }
         }

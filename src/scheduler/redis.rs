@@ -210,7 +210,7 @@ end
 return {best_task_json, lease_id}
 "#;
 const SCHEDULER_COMPLETE_SCRIPT: &str = r#"
--- kun:scheduler:complete_v2
+-- kun:scheduler:complete_v3
 local tasks = KEYS[1]
 local ready = KEYS[2]
 local ready_order = KEYS[3]
@@ -231,8 +231,12 @@ if (not current_worker) or (not current_lease) then
     return 0
 end
 
-if current_worker ~= worker_id or current_lease ~= lease_id then
+if current_worker ~= worker_id then
     return -1
+end
+
+if current_lease ~= lease_id then
+    return -2
 end
 
 redis.call('ZREM', inflight_deadlines, task_id)
@@ -246,7 +250,7 @@ redis.call('HDEL', tasks, task_id)
 return 1
 "#;
 const SCHEDULER_REQUEUE_SCRIPT: &str = r#"
--- kun:scheduler:requeue_v2
+-- kun:scheduler:requeue_v3
 local tasks = KEYS[1]
 local ready = KEYS[2]
 local ready_order = KEYS[3]
@@ -275,8 +279,12 @@ if (not current_worker) or (not current_lease) then
     return 0
 end
 
-if current_worker ~= worker_id or current_lease ~= lease_id then
+if current_worker ~= worker_id then
     return -1
+end
+
+if current_lease ~= lease_id then
+    return -2
 end
 
 local task_json = redis.call('HGET', tasks, task_id)
@@ -308,7 +316,7 @@ end
 return 1
 "#;
 const SCHEDULER_HEARTBEAT_SCRIPT: &str = r#"
--- kun:scheduler:heartbeat_v1
+-- kun:scheduler:heartbeat_v2
 local inflight = KEYS[1]
 local inflight_deadlines = KEYS[2]
 local inflight_workers = KEYS[3]
@@ -326,8 +334,12 @@ if (not current_worker) or (not current_lease) then
     return 0
 end
 
-if current_worker ~= worker_id or current_lease ~= lease_id then
+if current_worker ~= worker_id then
     return -1
+end
+
+if current_lease ~= lease_id then
+    return -2
 end
 
 if redis.call('SREM', inflight, task_id) == 0 then
@@ -521,11 +533,12 @@ impl Redis {
 
     fn validate_lease_worker(&self, lease: &TaskLease) -> Result<(), SpiderError> {
         if lease.worker_id() != self.worker_id {
-            return Err(SpiderError::scheduler(format!(
-                "redis scheduler lease belongs to worker `{}`, current worker is `{}`",
-                lease.worker_id(),
-                self.worker_id
-            )));
+            return Err(SpiderError::scheduler(
+                crate::error::SchedulerError::LeaseWorkerMismatch {
+                    lease_worker_id: lease.worker_id().to_string(),
+                    current_worker_id: self.worker_id.clone(),
+                },
+            ));
         }
 
         Ok(())
@@ -891,22 +904,53 @@ fn next_lease_id(worker_id: &str) -> String {
     )
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeaseTransitionResult {
+    Success,
+    OwnershipConflict,
+    StaleLease,
+    InactiveLease,
+}
+
+impl LeaseTransitionResult {
+    fn from_redis_code(code: i64) -> Self {
+        match code {
+            1 => Self::Success,
+            -1 => Self::OwnershipConflict,
+            -2 => Self::StaleLease,
+            _ => Self::InactiveLease,
+        }
+    }
+}
+
 fn ensure_lease_transition(
-    action: &str,
+    action: &'static str,
     lease: &TaskLease,
     result: i64,
 ) -> Result<(), SpiderError> {
-    match result {
-        1 => Ok(()),
-        -1 => Err(SpiderError::scheduler(format!(
-            "redis scheduler cannot {action} task `{}` because the lease is no longer owned by worker `{}`",
-            lease.task_id().as_str(),
-            lease.worker_id()
-        ))),
-        _ => Err(SpiderError::scheduler(format!(
-            "redis scheduler cannot {action} task `{}` because its lease is no longer active",
-            lease.task_id().as_str()
-        ))),
+    match LeaseTransitionResult::from_redis_code(result) {
+        LeaseTransitionResult::Success => Ok(()),
+        LeaseTransitionResult::OwnershipConflict => Err(SpiderError::scheduler(
+            crate::error::SchedulerError::LeaseOwnershipConflict {
+                action,
+                task_id: lease.task_id().as_str().to_string(),
+                worker_id: lease.worker_id().to_string(),
+            },
+        )),
+        LeaseTransitionResult::StaleLease => Err(SpiderError::scheduler(
+            crate::error::SchedulerError::StaleLease {
+                action,
+                task_id: lease.task_id().as_str().to_string(),
+                worker_id: lease.worker_id().to_string(),
+                lease_id: lease.lease_id().to_string(),
+            },
+        )),
+        LeaseTransitionResult::InactiveLease => Err(SpiderError::scheduler(
+            crate::error::SchedulerError::InactiveLease {
+                action,
+                task_id: lease.task_id().as_str().to_string(),
+            },
+        )),
     }
 }
 
@@ -960,6 +1004,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::{SchedulerError, SpiderError};
     use crate::request::Request;
     use crate::test_support::redis::spawn_redis_server;
     use jiff::SignedDuration;
@@ -1186,9 +1231,10 @@ mod tests {
         let error = second.complete(&claimed.lease).await.unwrap_err();
         assert_eq!(
             error,
-            SpiderError::scheduler(
-                "redis scheduler lease belongs to worker `worker-a`, current worker is `worker-b`"
-            )
+            SpiderError::scheduler(SchedulerError::LeaseWorkerMismatch {
+                lease_worker_id: "worker-a".to_string(),
+                current_worker_id: "worker-b".to_string(),
+            })
         );
 
         tokio::time::sleep(std::time::Duration::try_from(SignedDuration::from_millis(40)).unwrap())
@@ -1198,15 +1244,114 @@ mod tests {
         let stale_error = first.complete(&claimed.lease).await.unwrap_err();
         assert_eq!(
             stale_error,
-            SpiderError::scheduler(format!(
-                "redis scheduler cannot complete task `{}` because the lease is no longer owned by worker `worker-a`",
-                claimed.task.id.as_str()
-            ))
+            SpiderError::scheduler(SchedulerError::LeaseOwnershipConflict {
+                action: "complete",
+                task_id: claimed.task.id.as_str().to_string(),
+                worker_id: "worker-a".to_string(),
+            })
         );
         second.complete(&reclaimed.lease).await.unwrap();
 
         first.close().await.unwrap();
         second.close().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn redis_scheduler_reports_stale_complete_for_same_worker_old_lease() {
+        let (url, _commands_rx, server_handle) = spawn_redis_server().await;
+        let namespace = "stale_complete";
+        let scheduler = Redis::new(format!("redis://{url}"), namespace)
+            .with_worker_id("worker-a")
+            .with_lease_timeout(SignedDuration::from_millis(20));
+        scheduler
+            .enqueue(Task::new(Request::new(
+                "https://example.com/stale-complete",
+            )))
+            .await
+            .unwrap();
+
+        let first_claim = scheduler.take_ready().await.unwrap().unwrap();
+        tokio::time::sleep(std::time::Duration::try_from(SignedDuration::from_millis(40)).unwrap())
+            .await;
+        let second_claim = scheduler.take_ready().await.unwrap().unwrap();
+
+        let error = scheduler.complete(&first_claim.lease).await.unwrap_err();
+        assert_eq!(
+            error,
+            SpiderError::scheduler(SchedulerError::StaleLease {
+                action: "complete",
+                task_id: first_claim.task.id.as_str().to_string(),
+                worker_id: "worker-a".to_string(),
+                lease_id: first_claim.lease.lease_id().to_string(),
+            })
+        );
+
+        scheduler.complete(&second_claim.lease).await.unwrap();
+        scheduler.close().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn redis_scheduler_reports_inactive_complete_after_task_is_already_resolved() {
+        let (url, _commands_rx, server_handle) = spawn_redis_server().await;
+        let scheduler = Redis::new(format!("redis://{url}"), "inactive_complete");
+        scheduler
+            .enqueue(Task::new(Request::new(
+                "https://example.com/inactive-complete",
+            )))
+            .await
+            .unwrap();
+
+        let claimed = scheduler.take_ready().await.unwrap().unwrap();
+        scheduler.complete(&claimed.lease).await.unwrap();
+
+        let error = scheduler.complete(&claimed.lease).await.unwrap_err();
+        assert_eq!(
+            error,
+            SpiderError::scheduler(SchedulerError::InactiveLease {
+                action: "complete",
+                task_id: claimed.task.id.as_str().to_string(),
+            })
+        );
+
+        scheduler.close().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn redis_scheduler_reports_stale_heartbeat_for_same_worker_old_lease() {
+        let (url, _commands_rx, server_handle) = spawn_redis_server().await;
+        let namespace = "stale_heartbeat";
+        let scheduler = Redis::new(format!("redis://{url}"), namespace)
+            .with_worker_id("worker-a")
+            .with_lease_timeout(SignedDuration::from_millis(20))
+            .with_heartbeat_interval(SignedDuration::from_millis(10));
+        scheduler
+            .enqueue(Task::new(Request::new(
+                "https://example.com/stale-heartbeat",
+            )))
+            .await
+            .unwrap();
+
+        let first_claim = scheduler.take_ready().await.unwrap().unwrap();
+        tokio::time::sleep(std::time::Duration::try_from(SignedDuration::from_millis(40)).unwrap())
+            .await;
+        let second_claim = scheduler.take_ready().await.unwrap().unwrap();
+
+        let error = scheduler.heartbeat(&first_claim.lease).await.unwrap_err();
+        assert_eq!(
+            error,
+            SpiderError::scheduler(SchedulerError::StaleLease {
+                action: "heartbeat",
+                task_id: first_claim.task.id.as_str().to_string(),
+                worker_id: "worker-a".to_string(),
+                lease_id: first_claim.lease.lease_id().to_string(),
+            })
+        );
+
+        scheduler.complete(&second_claim.lease).await.unwrap();
+        scheduler.close().await.unwrap();
         server_handle.await.unwrap().unwrap();
     }
 

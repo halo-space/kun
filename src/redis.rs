@@ -14,7 +14,7 @@ impl ErrorContext {
     fn error(self, message: impl Into<String>) -> SpiderError {
         match self {
             Self::Engine => SpiderError::engine(message),
-            Self::Scheduler => SpiderError::scheduler(message),
+            Self::Scheduler => SpiderError::scheduler(message.into()),
         }
     }
 }

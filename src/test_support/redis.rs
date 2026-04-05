@@ -327,14 +327,21 @@ fn handle_eval_command(
     {
         return eval_scheduler_claim_ready(state, keys, args);
     }
-    if script.contains("kun:scheduler:complete_v1") || script.contains("kun:scheduler:complete_v2")
+    if script.contains("kun:scheduler:complete_v1")
+        || script.contains("kun:scheduler:complete_v2")
+        || script.contains("kun:scheduler:complete_v3")
     {
         return eval_scheduler_complete(state, keys, args);
     }
-    if script.contains("kun:scheduler:requeue_v1") || script.contains("kun:scheduler:requeue_v2") {
+    if script.contains("kun:scheduler:requeue_v1")
+        || script.contains("kun:scheduler:requeue_v2")
+        || script.contains("kun:scheduler:requeue_v3")
+    {
         return eval_scheduler_requeue(state, keys, args);
     }
-    if script.contains("kun:scheduler:heartbeat_v1") {
+    if script.contains("kun:scheduler:heartbeat_v1")
+        || script.contains("kun:scheduler:heartbeat_v2")
+    {
         return eval_scheduler_heartbeat(state, keys, args);
     }
 
@@ -431,7 +438,7 @@ fn eval_scheduler_complete(
     let task_id = args[0].as_str();
     if !lease_matches(state, &keys[6], &keys[7], task_id, &args[1], &args[2]) {
         return Ok(integer_reply(lease_result_code(
-            state, &keys[6], &keys[7], task_id,
+            state, &keys[6], &keys[7], task_id, &args[1], &args[2],
         )));
     }
     sorted_set_remove(state, &keys[5], task_id);
@@ -459,7 +466,7 @@ fn eval_scheduler_requeue(
     let now = args[1].parse::<i64>().map_err(int_error)?;
     if !lease_matches(state, &keys[6], &keys[7], task_id, &args[2], &args[3]) {
         return Ok(integer_reply(lease_result_code(
-            state, &keys[6], &keys[7], task_id,
+            state, &keys[6], &keys[7], task_id, &args[2], &args[3],
         )));
     }
     let task_json = state
@@ -499,7 +506,7 @@ fn eval_scheduler_heartbeat(
     let deadline = args[1].parse::<i64>().map_err(int_error)?;
     if !lease_matches(state, &keys[2], &keys[3], task_id, &args[2], &args[3]) {
         return Ok(integer_reply(lease_result_code(
-            state, &keys[2], &keys[3], task_id,
+            state, &keys[2], &keys[3], task_id, &args[2], &args[3],
         )));
     }
     if !set_remove(state, &keys[0], task_id) {
@@ -765,19 +772,23 @@ fn lease_result_code(
     workers_key: &str,
     leases_key: &str,
     task_id: &str,
+    worker_id: &str,
+    lease_id: &str,
 ) -> i64 {
-    let has_worker = state
+    let current_worker = state
         .hashes
         .get(workers_key)
-        .and_then(|values| values.get(task_id))
-        .is_some();
-    let has_lease = state
+        .and_then(|values| values.get(task_id));
+    let current_lease = state
         .hashes
         .get(leases_key)
-        .and_then(|values| values.get(task_id))
-        .is_some();
+        .and_then(|values| values.get(task_id));
 
-    if has_worker || has_lease { -1 } else { 0 }
+    match (current_worker, current_lease) {
+        (Some(current_worker), Some(_)) if current_worker != worker_id => -1,
+        (Some(_), Some(current_lease)) if current_lease != lease_id => -2,
+        _ => 0,
+    }
 }
 
 fn set_insert(state: &mut TestRedisState, key: &str, member: &str) {
