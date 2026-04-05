@@ -54,7 +54,7 @@ README 这里只保留总览；模块级细节统一放到 [docs/capabilities.md
 - 当前 item 链路已经明确为 `parse -> item -> pipeline -> store`；这一轮已补 `store::File` 的 rotate / format 选项，以及 `store::Webhook` 的 retry/backoff 与 `store::Kafka` 的 key / headers；更高阶外部系统语义仍建议继续走自定义 `Store`
 - 当前 stats 仍是 engine 进程内累计快照；现在已经补了细粒度计数，并提供 `Engine::with_stats_reporter(...)` 作为最小观测钩子，但还没有直接内置 Prometheus / OpenTelemetry exporter
 - 当前 `robots.txt` 已支持默认关闭、按 origin 缓存、`User-agent` / `Allow` / `Disallow`、`Crawl-delay`、更完整 `group` 选择，以及 `* / $` wildcard 规则；默认 cache backend 仍是内存，也已补内置 `robots::cache::File`、`cache_ttl` 刷新和可选 sitemap 自动种子；当前仍未补的是更高阶语法细节与更复杂站点策略
-- HTML XPath、OCR 这两块 parser 能力仍未收敛；当前其余通用 query transform 已补到：`fallback(...)`、`fallback_many(...)`、`field(...)`、`filter_field_present(...)`、`filter_field_equals(...)`、`pick_fields([...])`、`index(...)`、`flatten()`、`compact()`、`trim()`、`first_non_empty()`、`skip(...)`、`take(...)`、`last()`、`dedup()`、`join(...)`、`split(...)`、`replace(...)`、`normalize_whitespace()`、`resolve_url(...)`、`parse_number()`、`parse_bool()`、`parse_json()`、`parse_datetime()`、`parse_datetime_with_format(...)`，以及最小 query 级断言：`require_non_empty()`、`require_one()`
+- `HTML` 与 `XML` 现在都已支持 `XPath`；HTML 场景会先把页面规范化成稳定 DOM 再执行 `XPath`。当前 parser 剩余主缺口主要是 `ocr`；其余通用 query transform 已补到：`fallback(...)`、`fallback_many(...)`、`field(...)`、`filter_field_present(...)`、`filter_field_equals(...)`、`pick_fields([...])`、`index(...)`、`flatten()`、`compact()`、`trim()`、`first_non_empty()`、`skip(...)`、`take(...)`、`last()`、`dedup()`、`join(...)`、`split(...)`、`replace(...)`、`normalize_whitespace()`、`resolve_url(...)`、`parse_number()`、`parse_bool()`、`parse_json()`、`parse_datetime()`、`parse_datetime_with_format(...)`，以及最小 query 级断言：`require_non_empty()`、`require_one()`
 
 ## 快速开始
 
@@ -574,9 +574,8 @@ let request = Request::browser("https://example.com/app")
     );
 ```
 
-**已知限制：**
-- HTML 解析暂不支持 XPath 选择器（当前 XPath 实现基于 XML 解析器，对不规范 HTML 容错性差）
-- 建议在 HTML 场景下使用 CSS 选择器替代 XPath
+**当前边界：**
+- `HTML` 与 `XML` 现在都支持 `XPath`；HTML 响应会先被解析并规范化成稳定 DOM，再执行 `one()`、`all()`、`text()`、`html()` 与 `attr()` 这组统一提取语义
 - `ocr` 相关解析能力当前暂不实现
 - DSL 配置面当前后置，优先补齐和稳定代码爬虫与共享底层能力
 

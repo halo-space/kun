@@ -36,7 +36,7 @@
 - 这次 change 不重做 DSL 配置面设计。
 - 这次 change 不优先围绕 `rules` / DSL 表层配置扩展能力。
 - 这次 change 不把现有架构整体推翻重写，而是在当前 `Spider / Request / Engine / Response / runtime / middleware` 结构上逐步补齐。
-- HTML XPath 与 OCR 当前继续暂缓，不作为本轮能力补齐重点。
+- OCR 当前继续暂缓，不作为本轮能力补齐重点。
 
 ## 风险
 

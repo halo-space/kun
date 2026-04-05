@@ -25,7 +25,7 @@
 - `src/download/*`
   - 后续补齐 HTTP timeout / proxy / cookie jar / browser 真正能力边界
 - `src/parser/*`
-  - 当前优先补齐 parse 后处理、结构化转换与 validation 语义；HTML XPath 与 OCR 继续暂缓
+  - 当前已补齐 HTML XPath，并统一 HTML / XML 的 XPath 执行语义；OCR 继续暂缓
 - `src/pipeline.rs`
   - 后续继续收口 item 处理与过滤语义
 - `src/store.rs`
@@ -66,4 +66,4 @@
   - 再修改 `src/` 代码
   - 最后运行针对性的 `cargo test` / `cargo check --examples`
 - 对已有行为边界可能变化的模块，优先补单元测试，再补实现。
-- 对当前明确暂缓的 HTML XPath 与 OCR，只在文档和任务台账中保留 deferred 边界，不在本轮实现中投入。
+- 对当前明确暂缓的 OCR，只在文档和任务台账中保留 deferred 边界，不在本轮实现中投入。

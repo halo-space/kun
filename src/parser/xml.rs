@@ -1,8 +1,7 @@
 use crate::parser::query::NodeQuery;
-use crate::parser::query::{ValueQuery, trim_text};
+use crate::parser::query::ValueQuery;
+use crate::parser::xpath::{evaluate_xml_markup, evaluate_xml_string_values};
 use crate::value::Value;
-use sxd_document::parser;
-use sxd_xpath::{Context, Factory, Value as XPathValue};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct XmlQuery {
@@ -41,7 +40,7 @@ impl XmlQuery {
         ValueQuery::new(crate::parser::Kind::Html, self.node.selector.clone())
             .with_trim(false)
             .with_values(
-                self.extract(&self.node.selector)
+                evaluate_xml_markup(&self.input, &self.node.selector)
                     .into_iter()
                     .map(Value::String)
                     .collect(),
@@ -64,29 +63,7 @@ impl XmlQuery {
     }
 
     fn extract(&self, selector: &str) -> Vec<String> {
-        let Ok(package) = parser::parse(&self.input) else {
-            return Vec::new();
-        };
-        let document = package.as_document();
-        let factory = Factory::new();
-        let Ok(Some(xpath)) = factory.build(selector) else {
-            return Vec::new();
-        };
-        let context = Context::new();
-        let Ok(value) = xpath.evaluate(&context, document.root()) else {
-            return Vec::new();
-        };
-
-        match value {
-            XPathValue::Nodeset(nodes) => nodes
-                .document_order()
-                .into_iter()
-                .map(|node| trim_text(&node.string_value(), self.node.trim))
-                .collect(),
-            XPathValue::String(value) => vec![trim_text(&value, self.node.trim)],
-            XPathValue::Boolean(value) => vec![value.to_string()],
-            XPathValue::Number(value) => vec![value.to_string()],
-        }
+        evaluate_xml_string_values(&self.input, selector, self.node.trim)
     }
 }
 
@@ -99,5 +76,15 @@ mod tests {
         let query = XmlQuery::new("<items><item id='42'>post</item></items>", "//item");
 
         assert_eq!(query.attr("id").one().as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn xml_query_html_projection_serializes_markup() {
+        let query = XmlQuery::new("<items><item id='42'>post</item></items>", "//item");
+
+        assert_eq!(
+            query.html().one().as_deref(),
+            Some("<item id='42'>post</item>")
+        );
     }
 }

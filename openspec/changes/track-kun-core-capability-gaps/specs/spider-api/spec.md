@@ -168,10 +168,12 @@
 - **AND** 当没有可用编码声明时，系统先尝试 apparent encoding 猜测
 - **AND** 最终仍可回退为 UTF-8 lossy 解码
 
-#### Scenario: HTML XPath behavior is explicit and testable
+#### Scenario: HTML XPath evaluates on a normalized HTML tree
 
 - **WHEN** 用户在 HTML 响应上使用 XPath
-- **THEN** 框架要么提供稳定支持，要么给出明确、稳定、可测试的限制行为
+- **THEN** 框架先把 HTML 解析并规范化成稳定节点树后再执行 XPath
+- **AND** `one()`、`all()`、`text()`、`html()` 与 `attr()` 在 HTML / XML 场景下保持一致的最小语义
+- **AND** 常见的非严格 HTML 仍能得到稳定、可测试的提取结果
 
 #### Scenario: OCR-capable selector type is not schema-only
 

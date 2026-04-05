@@ -457,6 +457,25 @@ mod tests {
     }
 
     #[test]
+    fn response_xpath_extracts_from_malformed_html() {
+        let response = Response::new(
+            "https://example.com",
+            200,
+            Headers::new(),
+            b"<html><body><div><h1>Hello</h1><a href='/next'>Next".to_vec(),
+        );
+
+        assert_eq!(
+            response.xpath("//body/div/h1").text().one().as_deref(),
+            Some("Hello")
+        );
+        assert_eq!(
+            response.xpath("//body/div/a").attr("href").one().as_deref(),
+            Some("/next")
+        );
+    }
+
+    #[test]
     fn response_json_supports_optional_selector() {
         let response = Response::default();
 

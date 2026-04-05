@@ -666,18 +666,26 @@ let engine = Engine::new()
 当前 parser 能力以“已经稳定可用的解析方式”为主：
 
 - CSS
+- XPath
 - JSON
 - XML
 - Regex
 - Feed
 - AI selector
 
-当前仍未收敛的能力：
+当前仍待补齐的 parser 能力：
 
-- HTML XPath
 - OCR
 
-所以现在如果是 HTML 页面，优先建议用 CSS 选择器，不建议把 XPath 当成已经可靠的 HTML 能力。
+`HTML XPath` 现在已经接入统一执行链路：框架会先用 HTML parser 构建 DOM，再把它规范化成 XML-safe markup，最后交给 `xrust` 执行 XPath；因此 `response.xpath(...)` 与 `response.xml(...)` 现在共享同一套 `one()`、`all()`、`text()`、`html()` 与 `attr()` 语义。
+
+最小用法示例：
+
+```rust
+let title = response.xpath("//article//h1").text().one();
+let hrefs = response.xpath("//nav//a").attr("href").all();
+let section_html = response.xpath("//section[@id='content']").html().one();
+```
 
 当前已经落下的最小 query transform 能力：
 
@@ -710,7 +718,7 @@ let engine = Engine::new()
 - `require_non_empty()`：要求至少有一个非空结果，否则直接返回 parse error
 - `require_one()`：要求恰好只有一个非空结果，否则直接返回 parse error
 
-当前已经覆盖多 query 兜底、结构过滤/投影、数组拉平、结果切片/去重、string transform、URL resolve、embedded JSON parse、number/bool/datetime conversion 与 query-level assertions；剩余 parser 主缺口现在主要回到 HTML XPath 与 OCR。
+当前已经覆盖多 query 兜底、结构过滤/投影、数组拉平、结果切片/去重、string transform、URL resolve、embedded JSON parse、number/bool/datetime conversion 与 query-level assertions；剩余 parser 主缺口现在主要回到 OCR。
 
 ## Validation
 

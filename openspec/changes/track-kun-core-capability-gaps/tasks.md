@@ -44,9 +44,10 @@
 
 ## 6. Parser 缺口补齐
 
-当前暂缓：HTML XPath 目前没有稳定好用的底层库方案，`ocr` 也暂无可落地实现；这组任务继续保留为 deferred，不纳入本轮实现范围。
+当前暂缓：`ocr` 目前仍暂无可落地实现；这组任务里继续保留 `6.2` 为 deferred，不纳入本轮实现范围。
 
-- [ ] 6.1 补齐 HTML XPath 能力，或明确提供稳定的 HTML XPath 替代实现。
+- [x] 6.1 补齐 HTML XPath 能力，或明确提供稳定的 HTML XPath 替代实现。
+  - 当前已基于 `xrust` 接住统一 XPath 执行，并在 HTML 场景先通过 DOM 解析与规范化生成稳定节点树，再提供 `one()`、`all()`、`text()`、`html()` 与 `attr()` 的一致语义。
 - [ ] 6.2 为 `ocr` selector_type 补真正 parser/runtime 支持，或从 schema 中移除占位能力。
 - [x] 6.3 规划 parse 后处理能力：多选择器兜底、normalize、类型转换、结构化校验。
   - 当前已补一组更完整的 query transform：`fallback(...)`、`fallback_many(...)`、`field(...)`、`filter_field_present(...)`、`filter_field_equals(...)`、`pick_fields([...])`、`index(...)`、`flatten()`、`compact()`、`trim()`、`first_non_empty()`、`skip(...)`、`take(...)`、`last()`、`dedup()`、`join(...)`、`split(...)`、`replace(...)`、`normalize_whitespace()`、`parse_number()`、`parse_bool()`、`parse_json()`、`parse_datetime()`、`parse_datetime_with_format(...)`。

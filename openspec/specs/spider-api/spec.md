@@ -272,6 +272,13 @@
 - When 用户调用 `css`、`xpath`、`json`、`xml`、`regex`、`ai` 或 `feed`
 - Then 这些辅助方法都以响应 text 作为输入源
 
+#### Scenario: HTML XPath uses a normalized HTML tree
+
+- Given 一个 HTML 响应文本
+- When 用户调用 `response.xpath(...)`
+- Then 框架先把 HTML 解析并规范化成稳定节点树后再执行 XPath
+- And `text()`、`html()` 与 `attr()` 在 HTML / XML 场景下保持一致的最小语义
+
 #### Scenario: Query transforms can resolve relative URLs against a base URL
 
 - Given 用户从响应里提取到相对链接文本
