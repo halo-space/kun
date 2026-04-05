@@ -5,6 +5,7 @@ use crate::scheduler::{ClaimedTask, Scheduler, Task, TaskLease};
 use jiff::{SignedDuration, Timestamp};
 use redis::FromRedisValue;
 use std::cmp::Ordering;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use tokio::sync::Mutex;
@@ -12,6 +13,9 @@ use tokio::sync::Mutex;
 const DEFAULT_LEASE_TIMEOUT: u64 = 300_000;
 static NEXT_WORKER_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_LEASE_ID: AtomicU64 = AtomicU64::new(1);
+const SCHEDULER_NAMESPACE_REGISTRY_KEY: &str = "kun:scheduler:namespaces:v1";
+const META_LEASE_TIMEOUT: &str = "lease_timeout";
+const META_HEARTBEAT_INTERVAL: &str = "heartbeat_interval";
 const SCHEDULER_ENQUEUE_SCRIPT: &str = r#"
 -- kun:scheduler:enqueue_v1
 local tasks = KEYS[1]
@@ -51,6 +55,7 @@ local inflight_deadlines = KEYS[6]
 local inflight_workers = KEYS[7]
 local inflight_leases = KEYS[8]
 local sequence = KEYS[9]
+local reclaimed_total = KEYS[10]
 
 local now = tonumber(ARGV[1])
 local reclaimed = 0
@@ -90,6 +95,10 @@ for _, task_id in ipairs(expired_ids) do
     end
 end
 
+for _ = 1, reclaimed do
+    redis.call('INCR', reclaimed_total)
+end
+
 return reclaimed
 "#;
 const SCHEDULER_CLAIM_READY_SCRIPT: &str = r#"
@@ -103,6 +112,7 @@ local inflight_deadlines = KEYS[6]
 local inflight_workers = KEYS[7]
 local inflight_leases = KEYS[8]
 local sequence = KEYS[9]
+local reclaimed_total = KEYS[10]
 
 local now = tonumber(ARGV[1])
 local lease_timeout = ARGV[2]
@@ -131,6 +141,7 @@ local function route_task(id, task_json)
 end
 
 local expired_ids = redis.call('ZRANGEBYSCORE', inflight_deadlines, '-inf', tostring(now))
+local reclaimed = 0
 for _, task_id in ipairs(expired_ids) do
     local removed_deadline = redis.call('ZREM', inflight_deadlines, task_id)
     local removed_inflight = redis.call('SREM', inflight, task_id)
@@ -140,8 +151,13 @@ for _, task_id in ipairs(expired_ids) do
         local task_json = redis.call('HGET', tasks, task_id)
         if task_json then
             route_task(task_id, task_json)
+            reclaimed = reclaimed + 1
         end
     end
+end
+
+for _ = 1, reclaimed do
+    redis.call('INCR', reclaimed_total)
 end
 
 local delayed_ids = redis.call('ZRANGEBYSCORE', delayed, '-inf', tostring(now))
@@ -365,6 +381,27 @@ pub struct Redis {
     connection: Arc<Mutex<Option<Connection>>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamespaceSnapshot {
+    /// The Redis namespace this runtime snapshot was read from.
+    pub namespace: String,
+    /// Instantaneous ready / delayed / inflight counts after any reclaim done
+    /// by this snapshot refresh.
+    pub counts: Counts,
+    /// Unique worker ids that currently own at least one inflight task.
+    pub worker_ids: Vec<String>,
+    /// Number of active inflight lease tokens currently tracked.
+    pub active_lease_count: usize,
+    /// Number of inflight deadline entries currently tracked.
+    pub deadline_count: usize,
+    /// Cumulative reclaimed stale inflight task count for this namespace.
+    pub reclaimed_total: u64,
+    /// Number of stale inflight tasks reclaimed during this snapshot refresh.
+    pub reclaimed_in_refresh: u64,
+    pub lease_timeout: Option<SignedDuration>,
+    pub heartbeat_interval: Option<SignedDuration>,
+}
+
 impl Redis {
     pub fn new(url: impl Into<String>, namespace: impl Into<String>) -> Self {
         Self {
@@ -415,10 +452,51 @@ impl Redis {
         self
     }
 
+    /// Lists durable scheduler namespaces already observed in this Redis
+    /// database.
+    pub async fn namespaces(url: impl Into<String>) -> Result<Vec<String>, SpiderError> {
+        Self::namespaces_with_prefix(url, "").await
+    }
+
+    /// Lists durable scheduler namespaces that start with `prefix`.
+    pub async fn namespaces_with_prefix(
+        url: impl Into<String>,
+        prefix: impl AsRef<str>,
+    ) -> Result<Vec<String>, SpiderError> {
+        let url = url.into();
+        let mut connection = connect(&url, "redis scheduler", ErrorContext::Scheduler).await?;
+        load_registry_namespaces(&mut connection, prefix.as_ref()).await
+    }
+
+    /// Reads namespace-level snapshots for every registered durable scheduler
+    /// namespace in this Redis database.
+    pub async fn namespace_snapshots(
+        url: impl Into<String>,
+    ) -> Result<Vec<NamespaceSnapshot>, SpiderError> {
+        Self::namespace_snapshots_with_prefix(url, "").await
+    }
+
+    /// Reads namespace-level snapshots for every registered durable scheduler
+    /// namespace whose name starts with `prefix`.
+    pub async fn namespace_snapshots_with_prefix(
+        url: impl Into<String>,
+        prefix: impl AsRef<str>,
+    ) -> Result<Vec<NamespaceSnapshot>, SpiderError> {
+        let url = url.into();
+        let mut connection = connect(&url, "redis scheduler", ErrorContext::Scheduler).await?;
+        let namespaces = load_registry_namespaces(&mut connection, prefix.as_ref()).await?;
+        let mut snapshots = Vec::with_capacity(namespaces.len());
+        for namespace in namespaces {
+            snapshots.push(read_namespace_snapshot(&mut connection, &namespace).await?);
+        }
+        Ok(snapshots)
+    }
+
     pub async fn checkpoint(&self) -> Result<Checkpoint, SpiderError> {
         let mut guard = self.connection().await?;
         let connection = self.connection_mut(&mut guard)?;
-        self.reclaim_expired_inflight(connection).await?;
+        self.sync_namespace_metadata(connection).await?;
+        let _ = self.reclaim_expired_inflight(connection).await?;
         let keys = self.keys();
 
         let ready_tasks = self.load_ready_tasks(connection).await?;
@@ -444,7 +522,8 @@ impl Redis {
     pub async fn counts(&self) -> Result<Counts, SpiderError> {
         let mut guard = self.connection().await?;
         let connection = self.connection_mut(&mut guard)?;
-        self.reclaim_expired_inflight(connection).await?;
+        self.sync_namespace_metadata(connection).await?;
+        let _ = self.reclaim_expired_inflight(connection).await?;
         let keys = self.keys();
 
         let ready: usize =
@@ -459,6 +538,15 @@ impl Redis {
             delayed,
             inflight,
         })
+    }
+
+    /// Reads one namespace-level runtime snapshot for this Redis durable
+    /// scheduler.
+    pub async fn snapshot(&self) -> Result<NamespaceSnapshot, SpiderError> {
+        let mut guard = self.connection().await?;
+        let connection = self.connection_mut(&mut guard)?;
+        self.sync_namespace_metadata(connection).await?;
+        read_namespace_snapshot(connection, &self.namespace).await
     }
 
     pub async fn close(&self) -> Result<(), SpiderError> {
@@ -510,17 +598,7 @@ impl Redis {
     }
 
     fn keys(&self) -> Keys {
-        Keys {
-            tasks: format!("{}:tasks", self.namespace),
-            ready: format!("{}:ready", self.namespace),
-            ready_order: format!("{}:ready_order", self.namespace),
-            delayed: format!("{}:delayed", self.namespace),
-            inflight: format!("{}:inflight", self.namespace),
-            inflight_deadlines: format!("{}:inflight_deadlines", self.namespace),
-            inflight_workers: format!("{}:inflight_workers", self.namespace),
-            inflight_leases: format!("{}:inflight_leases", self.namespace),
-            sequence: format!("{}:ready_sequence", self.namespace),
-        }
+        Keys::for_namespace(&self.namespace)
     }
 
     fn heartbeat_interval_millis(&self) -> Option<u64> {
@@ -574,39 +652,48 @@ impl Redis {
         Ok(())
     }
 
-    async fn reclaim_expired_inflight(
+    async fn sync_namespace_metadata(
         &self,
         connection: &mut Connection,
     ) -> Result<(), SpiderError> {
-        let Some(_lease_timeout) = self.lease_timeout else {
-            return Ok(());
-        };
-
         let keys = self.keys();
-        let now = now().to_string();
-        let reclaimed: i64 = scheduler_eval(
+        let _: i64 = scheduler_query(
             connection,
-            SCHEDULER_RECLAIM_SCRIPT,
-            &[
-                keys.tasks.as_str(),
-                keys.ready.as_str(),
-                keys.ready_order.as_str(),
-                keys.delayed.as_str(),
-                keys.inflight.as_str(),
-                keys.inflight_deadlines.as_str(),
-                keys.inflight_workers.as_str(),
-                keys.inflight_leases.as_str(),
-                keys.sequence.as_str(),
-            ],
-            &[now.as_str()],
+            redis_command(
+                "SADD",
+                [SCHEDULER_NAMESPACE_REGISTRY_KEY, self.namespace.as_str()],
+            ),
         )
         .await?;
+
+        sync_namespace_meta_field(
+            connection,
+            &keys.meta,
+            META_LEASE_TIMEOUT,
+            self.lease_timeout,
+        )
+        .await?;
+        sync_namespace_meta_field(
+            connection,
+            &keys.meta,
+            META_HEARTBEAT_INTERVAL,
+            self.heartbeat_interval_millis(),
+        )
+        .await
+    }
+
+    async fn reclaim_expired_inflight(
+        &self,
+        connection: &mut Connection,
+    ) -> Result<u64, SpiderError> {
+        let keys = self.keys();
+        let reclaimed = reclaim_expired_inflight_for_keys(connection, &keys).await?;
 
         for _ in 0..usize::try_from(reclaimed).unwrap_or_default() {
             tracing::warn!("redis scheduler reclaimed stale inflight task");
         }
 
-        Ok(())
+        Ok(reclaimed)
     }
 
     async fn load_ready_tasks(
@@ -715,12 +802,14 @@ impl Scheduler for Redis {
     async fn enqueue(&self, task: Task) -> Result<(), SpiderError> {
         let mut guard = self.connection().await?;
         let connection = self.connection_mut(&mut guard)?;
+        self.sync_namespace_metadata(connection).await?;
         self.enqueue_internal(connection, task).await
     }
 
     async fn take_ready(&self) -> Result<Option<ClaimedTask>, SpiderError> {
         let mut guard = self.connection().await?;
         let connection = self.connection_mut(&mut guard)?;
+        self.sync_namespace_metadata(connection).await?;
         let keys = self.keys();
         let now = now().to_string();
         let lease_timeout = self
@@ -741,6 +830,7 @@ impl Scheduler for Redis {
                 keys.inflight_workers.as_str(),
                 keys.inflight_leases.as_str(),
                 keys.sequence.as_str(),
+                keys.reclaimed_total.as_str(),
             ],
             &[
                 now.as_str(),
@@ -773,6 +863,7 @@ impl Scheduler for Redis {
         self.validate_lease_worker(lease)?;
         let mut guard = self.connection().await?;
         let connection = self.connection_mut(&mut guard)?;
+        self.sync_namespace_metadata(connection).await?;
         let keys = self.keys();
         let result: i64 = scheduler_eval(
             connection,
@@ -801,6 +892,7 @@ impl Scheduler for Redis {
         self.validate_lease_worker(lease)?;
         let mut guard = self.connection().await?;
         let connection = self.connection_mut(&mut guard)?;
+        self.sync_namespace_metadata(connection).await?;
         let keys = self.keys();
         let now = now().to_string();
         let result: i64 = scheduler_eval(
@@ -832,6 +924,7 @@ impl Scheduler for Redis {
         self.validate_lease_worker(lease)?;
         let mut guard = self.connection().await?;
         let connection = self.connection_mut(&mut guard)?;
+        self.sync_namespace_metadata(connection).await?;
         self.heartbeat_internal(connection, lease).await
     }
 
@@ -858,6 +951,32 @@ struct Keys {
     inflight_workers: String,
     inflight_leases: String,
     sequence: String,
+    reclaimed_total: String,
+    meta: String,
+}
+
+impl Keys {
+    fn for_namespace(namespace: &str) -> Self {
+        Self {
+            tasks: format!("{namespace}:tasks"),
+            ready: format!("{namespace}:ready"),
+            ready_order: format!("{namespace}:ready_order"),
+            delayed: format!("{namespace}:delayed"),
+            inflight: format!("{namespace}:inflight"),
+            inflight_deadlines: format!("{namespace}:inflight_deadlines"),
+            inflight_workers: format!("{namespace}:inflight_workers"),
+            inflight_leases: format!("{namespace}:inflight_leases"),
+            sequence: format!("{namespace}:ready_sequence"),
+            reclaimed_total: format!("{namespace}:reclaimed_total"),
+            meta: format!("{namespace}:meta"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct NamespaceMeta {
+    lease_timeout: Option<u64>,
+    heartbeat_interval: Option<u64>,
 }
 
 fn ready_task_ordering(left: &(Task, i64), right: &(Task, i64)) -> Ordering {
@@ -885,6 +1004,10 @@ fn non_negative_milliseconds(duration: SignedDuration) -> u64 {
 
 fn default_heartbeat_interval(lease_timeout: u64) -> u64 {
     (lease_timeout / 2).max(1)
+}
+
+fn signed_duration_from_millis(millis: u64) -> SignedDuration {
+    SignedDuration::from_millis(i64::try_from(millis).unwrap_or(i64::MAX))
 }
 
 fn next_worker_id() -> String {
@@ -952,6 +1075,180 @@ fn ensure_lease_transition(
             },
         )),
     }
+}
+
+async fn load_registry_namespaces(
+    connection: &mut Connection,
+    prefix: &str,
+) -> Result<Vec<String>, SpiderError> {
+    let mut namespaces: Vec<String> = scheduler_query(
+        connection,
+        redis_command("SMEMBERS", [SCHEDULER_NAMESPACE_REGISTRY_KEY]),
+    )
+    .await?;
+    namespaces.sort();
+    if !prefix.is_empty() {
+        namespaces.retain(|namespace| namespace.starts_with(prefix));
+    }
+    Ok(namespaces)
+}
+
+async fn sync_namespace_meta_field(
+    connection: &mut Connection,
+    meta_key: &str,
+    field: &str,
+    value: Option<u64>,
+) -> Result<(), SpiderError> {
+    match value {
+        Some(value) => {
+            let value = value.to_string();
+            let _: i64 =
+                scheduler_query(connection, redis_command("HSET", [meta_key, field, &value]))
+                    .await?;
+        }
+        None => {
+            let _: i64 =
+                scheduler_query(connection, redis_command("HDEL", [meta_key, field])).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn load_namespace_meta(
+    connection: &mut Connection,
+    namespace: &str,
+) -> Result<NamespaceMeta, SpiderError> {
+    let keys = Keys::for_namespace(namespace);
+    let lease_timeout = parse_optional_meta_u64(
+        namespace,
+        META_LEASE_TIMEOUT,
+        scheduler_query(
+            connection,
+            redis_command("HGET", [&keys.meta, META_LEASE_TIMEOUT]),
+        )
+        .await?,
+    )?;
+    let heartbeat_interval = parse_optional_meta_u64(
+        namespace,
+        META_HEARTBEAT_INTERVAL,
+        scheduler_query(
+            connection,
+            redis_command("HGET", [&keys.meta, META_HEARTBEAT_INTERVAL]),
+        )
+        .await?,
+    )?;
+
+    Ok(NamespaceMeta {
+        lease_timeout,
+        heartbeat_interval: heartbeat_interval
+            .or_else(|| lease_timeout.map(default_heartbeat_interval)),
+    })
+}
+
+fn parse_optional_meta_u64(
+    namespace: &str,
+    field: &str,
+    value: Option<String>,
+) -> Result<Option<u64>, SpiderError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_empty() {
+        return Ok(None);
+    }
+
+    value.parse::<u64>().map(Some).map_err(|error| {
+        SpiderError::scheduler(format!(
+            "redis scheduler metadata `{field}` for namespace `{namespace}` is invalid: {error}"
+        ))
+    })
+}
+
+async fn reclaim_expired_inflight_for_keys(
+    connection: &mut Connection,
+    keys: &Keys,
+) -> Result<u64, SpiderError> {
+    let now = now().to_string();
+    let reclaimed: i64 = scheduler_eval(
+        connection,
+        SCHEDULER_RECLAIM_SCRIPT,
+        &[
+            keys.tasks.as_str(),
+            keys.ready.as_str(),
+            keys.ready_order.as_str(),
+            keys.delayed.as_str(),
+            keys.inflight.as_str(),
+            keys.inflight_deadlines.as_str(),
+            keys.inflight_workers.as_str(),
+            keys.inflight_leases.as_str(),
+            keys.sequence.as_str(),
+            keys.reclaimed_total.as_str(),
+        ],
+        &[now.as_str()],
+    )
+    .await?;
+
+    Ok(u64::try_from(reclaimed).unwrap_or_default())
+}
+
+async fn read_namespace_snapshot(
+    connection: &mut Connection,
+    namespace: &str,
+) -> Result<NamespaceSnapshot, SpiderError> {
+    let keys = Keys::for_namespace(namespace);
+    let meta = load_namespace_meta(connection, namespace).await?;
+    let reclaimed_in_refresh = reclaim_expired_inflight_for_keys(connection, &keys).await?;
+
+    let ready: usize = scheduler_query(connection, redis_command("SCARD", [&keys.ready])).await?;
+    let delayed: usize =
+        scheduler_query(connection, redis_command("ZCARD", [&keys.delayed])).await?;
+    let inflight_ids: Vec<String> =
+        scheduler_query(connection, redis_command("SMEMBERS", [&keys.inflight])).await?;
+    let deadline_count: usize = scheduler_query(
+        connection,
+        redis_command("ZCARD", [&keys.inflight_deadlines]),
+    )
+    .await?;
+    let reclaimed_total: Option<u64> =
+        scheduler_query(connection, redis_command("GET", [&keys.reclaimed_total])).await?;
+
+    let mut worker_ids = BTreeSet::new();
+    let mut active_lease_count = 0usize;
+    for task_id in &inflight_ids {
+        let worker_id: Option<String> = scheduler_query(
+            connection,
+            redis_command("HGET", [&keys.inflight_workers, task_id]),
+        )
+        .await?;
+        let lease_id: Option<String> = scheduler_query(
+            connection,
+            redis_command("HGET", [&keys.inflight_leases, task_id]),
+        )
+        .await?;
+
+        if let Some(worker_id) = worker_id {
+            worker_ids.insert(worker_id);
+        }
+        if lease_id.is_some() {
+            active_lease_count += 1;
+        }
+    }
+
+    Ok(NamespaceSnapshot {
+        namespace: namespace.to_string(),
+        counts: Counts {
+            ready,
+            delayed,
+            inflight: inflight_ids.len(),
+        },
+        worker_ids: worker_ids.into_iter().collect(),
+        active_lease_count,
+        deadline_count,
+        reclaimed_total: reclaimed_total.unwrap_or_default(),
+        reclaimed_in_refresh,
+        lease_timeout: meta.lease_timeout.map(signed_duration_from_millis),
+        heartbeat_interval: meta.heartbeat_interval.map(signed_duration_from_millis),
+    })
 }
 
 fn redis_command<T>(name: &'static str, args: impl IntoIterator<Item = T>) -> redis::Cmd
@@ -1208,6 +1505,210 @@ mod tests {
 
         first.close().await.unwrap();
         second.close().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn redis_scheduler_snapshot_reports_current_namespace_state() {
+        let (url, _commands_rx, server_handle) = spawn_redis_server().await;
+        let scheduler = Redis::new(format!("redis://{url}"), "snapshot")
+            .with_worker_id("worker-a")
+            .with_lease_timeout(SignedDuration::from_millis(50));
+        scheduler
+            .enqueue(Task::new(Request::new("https://example.com/ready")))
+            .await
+            .unwrap();
+        scheduler
+            .enqueue(Task::with_delay(
+                Request::new("https://example.com/delayed"),
+                500,
+            ))
+            .await
+            .unwrap();
+
+        let claimed = scheduler.take_ready().await.unwrap().unwrap();
+        let snapshot = scheduler.snapshot().await.unwrap();
+
+        assert_eq!(snapshot.namespace, "snapshot");
+        assert_eq!(
+            snapshot.counts,
+            Counts {
+                ready: 0,
+                delayed: 1,
+                inflight: 1,
+            }
+        );
+        assert_eq!(snapshot.worker_ids, vec!["worker-a".to_string()]);
+        assert_eq!(snapshot.active_lease_count, 1);
+        assert_eq!(snapshot.deadline_count, 1);
+        assert_eq!(snapshot.reclaimed_total, 0);
+        assert_eq!(snapshot.reclaimed_in_refresh, 0);
+        assert_eq!(
+            snapshot.lease_timeout,
+            Some(SignedDuration::from_millis(50))
+        );
+        assert_eq!(
+            snapshot.heartbeat_interval,
+            Some(SignedDuration::from_millis(25))
+        );
+
+        scheduler.complete(&claimed.lease).await.unwrap();
+        scheduler.close().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn redis_scheduler_snapshot_tracks_reclaimed_totals() {
+        let (url, _commands_rx, server_handle) = spawn_redis_server().await;
+        let namespace = "snapshot_reclaim";
+        let first = Redis::new(format!("redis://{url}"), namespace)
+            .with_worker_id("worker-a")
+            .with_lease_timeout(SignedDuration::from_millis(20));
+        first
+            .enqueue(Task::new(Request::new("https://example.com/reclaim-total")))
+            .await
+            .unwrap();
+
+        let claimed = first.take_ready().await.unwrap().unwrap();
+        first.close().await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::try_from(SignedDuration::from_millis(40)).unwrap())
+            .await;
+
+        let second = Redis::new(format!("redis://{url}"), namespace)
+            .with_worker_id("worker-b")
+            .with_lease_timeout(SignedDuration::from_millis(20));
+        let first_snapshot = second.snapshot().await.unwrap();
+
+        assert_eq!(
+            first_snapshot.counts,
+            Counts {
+                ready: 1,
+                delayed: 0,
+                inflight: 0,
+            }
+        );
+        assert_eq!(first_snapshot.reclaimed_in_refresh, 1);
+        assert_eq!(first_snapshot.reclaimed_total, 1);
+        assert!(first_snapshot.worker_ids.is_empty());
+        assert_eq!(first_snapshot.active_lease_count, 0);
+        assert_eq!(first_snapshot.deadline_count, 0);
+
+        let second_snapshot = second.snapshot().await.unwrap();
+        assert_eq!(second_snapshot.reclaimed_in_refresh, 0);
+        assert_eq!(second_snapshot.reclaimed_total, 1);
+
+        let reclaimed = second.take_ready().await.unwrap().unwrap();
+        assert_eq!(reclaimed.task.id, claimed.task.id);
+        second.complete(&reclaimed.lease).await.unwrap();
+
+        second.close().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn redis_scheduler_lists_registered_namespaces_by_prefix() {
+        let (url, _commands_rx, server_handle) = spawn_redis_server().await;
+        let redis_url = format!("redis://{url}");
+
+        let news = Redis::new(redis_url.clone(), "jobs:news");
+        let blog = Redis::new(redis_url.clone(), "jobs:blog");
+        let scratch = Redis::new(redis_url.clone(), "scratch:demo");
+
+        news.counts().await.unwrap();
+        blog.counts().await.unwrap();
+        scratch.counts().await.unwrap();
+
+        let namespaces = Redis::namespaces_with_prefix(redis_url, "jobs:")
+            .await
+            .unwrap();
+        assert_eq!(
+            namespaces,
+            vec!["jobs:blog".to_string(), "jobs:news".to_string()]
+        );
+
+        news.close().await.unwrap();
+        blog.close().await.unwrap();
+        scratch.close().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn redis_scheduler_reads_namespace_snapshots_across_jobs() {
+        let (url, _commands_rx, server_handle) = spawn_redis_server().await;
+        let redis_url = format!("redis://{url}");
+
+        let news = Redis::new(redis_url.clone(), "jobs:news")
+            .with_worker_id("news-worker")
+            .with_lease_timeout(SignedDuration::from_millis(50));
+        news.enqueue(Task::new(Request::new("https://example.com/news")))
+            .await
+            .unwrap();
+        let claimed = news.take_ready().await.unwrap().unwrap();
+
+        let blog = Redis::new(redis_url.clone(), "jobs:blog")
+            .with_worker_id("blog-worker")
+            .with_lease_timeout(SignedDuration::from_millis(80))
+            .with_heartbeat_interval(SignedDuration::from_millis(20));
+        blog.enqueue(Task::with_delay(
+            Request::new("https://example.com/blog"),
+            500,
+        ))
+        .await
+        .unwrap();
+
+        let snapshots = Redis::namespace_snapshots_with_prefix(redis_url, "jobs:")
+            .await
+            .unwrap();
+        assert_eq!(snapshots.len(), 2);
+
+        let news_snapshot = snapshots
+            .iter()
+            .find(|snapshot| snapshot.namespace == "jobs:news")
+            .unwrap();
+        assert_eq!(
+            news_snapshot.counts,
+            Counts {
+                ready: 0,
+                delayed: 0,
+                inflight: 1,
+            }
+        );
+        assert_eq!(news_snapshot.worker_ids, vec!["news-worker".to_string()]);
+        assert_eq!(
+            news_snapshot.lease_timeout,
+            Some(SignedDuration::from_millis(50))
+        );
+        assert_eq!(
+            news_snapshot.heartbeat_interval,
+            Some(SignedDuration::from_millis(25))
+        );
+
+        let blog_snapshot = snapshots
+            .iter()
+            .find(|snapshot| snapshot.namespace == "jobs:blog")
+            .unwrap();
+        assert_eq!(
+            blog_snapshot.counts,
+            Counts {
+                ready: 0,
+                delayed: 1,
+                inflight: 0,
+            }
+        );
+        assert!(blog_snapshot.worker_ids.is_empty());
+        assert_eq!(
+            blog_snapshot.lease_timeout,
+            Some(SignedDuration::from_millis(80))
+        );
+        assert_eq!(
+            blog_snapshot.heartbeat_interval,
+            Some(SignedDuration::from_millis(20))
+        );
+
+        news.complete(&claimed.lease).await.unwrap();
+        news.close().await.unwrap();
+        blog.close().await.unwrap();
         server_handle.await.unwrap().unwrap();
     }
 

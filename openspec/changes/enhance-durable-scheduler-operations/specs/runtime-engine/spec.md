@@ -32,6 +32,12 @@
 - **THEN** 它能看到当前 `ready / delayed / inflight` 计数
 - **AND** 它还能看到最小 lease/reclaim 相关状态，而不需要直接自行解析底层 Redis key
 
+#### Scenario: Namespace snapshot is distinct from engine lifetime stats
+
+- **WHEN** 调用方同时读取 `scheduler::Redis::snapshot()` 和 `Engine::stats()`
+- **THEN** 前者代表 namespace 当前这一刻的 durable scheduler 即时状态
+- **AND** 后者代表单个 engine 实例生命周期内的累计计数
+
 ### Requirement: Redis durable scheduler supports cross-job operational inspection
 
 系统必须为多 namespace / 多 job 的 durable scheduler 运行提供最小运维读入口，避免调用方只能靠外部约定硬编码所有 job 名称。
@@ -41,3 +47,9 @@
 - **WHEN** 调用方有多份 job/namespace 同时跑在同一个 Redis 实例中
 - **THEN** 它可以按约定前缀或 registry 读取各自的 job 概览
 - **AND** 不同 job 的 ready、delayed、inflight 与 reclaim 语义仍保持相互隔离
+
+#### Scenario: Cross-job inspection reuses Redis-specific namespace snapshots
+
+- **WHEN** 调用方通过 `scheduler::Redis::namespace_snapshots_with_prefix(...)` 批量读取多个 namespace
+- **THEN** 每一项结果仍然遵守单 namespace snapshot 的即时状态语义
+- **AND** 这层能力继续只属于 `scheduler::Redis`，不进入共享 `scheduler::Scheduler` trait

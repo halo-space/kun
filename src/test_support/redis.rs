@@ -381,7 +381,7 @@ fn eval_scheduler_reclaim(
     keys: &[String],
     args: &[String],
 ) -> Result<Vec<u8>, std::io::Error> {
-    if keys.len() != 9 || args.len() != 1 {
+    if keys.len() != 10 || args.len() != 1 {
         return Ok(error_reply("ERR invalid reclaim script args"));
     }
 
@@ -395,7 +395,7 @@ fn eval_scheduler_claim_ready(
     keys: &[String],
     args: &[String],
 ) -> Result<Vec<u8>, std::io::Error> {
-    if keys.len() != 9 || args.len() != 4 {
+    if keys.len() != 10 || args.len() != 4 {
         return Ok(error_reply("ERR invalid claim script args"));
     }
 
@@ -558,6 +558,10 @@ fn reclaim_expired_inflight(
             now,
         )?;
         reclaimed += 1;
+    }
+
+    for _ in 0..reclaimed {
+        increment_string_counter(state, &keys[9])?;
     }
 
     Ok(reclaimed)

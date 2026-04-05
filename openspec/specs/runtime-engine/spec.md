@@ -555,6 +555,20 @@
 - Then engine 会按 heartbeat interval 续租当前 lease
 - And 其它 worker 在这段时间里不会把这条 task 提前回收到 ready 或 delayed
 
+#### Scenario: Redis scheduler snapshot remains an instantaneous namespace view
+
+- Given 调用方使用内置 `scheduler::Redis`
+- When 它调用 `scheduler.snapshot().await?`
+- Then 它会读到该 namespace 当前这一刻的 `ready / delayed / inflight` 与最小 lease / reclaim 状态
+- And 这份结果不等价于 `Engine::stats()` 那种 engine 生命周期累计计数
+
+#### Scenario: Redis durable scheduler can inspect multiple namespaces by prefix
+
+- Given 同一个 Redis 实例里同时跑了多个 durable scheduler namespace
+- When 调用方调用 `scheduler::Redis::namespaces_with_prefix(...)` 或 `scheduler::Redis::namespace_snapshots_with_prefix(...)`
+- Then 它可以按前缀发现并批量读取这些 namespace 的运维概览
+- And 这层能力继续属于 Redis-specific durable scheduler API，而不是共享 `scheduler::Scheduler` trait
+
 #### Scenario: Checkpoint restore remains a snapshot boundary instead of runtime reclaim
 
 - Given 调用方使用 `scheduler::checkpoint::Memory` 从某个 checkpoint 恢复

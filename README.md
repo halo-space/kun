@@ -32,7 +32,7 @@ README 这里只保留总览；模块级细节统一放到 [docs/capabilities.md
 - `download::Http` 已接到真实的 timeout、proxy、redirect、cookie jar 与 session cookies 能力
 - `download::Browser` 已具备最小可用浏览器下载能力，并支持统一 `Request` 上的 `method` / `body` / `headers` / `timeout` / `proxy` / cookies / `session`
 - `Response.body` 与 `Response.text` 的语义已经明确并统一解码
-- `scheduler::Memory` 与 `scheduler::Redis` 已把任务状态收口为 `ready / delayed / inflight`，并支持 `priority / depth` 排序；其中 `scheduler::Memory` 仍支持 `scheduler::checkpoint::Checkpoint` 导出/恢复，`scheduler::Redis` 也已补最小 `lease_timeout` stale inflight reclaim，并把 `enqueue / claim / complete / requeue / reclaim` 这些关键状态迁移收口成 Redis 原子脚本
+- `scheduler::Memory` 与 `scheduler::Redis` 已把任务状态收口为 `ready / delayed / inflight`，并支持 `priority / depth` 排序；其中 `scheduler::Memory` 仍支持 `scheduler::checkpoint::Checkpoint` 导出/恢复，`scheduler::Redis` 也已补最小 `lease_timeout` stale inflight reclaim，把 `enqueue / claim / complete / requeue / reclaim` 这些关键状态迁移收口成 Redis 原子脚本，并提供 `snapshot()` 与按前缀批量读取 namespace 概览的运维入口
 - 已提供 `scheduler::checkpoint::File`、`scheduler::checkpoint::Redis` 与 `scheduler::checkpoint::Memory`，用于文件、Redis 的 scheduler checkpoint 持久化；也已提供直接基于 Redis 的 durable scheduler
 - `dedup` 已从默认 middleware 收口为显式 engine 组件；当前默认使用精确 `dedup::Memory`，也内置可选 `dedup::Bloom`，并可以通过 `Engine::with_dedup(...)` 切换为其它实现
 - `robots` 已提升为显式 engine 组件；当前默认使用 `robots::Memory`，也可以通过 `Engine::with_robots(...)` 切换为其它实现
@@ -50,7 +50,7 @@ README 这里只保留总览；模块级细节统一放到 [docs/capabilities.md
 
 - 和 Scrapy 更完整的代码爬虫体验相比，当前优先继续补的缺口主要是：更高阶的 `robots.txt` / 站点策略，以及 `signals / extensions` 这一层
 - 共享 validation 已支持字段路径解析与逐值校验（例如 `meta.title`、`authors[0].name`、`tags[]`、`articles[].title`），也已补显式文本/列表/对象约束（例如 `with_min_length(...)`、`with_min_items(...)`、`with_required_fields(...)`）、`ValidationTransform` 链式转换后再校验（例如 `trim`、`normalize_whitespace`、`parse_number`、`parse_bool`、`parse_datetime`）、对象子规则/列表成员子规则、`any_of / all_of / one_of / mutually_exclusive` 这类组合约束、`when_exists / when_missing / when_equals / when_not_equals` 这类条件约束，以及 `validate_fields_report()` 这种 collect-all 报告能力；validation 语义是显式启用的，只有传入的规则才会执行，字段缺失时也只有 `required` 或显式 `required_when_*` 条件命中时才报错，其它规则默认跳过；更高阶的运行时失败策略映射和更复杂的派生条件还没统一
-- 当前 durable scheduler 的最小运行时语义已经完成：除了文件、Redis 两种 checkpoint 持久化，也已经有直接基于 Redis 的 durable scheduler；`scheduler::Redis` 已经把关键任务状态迁移原子化，也补齐了 `worker_id` ownership、lease heartbeat 和 stale reclaim。后续如果继续增强，重点才会是更高阶事务边界、观测与跨 job 运维能力
+- 当前 durable scheduler 已完成最小运行时语义、显式 lease 错误边界、namespace 级运行时快照，以及基于 registry 的跨 job 运维读取入口；`scheduler::Redis` 现在已经覆盖 `worker_id` ownership、lease heartbeat、stale reclaim、`snapshot()` 与 `namespaces_with_prefix(...)` / `namespace_snapshots_with_prefix(...)`
 - 当前 item 链路已经明确为 `parse -> item -> pipeline -> store`；这一轮已补 `store::File` 的 rotate / format 选项，以及 `store::Webhook` 的 retry/backoff 与 `store::Kafka` 的 key / headers；更高阶外部系统语义仍建议继续走自定义 `Store`
 - 当前 stats 仍是 engine 进程内累计快照；现在已经补了细粒度计数，并提供 `Engine::with_stats_reporter(...)` 作为最小观测钩子，但还没有直接内置 Prometheus / OpenTelemetry exporter
 - 当前 `robots.txt` 已支持默认关闭、按 origin 缓存、`User-agent` / `Allow` / `Disallow`、`Crawl-delay`、更完整 `group` 选择，以及 `* / $` wildcard 规则；默认 cache backend 仍是内存，也已补内置 `robots::cache::File`、`cache_ttl` 刷新和可选 sitemap 自动种子；当前仍未补的是更高阶语法细节与更复杂站点策略
@@ -150,6 +150,8 @@ let settings = Settings::default()
 - `scheduler::Redis` 默认会给 `inflight` task 一个最小 `lease_timeout`，worker 崩溃或长时间失联后，后续访问同 namespace 时会把 stale `inflight` task 回收到 `ready / delayed`
 - `scheduler::Redis` 现在会通过 Redis 脚本原子完成 `claim / complete / requeue / reclaim` 这类关键迁移；多个 worker 共享同一个 namespace 时，不会再因为本地“先读 ready 再分步搬运”而重复领取同一条 task
 - `scheduler::Redis` 现在还显式支持 `worker_id`、runtime lease ownership 校验，以及 engine 运行中的 heartbeat 续租
+- `scheduler::Redis::snapshot().await?` 读取的是某一个 namespace 当前这一刻的 durable scheduler 即时状态；它和 `Engine::stats()` 不一样，后者仍然是单个 engine 实例生命周期内的累计计数
+- 如果同一个 Redis 里同时跑多个 job，可以用 `scheduler::Redis::namespaces_with_prefix(...)` 先按前缀发现 namespace，再用 `scheduler::Redis::namespace_snapshots_with_prefix(...)` 批量读取各 job 的运行时概览
 - 如果你想调整这层恢复窗口，可以用 `.with_lease_timeout(...)`；如果你想显式指定 worker 身份或 heartbeat 节奏，可以再配 `.with_worker_id(...)`、`.with_heartbeat_interval(...)`；如果你明确不想要这层自动回收，也可以用 `.without_lease_timeout()`
 - 如果你想自定义 checkpoint 后端，可以用 `scheduler::checkpoint::Memory::load(scheduler::checkpoint::Redis::new(...)).await?`
 - `checkpoint` 仍然只是静态快照恢复边界；它不会替代 durable scheduler 的 runtime reclaim

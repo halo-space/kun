@@ -199,6 +199,8 @@ browser 在这里的角色是“渲染型下载器”，不是另起一套通用
 - `scheduler::Redis` 默认会给 `inflight` task 建一个最小 lease；worker 崩溃或长时间不处理时，后续访问同 namespace 会把 stale `inflight` task 回收到 `ready / delayed`
 - `scheduler::Redis` 现在会通过 Redis 脚本原子完成 `enqueue / claim / complete / requeue / reclaim` 这类关键状态迁移；多个 worker 共享同一个 namespace 时，不会再因为“先读 ready 再分步迁移”而重复领取同一条 task
 - `scheduler::Redis` 现在还显式支持 `worker_id` ownership 校验，以及 engine 运行时的 heartbeat 续租
+- `scheduler::Redis::snapshot().await?` 可以直接读取单个 namespace 当前这一刻的运行时快照
+- 如果同一个 Redis 里有多个 job / namespace，可以用 `scheduler::Redis::namespaces_with_prefix(...)` 和 `scheduler::Redis::namespace_snapshots_with_prefix(...)` 做跨 job 运维读取
 - 如果需要调整恢复窗口：`scheduler::Redis::new(...).with_lease_timeout(...)`
 - 如果需要显式指定 worker 或 heartbeat：`scheduler::Redis::new(...).with_worker_id(...).with_heartbeat_interval(...)`
 - 如果明确不想启用这层自动回收：`scheduler::Redis::new(...).without_lease_timeout()`
@@ -497,6 +499,7 @@ let engine = Engine::new().with_dedup(MethodUrlDedup {
   `http_cache_hit_count`、`http_cache_revalidate_count`、`http_cache_store_count`、`http_cache_miss_count`
   `store_error_count`
 - 这些计数是单个 engine 实例生命周期内的累计值
+- `scheduler::Redis::snapshot()` 和 `scheduler::Redis::namespace_snapshots_with_prefix(...)` 读的是 durable scheduler namespace 的即时状态，不是这些累计计数
 - `request_count` 表示实际开始下载的请求次数
 - `response_count` 表示成功拿到 `Response` 的次数
 - `retry_count` 表示任务被重新入队重试的次数
@@ -517,6 +520,7 @@ let engine = Engine::new().with_dedup(MethodUrlDedup {
 - 这还是最小内存内计数，不是完整 metrics backend
 - 还没有内置 Prometheus、OpenTelemetry 或其它 exporter
 - `Engine::stats()` 仍然是主读取 API；`with_stats_reporter(...)` 只是为后续 exporter 预留的最小接线点
+- 如果需要 durable scheduler 的运行时观测，优先读 `scheduler::Redis::snapshot()` 或 `scheduler::Redis::namespace_snapshots_with_prefix(...)`；如果需要单个 engine 生命周期累计计数，再读 `Engine::stats()`
 
 ## Robots
 

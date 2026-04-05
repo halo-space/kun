@@ -2,6 +2,9 @@
 
 `scheduler::Redis` 是运行时调度器，不是 checkpoint。
 
+只要某个 `scheduler::Redis` 真正参与过 enqueue / claim / snapshot / counts 这类运行时访问，
+它的 namespace 就会自动登记到同一个 Redis 里的 durable scheduler registry。
+
 最小可以这样理解：
 
 - `namespace`
@@ -50,6 +53,59 @@ let worker_b = scheduler::Redis::new("redis://127.0.0.1:6379", "jobs:news")
 ```
 
 这样两个 worker 会从同一个任务池里 claim task，但不会重复 claim 同一条 ready task。
+
+## 读取 namespace 运行时快照
+
+如果你想直接看某个 namespace 当前的 durable scheduler 状态，可以调用
+`scheduler::Redis::snapshot()`：
+
+```rust
+use halo_spider::scheduler;
+
+let scheduler = scheduler::Redis::new("redis://127.0.0.1:6379", "jobs:news")
+    .with_worker_id("ops-reader");
+
+let snapshot = scheduler.snapshot().await?;
+
+println!("{:?}", snapshot.counts);
+println!("workers: {:?}", snapshot.worker_ids);
+println!("active leases: {}", snapshot.active_lease_count);
+println!("reclaimed total: {}", snapshot.reclaimed_total);
+println!("reclaimed in refresh: {}", snapshot.reclaimed_in_refresh);
+```
+
+这里有两个边界要区分：
+
+- `snapshot()` 读的是某个 namespace 当前这一刻的运行时状态
+- `Engine::stats()` 读的是单个 engine 实例生命周期内的累计计数
+
+## 跨 job 运维怎么读
+
+如果同一个 Redis 里跑了多个 namespace，可以先按前缀发现它们，再批量读取各自概览：
+
+```rust
+use halo_spider::scheduler;
+
+let namespaces =
+    scheduler::Redis::namespaces_with_prefix("redis://127.0.0.1:6379", "jobs:").await?;
+println!("registered namespaces: {:?}", namespaces);
+
+let snapshots =
+    scheduler::Redis::namespace_snapshots_with_prefix("redis://127.0.0.1:6379", "jobs:").await?;
+
+for snapshot in snapshots {
+    println!("namespace: {}", snapshot.namespace);
+    println!("counts: {:?}", snapshot.counts);
+    println!("workers: {:?}", snapshot.worker_ids);
+    println!("reclaimed_total: {}", snapshot.reclaimed_total);
+}
+```
+
+这层边界也要明确：
+
+- `namespaces_with_prefix(...)` / `namespace_snapshots_with_prefix(...)` 是 Redis durable scheduler 的运维读入口
+- 它们不会改变共享 `scheduler::Scheduler` trait
+- `namespace_snapshots_with_prefix(...)` 读取时会顺带刷新各 namespace 的 stale reclaim，所以它看到的是“这次读取后”的即时状态
 
 ## 崩溃恢复语义
 

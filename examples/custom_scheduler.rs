@@ -80,6 +80,8 @@ impl Persist for InMemoryCheckpoint {
 async fn main() -> Result<(), SpiderError> {
     custom_scheduler_demo().await?;
     custom_checkpoint_demo().await?;
+    redis_snapshot_demo().await?;
+    redis_namespace_overview_demo().await?;
     Ok(())
 }
 
@@ -132,6 +134,57 @@ async fn custom_checkpoint_demo() -> Result<(), SpiderError> {
     println!(
         "Engine::with_checkpoint(...) can attach a checkpoint backend to fresh memory scheduling."
     );
+
+    Ok(())
+}
+
+async fn redis_snapshot_demo() -> Result<(), SpiderError> {
+    println!("== redis scheduler snapshot demo ==");
+
+    let Ok(url) = std::env::var("HALO_SPIDER_EXAMPLE_REDIS_URL") else {
+        println!(
+            "set HALO_SPIDER_EXAMPLE_REDIS_URL=redis://127.0.0.1:6379 to run the Redis snapshot demo"
+        );
+        return Ok(());
+    };
+
+    let scheduler = scheduler::Redis::new(url, "examples:custom-scheduler:snapshot")
+        .with_worker_id("example-observer");
+    let snapshot = scheduler.snapshot().await?;
+
+    println!("namespace snapshot counts: {:?}", snapshot.counts);
+    println!("namespace snapshot workers: {:?}", snapshot.worker_ids);
+    println!(
+        "namespace snapshot reclaimed_total={}, reclaimed_in_refresh={}",
+        snapshot.reclaimed_total, snapshot.reclaimed_in_refresh
+    );
+
+    scheduler.close().await?;
+    Ok(())
+}
+
+async fn redis_namespace_overview_demo() -> Result<(), SpiderError> {
+    println!("== redis scheduler multi-namespace overview demo ==");
+
+    let Ok(url) = std::env::var("HALO_SPIDER_EXAMPLE_REDIS_URL") else {
+        println!(
+            "set HALO_SPIDER_EXAMPLE_REDIS_URL=redis://127.0.0.1:6379 to run the Redis namespace overview demo"
+        );
+        return Ok(());
+    };
+
+    let namespaces =
+        scheduler::Redis::namespaces_with_prefix(url.clone(), "examples:custom-scheduler:").await?;
+    println!("registered namespaces: {:?}", namespaces);
+
+    let snapshots =
+        scheduler::Redis::namespace_snapshots_with_prefix(url, "examples:custom-scheduler:")
+            .await?;
+    for snapshot in snapshots {
+        println!("namespace: {}", snapshot.namespace);
+        println!("counts: {:?}", snapshot.counts);
+        println!("workers: {:?}", snapshot.worker_ids);
+    }
 
     Ok(())
 }
