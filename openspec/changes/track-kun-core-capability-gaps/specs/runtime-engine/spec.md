@@ -344,6 +344,13 @@
 - **AND** 当 `robots.txt` 返回 `401` 或 `403` 时，当前 origin 视为拒绝抓取
 - **AND** 其它抓取失败或非成功状态当前保持 fail-open
 
+#### Scenario: Temporarily unavailable robots fetches use a retry delay window
+
+- **WHEN** 当前 origin 没有可用 robots cache
+- **AND** 某次 `robots.txt` 抓取失败或返回临时非成功状态
+- **THEN** 引擎先按当前 unavailable policy 处理这次请求
+- **AND** 在 `unavailable_retry_delay` 窗口内，不会对同一个 origin 的每个请求都重复抓取 `robots.txt`
+
 #### Scenario: Robots matching supports wildcard and group specificity
 
 - **WHEN** 某个 robots policy 同时声明了多个 `User-agent` group 与带 `*` / `$` 的路径规则

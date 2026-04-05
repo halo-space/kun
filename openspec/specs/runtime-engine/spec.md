@@ -439,6 +439,14 @@
 - When 这次 `robots.txt` 抓取失败或返回临时非成功状态
 - Then 该 origin 当前按拒绝抓取处理，而不是继续 fail-open
 
+#### Scenario: Robots memory policy temporarily backs off repeated unavailable fetches
+
+- Given 调用方使用默认 `robots::Memory`
+- And 当前 origin 没有可用 robots cache
+- When 某次 `robots.txt` 抓取失败或返回临时非成功状态
+- Then 引擎会先按当前 unavailable policy 处理这次请求
+- And 在默认 `unavailable_retry_delay` 窗口内，不会对同一个 origin 的每个请求都重复抓取 `robots.txt`
+
 #### Scenario: Robots matching supports wildcard and group specificity
 
 - Given 某个 robots policy 同时声明了多个 `User-agent` group 与带 `*` / `$` 的规则

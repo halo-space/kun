@@ -536,6 +536,7 @@ let engine = Engine::new().with_dedup(MethodUrlDedup {
 - 默认 cache backend 是 `robots::cache::Memory`
 - 默认 `robots::Memory` 会按 `24h` 的 `cache_ttl` 判断缓存是否过期；调用方也可以通过 `with_cache_ttl(...)` 覆盖，或通过 `without_cache_ttl()` 关闭这层自动过期
 - 当 `robots.txt` 临时不可用且当前 origin 没有可用缓存时，默认按 `robots::UnavailablePolicy::AllowAll` fail-open；如果调用方想更保守，可以显式切到 `robots::UnavailablePolicy::DisallowAll`
+- 对这类“临时不可用且暂无可用 cache”的结果，默认还会按 `60s` 的 `unavailable_retry_delay` 做短暂退避；在这个窗口内，同一 origin 不会每次请求都重新抓一次 `robots.txt`
 - 当前也已提供内置 `robots::cache::File`，用于把 robots policy 持久化到磁盘 JSON 文件；`robots::cache::File::default()` 的路径是 `output/robots-cache.json`
 - 如果调用方想保留 `robots::Memory` 这套抓取与判定逻辑、但替换 cache backend，可以继续用 `robots::Memory::with_cache(...)`
 - 如果调用方要替换这层策略，可以通过 `Engine::with_robots(...)` 挂自己的实现
@@ -563,6 +564,7 @@ let engine = Engine::new().with_dedup(MethodUrlDedup {
 - `401` / `403 robots.txt` 当前视为拒绝全部
 - 其它抓取失败或非成功状态默认走 fail-open，记录日志后允许继续请求；调用方也可以用 `robots::Memory::with_unavailable_policy(robots::UnavailablePolicy::DisallowAll)` 改成更保守的 fail-closed
 - stale cache 刷新失败时，当前会优先回退旧缓存，而不是直接把旧 policy 冲掉
+- 如果当前 origin 没有可用 cache 且这次抓取临时失败，`robots::Memory` 默认会在 `60s` 的 retry delay 窗口里复用这次 unavailable 决策；调用方也可以通过 `with_unavailable_retry_delay(...)` 覆盖，或通过 `without_unavailable_retry_delay()` 关闭
 - sitemap 自动种子当前只走最小 HTTP 抓取和 XML 解析；抓取失败时会记录日志并继续原有 start URL，不会中断整轮爬取
 - 更复杂的站点级策略还没补
 
@@ -591,6 +593,23 @@ use jiff::SignedDuration;
 let robots = robots::Memory::new()
     .with_cache(robots::cache::File::default())
     .with_cache_ttl(SignedDuration::from_secs(3600));
+
+let engine = Engine::new()
+    .with_robots(robots)
+    .with_settings(Settings::default().with_robots_obey(true));
+```
+
+如果希望把“robots 临时不可用”的重试窗口调短、调长，或者改成更保守的 fail-closed，可以这样写：
+
+```rust
+use halo_spider::engine::Engine;
+use halo_spider::robots;
+use halo_spider::settings::Settings;
+use jiff::SignedDuration;
+
+let robots = robots::Memory::new()
+    .with_unavailable_policy(robots::UnavailablePolicy::DisallowAll)
+    .with_unavailable_retry_delay(SignedDuration::from_secs(120));
 
 let engine = Engine::new()
     .with_robots(robots)

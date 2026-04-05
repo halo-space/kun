@@ -197,6 +197,8 @@
   - 当前已补 `robots::UnavailablePolicy::{AllowAll, DisallowAll}` 与 `robots::Memory::with_unavailable_policy(...)`；默认保持原来的 fail-open，调用方也可以显式切到更保守的 `DisallowAll`，且 stale cache 刷新失败时仍优先复用旧 policy。
 - [x] 22.7 为 robots 补 `Request-rate` 运行时语义，并明确与 `Crawl-delay` 的协同规则。
   - 当前已支持解析 `Request-rate: requests / window`，并把它按 `window / requests` 的均匀间隔最小 delay 接入运行时；如果同一个 group 同时声明 `Crawl-delay` 与 `Request-rate`，则取更严格的 delay。
+- [x] 22.8 为 robots 临时不可用场景补最小 retry delay 退避，避免同一 origin 每个请求都重复抓取 `robots.txt`。
+  - 当前 `robots::Memory` 默认对 temporary unavailable 结果使用 `60s` 的 `unavailable_retry_delay`；有 stale cache 时会优先复用 stale cache，没有可用 cache 时则在这个窗口内复用当前 unavailable policy。调用方也可以通过 `with_unavailable_retry_delay(...)` 覆盖，或通过 `without_unavailable_retry_delay()` 关闭。
 
 ## 23. P0 Dedup 能力继续增强
 

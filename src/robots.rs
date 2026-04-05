@@ -72,8 +72,10 @@ pub struct Memory<C = cache::Memory> {
     cache: C,
     cache_ttl: Option<u64>,
     unavailable_policy: UnavailablePolicy,
+    unavailable_retry_delay: Option<u64>,
     policies: tokio::sync::Mutex<BTreeMap<String, CachedPolicy>>,
     request_deadlines: tokio::sync::Mutex<BTreeMap<String, u64>>,
+    unavailable_retry_at: tokio::sync::Mutex<BTreeMap<String, u64>>,
 }
 
 #[derive(Debug, Clone)]
@@ -94,8 +96,10 @@ impl Default for Memory<cache::Memory> {
             cache: cache::Memory::default(),
             cache_ttl: Some(86_400_000),
             unavailable_policy: UnavailablePolicy::AllowAll,
+            unavailable_retry_delay: Some(60_000),
             policies: tokio::sync::Mutex::new(BTreeMap::new()),
             request_deadlines: tokio::sync::Mutex::new(BTreeMap::new()),
+            unavailable_retry_at: tokio::sync::Mutex::new(BTreeMap::new()),
         }
     }
 }
@@ -106,8 +110,10 @@ impl<C> Memory<C> {
             cache,
             cache_ttl: self.cache_ttl,
             unavailable_policy: self.unavailable_policy,
+            unavailable_retry_delay: self.unavailable_retry_delay,
             policies: self.policies,
             request_deadlines: self.request_deadlines,
+            unavailable_retry_at: self.unavailable_retry_at,
         }
     }
 
@@ -126,6 +132,18 @@ impl<C> Memory<C> {
     /// origin.
     pub fn with_unavailable_policy(mut self, policy: UnavailablePolicy) -> Self {
         self.unavailable_policy = policy;
+        self
+    }
+
+    /// Overrides how long a temporary unavailable robots result should be
+    /// reused before trying to fetch robots.txt again.
+    pub fn with_unavailable_retry_delay(mut self, delay: SignedDuration) -> Self {
+        self.unavailable_retry_delay = Some(non_negative_milliseconds(delay));
+        self
+    }
+
+    pub fn without_unavailable_retry_delay(mut self) -> Self {
+        self.unavailable_retry_delay = None;
         self
     }
 }
@@ -237,9 +255,24 @@ impl<C: Cache> Memory<C> {
             return Ok(policy);
         }
 
+        if self
+            .is_unavailable_retry_pending(origin.as_str(), current_time)
+            .await
+        {
+            if let Some(entry) = cached_entry.as_ref() {
+                let policy = Arc::new(Policy::from_cache_policy(&entry.policy));
+                self.remember_policy(origin.as_str(), entry.fetched_at, policy.clone())
+                    .await;
+                return Ok(policy);
+            }
+
+            return Ok(Arc::new(self.unavailable_policy.policy()));
+        }
+
         match fetch_policy_entry(url, request, user_agent).await? {
             FetchResult::Cacheable(entry) => {
                 let policy = Arc::new(Policy::from_cache_policy(&entry.policy));
+                self.clear_unavailable_retry(origin.as_str()).await;
                 self.cache.save(&entry).await?;
                 self.remember_policy(origin.as_str(), entry.fetched_at, policy.clone())
                     .await;
@@ -247,6 +280,8 @@ impl<C: Cache> Memory<C> {
             }
             FetchResult::Unavailable => {
                 if let Some(entry) = cached_entry {
+                    self.remember_unavailable_retry(origin.as_str(), current_time)
+                        .await;
                     tracing::warn!(
                         origin = origin.as_str(),
                         "failed to refresh stale robots cache, reusing previous policy"
@@ -257,6 +292,8 @@ impl<C: Cache> Memory<C> {
                     return Ok(policy);
                 }
 
+                self.remember_unavailable_retry(origin.as_str(), current_time)
+                    .await;
                 tracing::warn!(
                     origin = origin.as_str(),
                     unavailable_policy = ?self.unavailable_policy,
@@ -290,6 +327,39 @@ impl<C: Cache> Memory<C> {
         };
 
         current_time.saturating_sub(fetched_at) >= cache_ttl
+    }
+
+    async fn is_unavailable_retry_pending(&self, origin: &str, current_time: u64) -> bool {
+        let Some(_) = self.unavailable_retry_delay else {
+            return false;
+        };
+
+        let mut unavailable_retry_at = self.unavailable_retry_at.lock().await;
+        let Some(retry_at) = unavailable_retry_at.get(origin).copied() else {
+            return false;
+        };
+
+        if retry_at > current_time {
+            return true;
+        }
+
+        unavailable_retry_at.remove(origin);
+        false
+    }
+
+    async fn remember_unavailable_retry(&self, origin: &str, current_time: u64) {
+        let Some(unavailable_retry_delay) = self.unavailable_retry_delay else {
+            return;
+        };
+
+        self.unavailable_retry_at.lock().await.insert(
+            origin.to_string(),
+            current_time.saturating_add(unavailable_retry_delay),
+        );
+    }
+
+    async fn clear_unavailable_retry(&self, origin: &str) {
+        self.unavailable_retry_at.lock().await.remove(origin);
     }
 }
 
@@ -847,8 +917,10 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+    use tokio::time::{Duration, sleep, timeout};
 
     #[test]
     fn rules_use_wildcard_group_when_no_specific_user_agent_matches() {
@@ -1180,6 +1252,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn robot_reuses_unavailable_policy_until_retry_delay_expires() {
+        let (base_url, request_count, server_handle) =
+            spawn_counting_robots_server_response(500, "Internal Server Error", "").await;
+        let robot = Memory::new().with_unavailable_retry_delay(SignedDuration::from_secs(1));
+        let request = Request::new(format!("{base_url}/news"));
+
+        assert!(robot.is_allowed(&request, "kun").await.unwrap());
+        assert!(robot.is_allowed(&request, "kun").await.unwrap());
+        assert_eq!(request_count.load(Ordering::SeqCst), 1);
+
+        sleep(Duration::from_millis(1_100)).await;
+
+        assert!(robot.is_allowed(&request, "kun").await.unwrap());
+        assert_eq!(request_count.load(Ordering::SeqCst), 2);
+
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn robot_reuses_stale_cache_until_unavailable_retry_delay_expires() {
+        let (base_url, request_count, server_handle) =
+            spawn_counting_robots_server_response(500, "Internal Server Error", "").await;
+        let stale_at = now().saturating_sub(5_000);
+        let cache = SeededCache::with_entry(cache::Entry::new(
+            base_url.clone(),
+            stale_at,
+            cache::Policy::Body("User-agent: *\nDisallow: /private\n".to_string()),
+        ));
+        let robot = Memory::new()
+            .with_cache(cache)
+            .with_cache_ttl(SignedDuration::from_secs(1))
+            .with_unavailable_retry_delay(SignedDuration::from_secs(1));
+        let request = Request::new(format!("{base_url}/private/page"));
+
+        assert!(!robot.is_allowed(&request, "kun").await.unwrap());
+        assert!(!robot.is_allowed(&request, "kun").await.unwrap());
+        assert_eq!(request_count.load(Ordering::SeqCst), 1);
+
+        sleep(Duration::from_millis(1_100)).await;
+
+        assert!(!robot.is_allowed(&request, "kun").await.unwrap());
+        assert_eq!(request_count.load(Ordering::SeqCst), 2);
+
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn robot_does_not_refresh_when_cache_refresh_is_disabled() {
         let stale_at = now().saturating_sub(86_400_000 * 2);
         let cache = SeededCache::with_entry(cache::Entry::new(
@@ -1279,5 +1398,44 @@ mod tests {
         });
 
         (format!("http://{}", address), handle)
+    }
+
+    async fn spawn_counting_robots_server_response(
+        status: u16,
+        reason: &str,
+        body: &str,
+    ) -> (
+        String,
+        Arc<AtomicUsize>,
+        tokio::task::JoinHandle<Result<(), std::io::Error>>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let request_count = Arc::new(AtomicUsize::new(0));
+        let body = body.to_string();
+        let reason = reason.to_string();
+        let request_count_for_server = request_count.clone();
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let accept_result = timeout(Duration::from_secs(3), listener.accept()).await;
+                let Ok(accept_result) = accept_result else {
+                    break Ok(());
+                };
+                let (mut stream, _) = accept_result?;
+                request_count_for_server.fetch_add(1, Ordering::SeqCst);
+                let mut buffer = [0_u8; 1024];
+                let _ = stream.read(&mut buffer).await?;
+                let response = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                stream.write_all(response.as_bytes()).await?;
+                stream.shutdown().await?;
+            }
+        });
+
+        (format!("http://{}", address), request_count, handle)
     }
 }
