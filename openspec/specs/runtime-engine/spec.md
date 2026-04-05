@@ -483,6 +483,14 @@
 - When 引擎把 robots sitemap URL 转成新的种子请求
 - Then 这些新种子请求会带上配置后的 `priority` 与 `depth`
 
+#### Scenario: Robots sitemap requests inherit shared request semantics from start requests
+
+- Given spider 通过 `build_start_requests()` 提供了带 cookies、proxy、session 或 browser mode 的起始请求
+- And 调用方开启 `Settings::with_robots_sitemap_seeds(true)`
+- When 引擎抓取 robots 声明的 sitemap 并把页面 URL 转成新的种子请求
+- Then sitemap 抓取请求继续继承这些共享请求语义，但强制走 HTTP 下载
+- And 生成的页面种子请求继续继承对应 start request 的共享请求语义
+
 #### Scenario: Default robots memory policy uses an in-memory cache backend
 
 - Given 调用方使用默认 `robots::Memory`

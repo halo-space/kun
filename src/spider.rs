@@ -154,6 +154,17 @@ pub trait Spider: Send + Sync {
         self.start_urls()
     }
 
+    /// Build full start requests when the spider needs request-level
+    /// capabilities such as cookies, proxy, session, or browser mode.
+    ///
+    /// By default this maps `build_start_urls()` into `Request::new(...)`.
+    fn build_start_requests(&self) -> Vec<Request> {
+        self.build_start_urls()
+            .into_iter()
+            .map(Request::new)
+            .collect()
+    }
+
     /// Allowed crawl domains. An empty list means no domain filter.
     /// The engine filters requests before enqueueing them.
     fn allowed_domains(&self) -> Vec<String> {

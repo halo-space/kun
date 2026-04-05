@@ -46,6 +46,17 @@
 - **THEN** 系统按文本、列表、对象的对应语义执行校验
 - **AND** 规则名与实际行为保持一致，而不是继续全部复用为泛化的 `min/max`
 
+### Requirement: Spider Start Requests Can Use Shared Request Semantics Directly
+
+系统 MUST 允许 spider 从入口就返回完整 `Request`，而不是只能先返回 URL 再由引擎补默认请求。
+
+#### Scenario: Spider can override build_start_requests with full Request values
+
+- **GIVEN** spider 显式覆写了 `build_start_requests()`
+- **WHEN** 引擎准备初始化起始请求
+- **THEN** 引擎优先使用这些完整 `Request`
+- **AND** 这些起始请求可以携带 cookies、proxy、session、headers 或 browser mode 等共享请求能力
+
 ### Requirement: Follow Request Derivation Must Preserve Shared Request Semantics
 
 系统 MUST 让 `response.follow()` 与显式构造 `Request` 使用同一套请求能力模型。

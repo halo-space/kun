@@ -24,6 +24,7 @@ README 负责总览，这里负责把每个模块现在到底能做什么、还�
 `Request` 是统一的执行单元。
 
 - 代码爬虫里手写的请求，和后续 DSL 生成的请求，本质上都应该落成同一个 `Request`
+- 如果 spider 需要从入口就带上 cookies、proxy、session、browser mode 这类能力，可以直接覆写 `build_start_requests()` 返回完整 `Request`；默认实现仍然只是把 `build_start_urls()` 包成 `Request::new(...)`
 - 当前已经接线的共享请求语义包括：`method`、`headers`、`body`、`timeout`、`proxy`、`session`、request cookies
 - `meta` 是请求级上下文参数，用来挂当前请求和后续链路要透传的数据；它更接近 Scrapy 的函数参数/上下文，而不是框架私自塞内部控制字段的地方
 - `kwargs` 是显式给 callback / errback 使用的回调上下文参数；它和 `meta` 分开建模，不拿来承载框架内部控制字段
@@ -542,6 +543,7 @@ let engine = Engine::new().with_dedup(MethodUrlDedup {
 - 如果调用方要替换这层策略，可以通过 `Engine::with_robots(...)` 挂自己的实现
 - `robots::Robot` 现在除了 `is_allowed(...)`，也可以通过 `check(...)` 返回 `Allow / Disallow / Delay(...)`，并通过 `sitemaps(...)` 读取当前 origin 声明的 sitemap URL
 - 如果调用方再显式打开 `Settings::with_robots_sitemap_seeds(true)`，引擎启动时会按 start URL 的 origin 读取 robots 里声明的 sitemap URL，抓取 sitemap / sitemapindex，并把里面的页面 URL 自动转成新的种子请求；当前也支持常见的 `.xml.gz` 压缩 sitemap
+- 如果 spider 覆写了 `build_start_requests()`，这些自动种子请求会继续继承对应 start request 的共享请求语义，例如 mode、headers、cookies、timeout、proxy、session
 - 这些自动发现出来的种子请求会继续走 `enqueue_request(...)`，所以仍然受 `dedup` 和 `allowed_domains` 过滤；当前默认 `priority / depth` 都保持为 `0 / 0`，也可以通过 `with_robots_sitemap_seed_priority(...)` 和 `with_robots_sitemap_seed_depth(...)` 显式覆盖
 
 当前已补的规则语义：

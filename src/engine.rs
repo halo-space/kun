@@ -11,6 +11,7 @@ use crate::middleware::{Chain, Config, Registry, build as build_middleware};
 use crate::plugins::types::{
     PluginKind, engine_deferred_plugin_kind_names, engine_supported_plugin_kind_names,
 };
+use crate::request::{Request, RequestMode};
 use crate::rules::Compiled;
 use crate::runtime::compile::{compile as compile_runtime, merge as merge_middleware};
 use crate::runtime::{Config as RuntimeConfig, merge as merge_runtime};
@@ -31,8 +32,6 @@ use crate::engine::context::EngineContext;
 use crate::engine::task::{TaskOutcome, run_middleware_request, run_middleware_response};
 #[cfg(test)]
 use crate::middleware::Stage;
-#[cfg(test)]
-use crate::request::RequestMode;
 
 pub struct Engine<S, H, B, D = crate::dedup::Memory, P = (), St = crate::store::File> {
     pub scheduler: S,
@@ -439,11 +438,7 @@ where
         spider: &Sp,
         allowed_domains: &[String],
     ) -> Result<(), SpiderError> {
-        let start_requests: Vec<crate::request::Request> = spider
-            .build_start_urls()
-            .into_iter()
-            .map(crate::request::Request::new)
-            .collect();
+        let start_requests = spider.build_start_requests();
 
         tracing::info!(
             spider = spider.name(),
@@ -508,7 +503,7 @@ where
                         };
 
                         if seen_sitemaps.insert(resolved.clone()) {
-                            pending_sitemaps.push_back(resolved);
+                            pending_sitemaps.push_back((resolved, request.clone()));
                         }
                     }
                 }
@@ -529,12 +524,11 @@ where
 
         let mut seed_count = 0usize;
 
-        while let Some(sitemap_url) = pending_sitemaps.pop_front() {
-            let response = match self
-                .http
-                .fetch(&crate::request::Request::new(sitemap_url.clone()))
-                .await
-            {
+        while let Some((sitemap_url, representative_request)) = pending_sitemaps.pop_front() {
+            let sitemap_request =
+                build_robots_sitemap_fetch_request(&representative_request, sitemap_url.clone());
+
+            let response = match self.http.fetch(&sitemap_request).await {
                 Ok(response) => response,
                 Err(error) => {
                     tracing::warn!(
@@ -572,7 +566,7 @@ where
                 };
 
                 if seen_sitemaps.insert(resolved.clone()) {
-                    pending_sitemaps.push_back(resolved);
+                    pending_sitemaps.push_back((resolved, representative_request.clone()));
                 }
             }
 
@@ -587,9 +581,11 @@ where
                     continue;
                 };
 
-                let sitemap_seed_task = Task::new(crate::request::Request::new(resolved))
-                    .with_priority(self.settings.robots_sitemap_seed_priority)
-                    .with_depth(self.settings.robots_sitemap_seed_depth);
+                let sitemap_seed_task = build_robots_sitemap_seed_task(
+                    &representative_request,
+                    resolved,
+                    &self.settings,
+                );
 
                 if enqueue_task(
                     &mut self.scheduler,
@@ -850,6 +846,16 @@ where
 
         Ok(out)
     }
+}
+
+fn build_robots_sitemap_fetch_request(parent: &Request, url: String) -> Request {
+    Request::from_parent_for_follow(parent, url).with_mode(RequestMode::Http)
+}
+
+fn build_robots_sitemap_seed_task(parent: &Request, url: String, settings: &Settings) -> Task {
+    Task::new(Request::from_parent_for_follow(parent, url))
+        .with_priority(settings.robots_sitemap_seed_priority)
+        .with_depth(settings.robots_sitemap_seed_depth)
 }
 
 impl<H, B, D, P, St> Engine<crate::scheduler::Memory, H, B, D, P, St>
@@ -2395,6 +2401,128 @@ mod tests {
         assert_eq!(sitemap_task.depth, 2);
     }
 
+    #[test]
+    fn engine_enqueues_custom_start_requests_with_full_request_semantics() {
+        let mut engine = Engine::from_parts(Memory::default(), HtmlHttp, StubBrowser)
+            .with_store(MemoryStore::default());
+
+        block_on(engine.enqueue_start_requests(&CustomStartRequestSpider, &[])).unwrap();
+
+        let checkpoint = engine.scheduler.checkpoint();
+        let request = &checkpoint.ready[0].request;
+
+        assert_eq!(request.url, "https://example.com/start");
+        assert_eq!(request.mode, RequestMode::Browser);
+        assert_eq!(
+            request.headers.get("x-token"),
+            Some(&vec!["abc".to_string()])
+        );
+        assert_eq!(
+            request.cookies.get("sid").map(String::as_str),
+            Some("cookie-1")
+        );
+        assert_eq!(request.timeout, Some(SignedDuration::from_secs(5)));
+        assert_eq!(
+            request.proxy.as_ref().map(|proxy| proxy.url.as_str()),
+            Some("http://proxy.internal:8080")
+        );
+        assert_eq!(
+            request.session.as_ref().map(|session| session.id.as_str()),
+            Some("shared-session")
+        );
+    }
+
+    #[test]
+    fn engine_enqueues_robots_sitemap_seed_requests_inheriting_start_request_semantics() {
+        let mut engine = Engine::from_parts(
+            Memory::default(),
+            SitemapHttp::new([(
+                "https://example.com/sitemap.xml",
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://example.com/from-sitemap</loc></url>
+</urlset>"#,
+            )]),
+            StubBrowser,
+        )
+        .with_robots(StaticSitemaps::new(["https://example.com/sitemap.xml"]))
+        .with_settings(Settings::default().with_robots_sitemap_seeds(true))
+        .with_store(MemoryStore::default());
+
+        block_on(engine.enqueue_start_requests(&CustomStartRequestSpider, &[])).unwrap();
+
+        let checkpoint = engine.scheduler.checkpoint();
+        let request = checkpoint
+            .ready
+            .iter()
+            .find(|task| task.request.url == "https://example.com/from-sitemap")
+            .map(|task| &task.request)
+            .unwrap();
+
+        assert_eq!(request.mode, RequestMode::Browser);
+        assert_eq!(
+            request.headers.get("x-token"),
+            Some(&vec!["abc".to_string()])
+        );
+        assert_eq!(
+            request.cookies.get("sid").map(String::as_str),
+            Some("cookie-1")
+        );
+        assert_eq!(request.timeout, Some(SignedDuration::from_secs(5)));
+        assert_eq!(
+            request.proxy.as_ref().map(|proxy| proxy.url.as_str()),
+            Some("http://proxy.internal:8080")
+        );
+        assert_eq!(
+            request.session.as_ref().map(|session| session.id.as_str()),
+            Some("shared-session")
+        );
+    }
+
+    #[test]
+    fn engine_fetches_robots_sitemap_with_http_mode_and_inherited_shared_request_semantics() {
+        let recorder = Arc::new(Mutex::new(None));
+        let mut engine = Engine::from_parts(
+            Memory::default(),
+            InspectingSitemapHttp::new(
+                recorder.clone(),
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://example.com/from-sitemap</loc></url>
+</urlset>"#,
+            ),
+            StubBrowser,
+        )
+        .with_robots(StaticSitemaps::new(["https://example.com/sitemap.xml"]))
+        .with_settings(Settings::default().with_robots_sitemap_seeds(true))
+        .with_store(MemoryStore::default());
+
+        block_on(engine.enqueue_start_requests(&CustomStartRequestSpider, &[])).unwrap();
+
+        let request = recorder.lock().unwrap().clone().unwrap();
+        assert_eq!(request.url, "https://example.com/sitemap.xml");
+        assert_eq!(request.mode, RequestMode::Http);
+        assert_eq!(
+            request.headers.get("x-token"),
+            Some(&vec!["abc".to_string()])
+        );
+        assert_eq!(
+            request.cookies.get("sid").map(String::as_str),
+            Some("cookie-1")
+        );
+        assert_eq!(request.timeout, Some(SignedDuration::from_secs(5)));
+        assert_eq!(
+            request.proxy.as_ref().map(|proxy| proxy.url.as_str()),
+            Some("http://proxy.internal:8080")
+        );
+        assert_eq!(
+            request.session.as_ref().map(|session| session.id.as_str()),
+            Some("shared-session")
+        );
+        assert!(request.http.is_some());
+        assert!(request.browser.is_none());
+    }
+
     #[derive(Clone, Copy)]
     struct BlockPrivate;
 
@@ -2608,6 +2736,37 @@ mod tests {
         }
     }
 
+    struct InspectingSitemapHttp {
+        request: Arc<Mutex<Option<Request>>>,
+        body: Vec<u8>,
+    }
+
+    impl InspectingSitemapHttp {
+        fn new(request: Arc<Mutex<Option<Request>>>, body: impl AsRef<[u8]>) -> Self {
+            Self {
+                request,
+                body: body.as_ref().to_vec(),
+            }
+        }
+    }
+
+    impl crate::download::traits::Downloader for InspectingSitemapHttp {
+        async fn fetch(&self, request: &Request) -> Result<Response, SpiderError> {
+            *self.request.lock().unwrap() = Some(request.clone());
+            Ok(Response::from_request(
+                request.clone(),
+                200,
+                [(
+                    "content-type".to_string(),
+                    vec!["application/xml; charset=utf-8".to_string()],
+                )]
+                .into_iter()
+                .collect(),
+                self.body.clone(),
+            ))
+        }
+    }
+
     #[test]
     fn engine_enqueues_gzipped_robots_sitemap_seed_requests() {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -2760,6 +2919,25 @@ mod tests {
 
         fn start_urls(&self) -> Vec<String> {
             vec!["https://example.com/start".to_string()]
+        }
+    }
+
+    struct CustomStartRequestSpider;
+
+    impl Spider for CustomStartRequestSpider {
+        fn name(&self) -> &str {
+            "custom_start_request_spider"
+        }
+
+        fn build_start_requests(&self) -> Vec<Request> {
+            vec![
+                Request::browser("https://example.com/start")
+                    .with_header("x-token", "abc")
+                    .with_cookie("sid", "cookie-1")
+                    .with_timeout(SignedDuration::from_secs(5))
+                    .with_proxy("http://proxy.internal:8080")
+                    .with_session("shared-session"),
+            ]
         }
     }
 

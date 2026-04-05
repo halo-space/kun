@@ -14,6 +14,13 @@
 - When 引擎把这些 URL 入队
 - Then 每个生成的请求都通过 `parse` 进入 spider
 
+#### Scenario: Spider can override build_start_requests with full Request values
+
+- Given spider 显式覆写了 `build_start_requests()`
+- When 引擎准备初始化起始请求
+- Then 引擎优先使用这些完整 `Request`
+- And 这些起始请求可以携带 cookies、proxy、session、headers 或 browser mode 等共享请求能力
+
 #### Scenario: 未知回调名称显式报错
 
 - Given 某个请求指向 spider 未实现的回调名
