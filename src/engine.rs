@@ -4,7 +4,7 @@ mod task;
 
 use crate::download::traits::Downloader;
 use crate::engine::task::{
-    TaskExecutor, TaskRun, TaskRunReservation, apply_task_run, enqueue_request,
+    TaskExecutor, TaskRun, TaskRunReservation, apply_task_run, enqueue_request, enqueue_task,
 };
 use crate::error::SpiderError;
 use crate::middleware::{Chain, Config, Registry, build as build_middleware};
@@ -14,7 +14,7 @@ use crate::plugins::types::{
 use crate::rules::Compiled;
 use crate::runtime::compile::{compile as compile_runtime, merge as merge_middleware};
 use crate::runtime::{Config as RuntimeConfig, merge as merge_runtime};
-use crate::scheduler::Scheduler;
+use crate::scheduler::{Scheduler, Task};
 use crate::settings::Settings;
 use crate::spider::{Output as SpiderOutput, Spider};
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -587,10 +587,14 @@ where
                     continue;
                 };
 
-                if enqueue_request(
+                let sitemap_seed_task = Task::new(crate::request::Request::new(resolved))
+                    .with_priority(self.settings.robots_sitemap_seed_priority)
+                    .with_depth(self.settings.robots_sitemap_seed_depth);
+
+                if enqueue_task(
                     &mut self.scheduler,
                     &mut self.dedup,
-                    crate::request::Request::new(resolved),
+                    sitemap_seed_task,
                     allowed_domains,
                     Some(self.stats.as_ref()),
                 )
@@ -2354,6 +2358,41 @@ mod tests {
                 "https://example.com/news/1".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn engine_applies_configured_priority_and_depth_to_robots_sitemap_seed_requests() {
+        let mut engine = Engine::from_parts(
+            Memory::default(),
+            SitemapHttp::new([(
+                "https://example.com/sitemap.xml",
+                r#"<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://example.com/from-sitemap</loc></url>
+</urlset>"#,
+            )]),
+            StubBrowser,
+        )
+        .with_robots(StaticSitemaps::new(["https://example.com/sitemap.xml"]))
+        .with_settings(
+            Settings::default()
+                .with_robots_sitemap_seeds(true)
+                .with_robots_sitemap_seed_priority(12)
+                .with_robots_sitemap_seed_depth(2),
+        )
+        .with_store(MemoryStore::default());
+
+        block_on(engine.enqueue_start_requests(&StartUrlSpider, &[])).unwrap();
+
+        let checkpoint = engine.scheduler.checkpoint();
+        let sitemap_task = checkpoint
+            .ready
+            .iter()
+            .find(|task| task.request.url == "https://example.com/from-sitemap")
+            .unwrap();
+
+        assert_eq!(sitemap_task.priority, 12);
+        assert_eq!(sitemap_task.depth, 2);
     }
 
     #[derive(Clone, Copy)]

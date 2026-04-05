@@ -370,6 +370,12 @@
 - **AND** 这些自动发现的种子请求仍然走引擎现有的 dedup 路径
 - **AND** 当前实现保持默认 `priority = 0` 与 `depth = 0`
 
+#### Scenario: Engine can override robots sitemap seed priority and depth
+
+- **WHEN** 调用方开启 `Settings::with_robots_sitemap_seeds(true)`
+- **AND** 它额外配置了 `with_robots_sitemap_seed_priority(...)` 或 `with_robots_sitemap_seed_depth(...)`
+- **THEN** 引擎生成的 robots sitemap 种子请求会带上这些显式 `priority` / `depth`
+
 #### Scenario: Default robots memory policy uses an in-memory cache backend
 
 - **WHEN** 调用方使用默认 `robots::Memory` 并重复读取同一个 origin 的 policy

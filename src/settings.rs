@@ -36,6 +36,8 @@ pub struct Settings {
     pub robots_obey: bool,
     pub robots_user_agent: Option<String>,
     pub robots_sitemap_seeds: bool,
+    pub robots_sitemap_seed_priority: i32,
+    pub robots_sitemap_seed_depth: u32,
     pub openai_api_key: Option<String>,
     pub openai_base_url: Option<String>,
     pub openai_model: String,
@@ -59,6 +61,8 @@ impl Default for Settings {
             robots_obey: false,
             robots_user_agent: None,
             robots_sitemap_seeds: false,
+            robots_sitemap_seed_priority: 0,
+            robots_sitemap_seed_depth: 0,
             openai_api_key: std::env::var("OPENAI_API_KEY").ok(),
             openai_base_url: std::env::var("OPENAI_BASE_URL").ok(),
             openai_model: std::env::var("OPENAI_MODEL")
@@ -201,6 +205,16 @@ impl Settings {
         self
     }
 
+    pub fn with_robots_sitemap_seed_priority(mut self, priority: i32) -> Self {
+        self.robots_sitemap_seed_priority = priority;
+        self
+    }
+
+    pub fn with_robots_sitemap_seed_depth(mut self, depth: u32) -> Self {
+        self.robots_sitemap_seed_depth = depth;
+        self
+    }
+
     pub fn with_openai_api_key(mut self, key: impl Into<String>) -> Self {
         self.openai_api_key = Some(key.into());
         self
@@ -319,6 +333,18 @@ mod tests {
 
         let config = settings.middlewares.get("http_cache").unwrap();
         assert_eq!(config.options.get("ttl"), Some(&Value::Null));
+    }
+
+    #[test]
+    fn robots_sitemap_seed_settings_builders_override_defaults() {
+        let settings = Settings::default()
+            .with_robots_sitemap_seeds(true)
+            .with_robots_sitemap_seed_priority(42)
+            .with_robots_sitemap_seed_depth(3);
+
+        assert!(settings.robots_sitemap_seeds);
+        assert_eq!(settings.robots_sitemap_seed_priority, 42);
+        assert_eq!(settings.robots_sitemap_seed_depth, 3);
     }
 }
 

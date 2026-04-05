@@ -20,6 +20,22 @@ where
     S: Scheduler,
     D: crate::dedup::Dedup,
 {
+    enqueue_task(scheduler, dedup, Task::new(request), allowed_domains, stats).await
+}
+
+pub(super) async fn enqueue_task<S, D>(
+    scheduler: &S,
+    dedup: &mut D,
+    task: Task,
+    allowed_domains: &[String],
+    stats: Option<&crate::stats::Tracker>,
+) -> Result<bool, SpiderError>
+where
+    S: Scheduler,
+    D: crate::dedup::Dedup,
+{
+    let request = &task.request;
+
     if !request.dont_filter && !super::is_domain_allowed(&request.url, allowed_domains) {
         tracing::debug!(
             url = request.url.as_str(),
@@ -39,7 +55,7 @@ where
         return Ok(false);
     }
 
-    scheduler.enqueue(Task::new(request)).await?;
+    scheduler.enqueue(task).await?;
     Ok(true)
 }
 

@@ -542,7 +542,7 @@ let engine = Engine::new().with_dedup(MethodUrlDedup {
 - 如果调用方要替换这层策略，可以通过 `Engine::with_robots(...)` 挂自己的实现
 - `robots::Robot` 现在除了 `is_allowed(...)`，也可以通过 `check(...)` 返回 `Allow / Disallow / Delay(...)`，并通过 `sitemaps(...)` 读取当前 origin 声明的 sitemap URL
 - 如果调用方再显式打开 `Settings::with_robots_sitemap_seeds(true)`，引擎启动时会按 start URL 的 origin 读取 robots 里声明的 sitemap URL，抓取 sitemap / sitemapindex，并把里面的页面 URL 自动转成新的种子请求
-- 这些自动发现出来的种子请求会继续走 `enqueue_request(...)`，所以仍然受 `dedup` 和 `allowed_domains` 过滤；当前默认 `priority / depth` 都保持为 `0`
+- 这些自动发现出来的种子请求会继续走 `enqueue_request(...)`，所以仍然受 `dedup` 和 `allowed_domains` 过滤；当前默认 `priority / depth` 都保持为 `0 / 0`，也可以通过 `with_robots_sitemap_seed_priority(...)` 和 `with_robots_sitemap_seed_depth(...)` 显式覆盖
 
 当前已补的规则语义：
 
@@ -628,7 +628,9 @@ let robots = robots::Memory::new().with_cache(robots::cache::File::default());
 let engine = Engine::new().with_robots(robots).with_settings(
     Settings::default()
         .with_robots_obey(true)
-        .with_robots_sitemap_seeds(true),
+        .with_robots_sitemap_seeds(true)
+        .with_robots_sitemap_seed_priority(10)
+        .with_robots_sitemap_seed_depth(1),
 );
 ```
 
