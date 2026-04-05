@@ -1,5 +1,7 @@
+use flate2::read::GzDecoder;
 use quick_xml::Reader;
 use quick_xml::events::Event;
+use std::io::Read;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Sitemap {
@@ -9,18 +11,24 @@ pub struct Sitemap {
 
 #[derive(Debug, Clone)]
 pub struct SitemapQuery {
-    input: String,
+    input: Vec<u8>,
 }
 
 impl SitemapQuery {
     pub fn new(input: impl Into<String>) -> Self {
+        Self {
+            input: input.into().into_bytes(),
+        }
+    }
+
+    pub fn from_bytes(input: impl Into<Vec<u8>>) -> Self {
         Self {
             input: input.into(),
         }
     }
 
     pub fn entries(&self) -> Sitemap {
-        parse_sitemap(&self.input)
+        parse_sitemap_bytes(&self.input)
     }
 
     pub fn urls(&self) -> Vec<String> {
@@ -38,8 +46,9 @@ enum LocTarget {
     Sitemap,
 }
 
-fn parse_sitemap(input: &str) -> Sitemap {
-    let mut reader = Reader::from_str(input);
+fn parse_sitemap_bytes(input: &[u8]) -> Sitemap {
+    let decoded = decode_sitemap_bytes(input);
+    let mut reader = Reader::from_reader(decoded.as_slice());
     reader.config_mut().trim_text(true);
 
     let mut result = Sitemap::default();
@@ -92,6 +101,23 @@ fn parse_sitemap(input: &str) -> Sitemap {
     result
 }
 
+fn decode_sitemap_bytes(input: &[u8]) -> Vec<u8> {
+    if !looks_like_gzip(input) {
+        return input.to_vec();
+    }
+
+    let mut decoder = GzDecoder::new(input);
+    let mut output = Vec::new();
+    match decoder.read_to_end(&mut output) {
+        Ok(_) => output,
+        Err(_) => input.to_vec(),
+    }
+}
+
+fn looks_like_gzip(input: &[u8]) -> bool {
+    input.starts_with(&[0x1f, 0x8b])
+}
+
 fn push_loc(result: &mut Sitemap, target: LocTarget, text: &str) {
     if text.is_empty() {
         return;
@@ -114,6 +140,7 @@ fn local_name(name: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn sitemap_query_reads_urlset_urls() {
@@ -160,6 +187,29 @@ mod tests {
             vec![
                 "https://example.com/news.xml".to_string(),
                 "https://example.com/archive.xml".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn sitemap_query_reads_gzipped_urlset_urls() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://example.com/a</loc></url>
+  <url><loc>https://example.com/b</loc></url>
+</urlset>"#;
+
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(xml.as_bytes()).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        let sitemap = SitemapQuery::from_bytes(compressed).entries();
+
+        assert_eq!(
+            sitemap.urls,
+            vec![
+                "https://example.com/a".to_string(),
+                "https://example.com/b".to_string()
             ]
         );
     }

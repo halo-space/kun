@@ -370,6 +370,11 @@
 - **AND** 这些自动发现的种子请求仍然走引擎现有的 dedup 路径
 - **AND** 当前实现保持默认 `priority = 0` 与 `depth = 0`
 
+#### Scenario: Engine can turn gzipped robots sitemaps into seed requests
+
+- **WHEN** 当前 origin 的 `robots.txt` 声明的 sitemap 是常见的 `.xml.gz` 压缩文档
+- **THEN** 引擎仍然可以解析它并把里面的页面 URL 自动加入种子请求集合
+
 #### Scenario: Engine can override robots sitemap seed priority and depth
 
 - **WHEN** 调用方开启 `Settings::with_robots_sitemap_seeds(true)`

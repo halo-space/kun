@@ -557,7 +557,7 @@ where
                 continue;
             }
 
-            let entries = crate::parser::SitemapQuery::new(response.text).entries();
+            let entries = response.sitemap().entries();
 
             for nested_sitemap in entries.sitemaps {
                 let Some(resolved) = resolve_url(sitemap_url.as_str(), nested_sitemap.as_str())
@@ -2571,7 +2571,7 @@ mod tests {
     }
 
     struct SitemapHttp {
-        bodies: BTreeMap<String, String>,
+        bodies: BTreeMap<String, Vec<u8>>,
     }
 
     impl SitemapHttp {
@@ -2579,12 +2579,12 @@ mod tests {
         where
             I: IntoIterator<Item = (K, V)>,
             K: Into<String>,
-            V: Into<String>,
+            V: AsRef<[u8]>,
         {
             Self {
                 bodies: entries
                     .into_iter()
-                    .map(|(url, body)| (url.into(), body.into()))
+                    .map(|(url, body)| (url.into(), body.as_ref().to_vec()))
                     .collect(),
             }
         }
@@ -2592,12 +2592,7 @@ mod tests {
 
     impl crate::download::traits::Downloader for SitemapHttp {
         async fn fetch(&self, request: &Request) -> Result<Response, SpiderError> {
-            let body = self
-                .bodies
-                .get(&request.url)
-                .cloned()
-                .unwrap_or_default()
-                .into_bytes();
+            let body = self.bodies.get(&request.url).cloned().unwrap_or_default();
 
             Ok(Response::from_request(
                 request.clone(),
@@ -2611,6 +2606,44 @@ mod tests {
                 body,
             ))
         }
+    }
+
+    #[test]
+    fn engine_enqueues_gzipped_robots_sitemap_seed_requests() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://example.com/from-gzip</loc></url>
+</urlset>"#;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        use std::io::Write as _;
+        encoder.write_all(xml.as_bytes()).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        let mut engine = Engine::from_parts(
+            Memory::default(),
+            SitemapHttp::new([("https://example.com/sitemap.xml.gz", compressed)]),
+            StubBrowser,
+        )
+        .with_robots(StaticSitemaps::new(["https://example.com/sitemap.xml.gz"]))
+        .with_settings(Settings::default().with_robots_sitemap_seeds(true))
+        .with_store(MemoryStore::default());
+
+        block_on(engine.enqueue_start_requests(&StartUrlSpider, &[])).unwrap();
+
+        let checkpoint = engine.scheduler.checkpoint();
+        let urls = checkpoint
+            .ready
+            .iter()
+            .map(|task| task.request.url.clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            urls,
+            vec![
+                "https://example.com/start".to_string(),
+                "https://example.com/from-gzip".to_string(),
+            ]
+        );
     }
 
     struct DelayedCountHttp {

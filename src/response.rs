@@ -228,7 +228,7 @@ impl Response {
     }
 
     pub fn sitemap(&self) -> SitemapQuery {
-        SitemapQuery::new(self.text.clone())
+        SitemapQuery::from_bytes(self.body.clone())
     }
 
     pub fn follow(&self, url: impl Into<String>) -> Request {

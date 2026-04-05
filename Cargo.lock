@@ -1151,6 +1151,7 @@ dependencies = [
  "chardetng",
  "ego-tree",
  "encoding_rs",
+ "flate2",
  "futures",
  "jiff",
  "playwright-rs",

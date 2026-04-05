@@ -201,6 +201,8 @@
   - 当前 `robots::Memory` 默认对 temporary unavailable 结果使用 `60s` 的 `unavailable_retry_delay`；有 stale cache 时会优先复用 stale cache，没有可用 cache 时则在这个窗口内复用当前 unavailable policy。调用方也可以通过 `with_unavailable_retry_delay(...)` 覆盖，或通过 `without_unavailable_retry_delay()` 关闭。
 - [x] 22.9 为 robots sitemap 自动种子补显式 `priority / depth` 控制，避免固定写死成 `0 / 0`。
   - 当前 `Settings` 已补 `with_robots_sitemap_seed_priority(...)` 与 `with_robots_sitemap_seed_depth(...)`；默认仍保持 `0 / 0`，只有显式配置时才覆盖自动种子请求的调度元数据。
+- [x] 22.10 为 robots sitemap 自动种子补常见 `.xml.gz` 压缩 sitemap 支持。
+  - 当前 `response.sitemap()` 与 engine 的 robots sitemap 自动种子都已支持 gzip magic 头的 sitemap body；普通 XML 与常见 `.xml.gz` 都能走同一条解析路径。
 
 ## 23. P0 Dedup 能力继续增强
 
