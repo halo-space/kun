@@ -369,6 +369,7 @@ fn handle_eval_command(
     }
     if script.contains("kun:scheduler:claim_ready_v1")
         || script.contains("kun:scheduler:claim_ready_v2")
+        || script.contains("kun:scheduler:claim_ready_v3")
     {
         return eval_scheduler_claim_ready(state, keys, args);
     }
@@ -446,7 +447,7 @@ fn eval_scheduler_claim_ready(
     keys: &[String],
     args: &[String],
 ) -> Result<Vec<u8>, std::io::Error> {
-    if keys.len() != 10 || args.len() != 4 {
+    if keys.len() != 14 || args.len() != 5 {
         return Ok(error_reply("ERR invalid claim script args"));
     }
 
@@ -465,6 +466,9 @@ fn eval_scheduler_claim_ready(
     sorted_set_remove(state, &keys[5], task_id.as_str());
     hash_set(state, &keys[6], task_id.as_str(), args[2].clone());
     hash_set(state, &keys[7], task_id.as_str(), args[3].clone());
+    sync_worker_runtime_meta(
+        state, &keys[10], &keys[11], &keys[12], &keys[13], &args[2], &args[0], &args[1], &args[4],
+    );
 
     if !args[1].is_empty() {
         let deadline = now.saturating_add(args[1].parse::<i64>().map_err(int_error)?);

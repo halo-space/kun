@@ -103,7 +103,7 @@ end
 return reclaimed
 "#;
 const SCHEDULER_CLAIM_READY_SCRIPT: &str = r#"
--- kun:scheduler:claim_ready_v2
+-- kun:scheduler:claim_ready_v3
 local tasks = KEYS[1]
 local ready = KEYS[2]
 local ready_order = KEYS[3]
@@ -114,11 +114,16 @@ local inflight_workers = KEYS[7]
 local inflight_leases = KEYS[8]
 local sequence = KEYS[9]
 local reclaimed_total = KEYS[10]
+local workers = KEYS[11]
+local worker_seen = KEYS[12]
+local worker_lease_timeout = KEYS[13]
+local worker_heartbeat_interval = KEYS[14]
 
 local now = tonumber(ARGV[1])
 local lease_timeout = ARGV[2]
 local worker_id = ARGV[3]
 local lease_id = ARGV[4]
+local heartbeat_interval = ARGV[5]
 local max_ready_order = 9007199254740991
 
 local function push_ready(id)
@@ -218,6 +223,20 @@ redis.call('SADD', inflight, best_task_id)
 redis.call('ZREM', inflight_deadlines, best_task_id)
 redis.call('HSET', inflight_workers, best_task_id, worker_id)
 redis.call('HSET', inflight_leases, best_task_id, lease_id)
+redis.call('SADD', workers, worker_id)
+redis.call('HSET', worker_seen, worker_id, tostring(now))
+
+if lease_timeout ~= '' then
+    redis.call('HSET', worker_lease_timeout, worker_id, lease_timeout)
+else
+    redis.call('HDEL', worker_lease_timeout, worker_id)
+end
+
+if heartbeat_interval ~= '' then
+    redis.call('HSET', worker_heartbeat_interval, worker_id, heartbeat_interval)
+else
+    redis.call('HDEL', worker_heartbeat_interval, worker_id)
+end
 
 if lease_timeout ~= '' then
     local deadline = now + tonumber(lease_timeout)
@@ -808,26 +827,6 @@ impl Redis {
         .await
     }
 
-    async fn touch_current_worker_runtime(
-        &self,
-        connection: &mut Connection,
-    ) -> Result<(), SpiderError> {
-        let keys = self.keys();
-        touch_worker_runtime(
-            connection,
-            &keys,
-            self.worker_id(),
-            self.lease_timeout_millis(),
-            self.heartbeat_interval_millis(),
-        )
-        .await
-    }
-
-    async fn sync_runtime_metadata(&self, connection: &mut Connection) -> Result<(), SpiderError> {
-        self.sync_scope_metadata(connection).await?;
-        self.touch_current_worker_runtime(connection).await
-    }
-
     async fn reclaim_expired_inflight(
         &self,
         connection: &mut Connection,
@@ -959,7 +958,7 @@ impl Scheduler for Redis {
     async fn enqueue(&self, task: Task) -> Result<(), SpiderError> {
         let mut guard = self.connection().await?;
         let connection = self.connection_mut(&mut guard)?;
-        self.sync_runtime_metadata(connection).await?;
+        self.sync_scope_metadata(connection).await?;
         self.enqueue_internal(connection, task).await
     }
 
@@ -994,11 +993,15 @@ impl Scheduler for Redis {
     async fn take_ready(&self) -> Result<Option<ClaimedTask>, SpiderError> {
         let mut guard = self.connection().await?;
         let connection = self.connection_mut(&mut guard)?;
-        self.sync_runtime_metadata(connection).await?;
+        self.sync_scope_metadata(connection).await?;
         let keys = self.keys();
         let now = now().to_string();
         let lease_timeout = self
             .lease_timeout_millis()
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        let heartbeat_interval = self
+            .heartbeat_interval_millis()
             .map(|value| value.to_string())
             .unwrap_or_default();
         let lease_id = next_lease_id(self.worker_id());
@@ -1016,12 +1019,17 @@ impl Scheduler for Redis {
                 keys.inflight_leases.as_str(),
                 keys.sequence.as_str(),
                 keys.reclaimed_total.as_str(),
+                keys.workers.as_str(),
+                keys.worker_seen.as_str(),
+                keys.worker_lease_timeout.as_str(),
+                keys.worker_heartbeat_interval.as_str(),
             ],
             &[
                 now.as_str(),
                 lease_timeout.as_str(),
                 self.worker_id(),
                 lease_id.as_str(),
+                heartbeat_interval.as_str(),
             ],
         )
         .await?;
@@ -1140,7 +1148,7 @@ impl Scheduler for Redis {
     async fn release_inflight(&self) -> Result<usize, SpiderError> {
         let mut guard = self.connection().await?;
         let connection = self.connection_mut(&mut guard)?;
-        self.sync_runtime_metadata(connection).await?;
+        self.sync_scope_metadata(connection).await?;
         let keys = self.keys();
         let now = now().to_string();
         let released: i64 = scheduler_eval(
@@ -1368,61 +1376,6 @@ async fn sync_namespace_meta_field(
         }
     }
     Ok(())
-}
-
-async fn sync_worker_meta_field(
-    connection: &mut Connection,
-    key: &str,
-    worker_id: &str,
-    value: Option<u64>,
-) -> Result<(), SpiderError> {
-    match value {
-        Some(value) => {
-            let value = value.to_string();
-            let _: i64 =
-                scheduler_query(connection, redis_command("HSET", [key, worker_id, &value]))
-                    .await?;
-        }
-        None => {
-            let _: i64 =
-                scheduler_query(connection, redis_command("HDEL", [key, worker_id])).await?;
-        }
-    }
-    Ok(())
-}
-
-async fn touch_worker_runtime(
-    connection: &mut Connection,
-    keys: &Keys,
-    worker_id: &str,
-    lease_timeout: Option<u64>,
-    heartbeat_interval: Option<u64>,
-) -> Result<(), SpiderError> {
-    let now = now().to_string();
-    let _: i64 = scheduler_query(
-        connection,
-        redis_command("SADD", [&keys.workers, worker_id]),
-    )
-    .await?;
-    let _: i64 = scheduler_query(
-        connection,
-        redis_command("HSET", [&keys.worker_seen, worker_id, &now]),
-    )
-    .await?;
-    sync_worker_meta_field(
-        connection,
-        &keys.worker_lease_timeout,
-        worker_id,
-        lease_timeout,
-    )
-    .await?;
-    sync_worker_meta_field(
-        connection,
-        &keys.worker_heartbeat_interval,
-        worker_id,
-        heartbeat_interval,
-    )
-    .await
 }
 
 async fn clear_worker_runtime_if_idle(
@@ -2520,20 +2473,7 @@ mod tests {
             Some(SignedDuration::from_millis(20))
         );
         assert!(blog_snapshot.inflight_tasks.is_empty());
-        assert_eq!(blog_snapshot.workers.len(), 1);
-        let blog_worker = &blog_snapshot.workers[0];
-        assert_eq!(blog_worker.worker_id, "blog-worker");
-        assert!(!blog_worker.is_stale);
-        assert_eq!(blog_worker.inflight_count, 0);
-        assert!(blog_worker.inflight_task_ids.is_empty());
-        assert_eq!(
-            blog_worker.lease_timeout,
-            Some(SignedDuration::from_millis(80))
-        );
-        assert_eq!(
-            blog_worker.heartbeat_interval,
-            Some(SignedDuration::from_millis(20))
-        );
+        assert!(blog_snapshot.workers.is_empty());
 
         let overview = news.overview().await.unwrap();
         assert_eq!(overview.scope_count, 2);
@@ -2547,7 +2487,7 @@ mod tests {
                 inflight: 1,
             }
         );
-        assert_eq!(overview.worker_count, 2);
+        assert_eq!(overview.worker_count, 1);
         assert_eq!(overview.stale_worker_count, 0);
         assert_eq!(overview.active_lease_count, 1);
         assert_eq!(overview.reclaimed_total, 0);
@@ -2564,7 +2504,7 @@ mod tests {
                 inflight: 0,
             }
         );
-        assert_eq!(blog_overview.worker_count, 1);
+        assert_eq!(blog_overview.worker_count, 0);
         assert_eq!(blog_overview.stale_worker_count, 0);
         assert_eq!(blog_overview.active_lease_count, 0);
         assert_eq!(blog_overview.reclaimed_total, 0);
@@ -2726,6 +2666,63 @@ mod tests {
         );
 
         scheduler.complete(&second_claim.lease).await.unwrap();
+        scheduler.close().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn redis_scheduler_enqueue_only_does_not_register_worker_runtime() {
+        let (url, _commands_rx, server_handle) = spawn_redis_server().await;
+        let scheduler = Redis::new(format!("redis://{url}"), "enqueue_only").with_worker(
+            Worker::new("worker-a")
+                .with_lease_timeout(SignedDuration::from_millis(80))
+                .with_heartbeat_interval(SignedDuration::from_millis(20)),
+        );
+        scheduler
+            .enqueue(Task::with_delay(
+                Request::new("https://example.com/enqueue-only"),
+                500,
+            ))
+            .await
+            .unwrap();
+
+        let snapshot = scheduler.snapshot().await.unwrap();
+        assert_eq!(
+            snapshot.counts,
+            Counts {
+                ready: 0,
+                delayed: 1,
+                inflight: 0,
+            }
+        );
+        assert!(snapshot.worker_ids.is_empty());
+        assert!(snapshot.workers.is_empty());
+        assert_eq!(
+            snapshot.lease_timeout,
+            Some(SignedDuration::from_millis(80))
+        );
+        assert_eq!(
+            snapshot.heartbeat_interval,
+            Some(SignedDuration::from_millis(20))
+        );
+
+        scheduler.close().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn redis_scheduler_empty_take_ready_does_not_register_worker_runtime() {
+        let (url, _commands_rx, server_handle) = spawn_redis_server().await;
+        let scheduler = Redis::new(format!("redis://{url}"), "empty_take_ready")
+            .with_worker(Worker::new("worker-a"));
+
+        assert!(scheduler.take_ready().await.unwrap().is_none());
+
+        let snapshot = scheduler.snapshot().await.unwrap();
+        assert_eq!(snapshot.counts, Counts::default());
+        assert!(snapshot.worker_ids.is_empty());
+        assert!(snapshot.workers.is_empty());
+
         scheduler.close().await.unwrap();
         server_handle.await.unwrap().unwrap();
     }
