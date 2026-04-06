@@ -209,10 +209,10 @@ browser 在这里的角色是“渲染型下载器”，不是另起一套通用
 - `scheduler.snapshot().await?` 可以直接读取当前 scheduler scope 这一刻的运行时快照；对于 `scheduler::Redis` 来说，这个 scope 对应 Redis namespace
 - `snapshot.inflight_tasks` 会直接带出每条 inflight task 的 task id、url、worker、lease、deadline 与 priority/depth 元信息
 - 如果同一个后端里有多个 job / scope，可以用 `scheduler.scopes_with_prefix(...)` 和 `scheduler.snapshots_with_prefix(...)` 做跨 job 运维读取；如果只想先看聚合摘要，可以直接读 `scheduler.overview()` 或 `scheduler.overview_with_prefix(...)`
-- 如果想让本地 memory scheduler 在快照里显示稳定的逻辑 worker 身份，也可以显式用 `scheduler::Memory::new().with_worker_id(...)`
-- 如果需要调整恢复窗口：`scheduler::Redis::new(...).with_lease_timeout(...)`
-- 如果需要显式指定 worker 或 heartbeat：`scheduler::Redis::new(...).with_worker_id(...).with_heartbeat_interval(...)`
-- 如果明确不想启用这层自动回收：`scheduler::Redis::new(...).without_lease_timeout()`
+- 如果想让 `Memory / Redis / 以后其它后端` 共用同一套 worker 配置，统一传 `scheduler::Worker::new(...)` 给 `.with_worker(...)`
+- 如果需要调整恢复窗口：`scheduler::Worker::new(...).with_lease_timeout(...)`
+- 如果需要显式指定 worker 或 heartbeat：`scheduler::Worker::new(...).with_heartbeat_interval(...)`
+- 如果明确不想启用这层自动回收：`scheduler::Worker::new(...).without_lease_timeout()`
 - 如果需要链式挂 checkpoint：`Engine::new().with_checkpoint(...)`
 - 如果需要链式从 checkpoint 恢复：`Engine::new().load_checkpoint(...).await?`
 - 更完整的分布式用法说明见 `docs/distributed_scheduler.md`
@@ -256,10 +256,11 @@ let checkpoint_engine = Engine::new()
 
 let redis_engine = Engine::new()
     .with_scheduler(
-        scheduler::Redis::new("redis://127.0.0.1:6379", "kun:scheduler")
-            .with_worker_id("news-worker-a")
-            .with_lease_timeout(jiff::SignedDuration::from_secs(30))
-            .with_heartbeat_interval(jiff::SignedDuration::from_secs(10)),
+        scheduler::Redis::new("redis://127.0.0.1:6379", "kun:scheduler").with_worker(
+            scheduler::Worker::new("news-worker-a")
+                .with_lease_timeout(jiff::SignedDuration::from_secs(30))
+                .with_heartbeat_interval(jiff::SignedDuration::from_secs(10)),
+        ),
     );
 ```
 

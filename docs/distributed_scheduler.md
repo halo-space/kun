@@ -29,10 +29,11 @@ use halo_spider::engine::Engine;
 use halo_spider::scheduler;
 
 let engine = Engine::new().with_scheduler(
-    scheduler::Redis::new("redis://127.0.0.1:6379", "jobs:news")
-        .with_worker_id("news-worker-a")
-        .with_lease_timeout(jiff::SignedDuration::from_secs(30))
-        .with_heartbeat_interval(jiff::SignedDuration::from_secs(10)),
+    scheduler::Redis::new("redis://127.0.0.1:6379", "jobs:news").with_worker(
+        scheduler::Worker::new("news-worker-a")
+            .with_lease_timeout(jiff::SignedDuration::from_secs(30))
+            .with_heartbeat_interval(jiff::SignedDuration::from_secs(10)),
+    ),
 );
 ```
 
@@ -48,10 +49,10 @@ let engine = Engine::new().with_scheduler(
 
 ```rust
 let worker_a = scheduler::Redis::new("redis://127.0.0.1:6379", "jobs:news")
-    .with_worker_id("news-worker-a");
+    .with_worker(scheduler::Worker::new("news-worker-a"));
 
 let worker_b = scheduler::Redis::new("redis://127.0.0.1:6379", "jobs:news")
-    .with_worker_id("news-worker-b");
+    .with_worker(scheduler::Worker::new("news-worker-b"));
 ```
 
 这样两个 worker 会从同一个任务池里 claim task，但不会重复 claim 同一条 ready task。
@@ -65,7 +66,7 @@ let worker_b = scheduler::Redis::new("redis://127.0.0.1:6379", "jobs:news")
 use halo_spider::scheduler::{self, Scheduler};
 
 let scheduler = scheduler::Redis::new("redis://127.0.0.1:6379", "jobs:news")
-    .with_worker_id("ops-reader");
+    .with_worker(scheduler::Worker::new("ops-reader"));
 
 let snapshot = scheduler.snapshot().await?;
 
@@ -112,7 +113,7 @@ for task in &snapshot.inflight_tasks {
 use halo_spider::scheduler::{self, Scheduler};
 
 let scheduler = scheduler::Redis::new("redis://127.0.0.1:6379", "jobs:ops")
-    .with_worker_id("ops-reader");
+    .with_worker(scheduler::Worker::new("ops-reader"));
 
 let scopes = scheduler.scopes_with_prefix("jobs:").await?;
 println!("registered scopes: {:?}", scopes);

@@ -157,7 +157,7 @@ async fn memory_snapshot_demo() -> Result<(), SpiderError> {
 
     let scheduler = scheduler::Memory::default()
         .with_scope("examples:custom-scheduler:memory")
-        .with_worker_id("example-memory-worker");
+        .with_worker(scheduler::Worker::new("example-memory-worker"));
     scheduler
         .enqueue(
             Task::new(Request::new("https://example.com/memory/ready"))
@@ -207,7 +207,7 @@ async fn memory_scope_overview_demo() -> Result<(), SpiderError> {
 
     let scheduler = scheduler::Memory::default()
         .with_scope("examples:custom-scheduler:memory-overview")
-        .with_worker_id("example-memory-worker");
+        .with_worker(scheduler::Worker::new("example-memory-worker"));
     let scopes = scheduler
         .scopes_with_prefix("examples:custom-scheduler:")
         .await?;
@@ -241,7 +241,7 @@ async fn redis_snapshot_demo() -> Result<(), SpiderError> {
     };
 
     let scheduler = scheduler::Redis::new(url, "examples:custom-scheduler:snapshot")
-        .with_worker_id("example-observer");
+        .with_worker(scheduler::Worker::new("example-observer"));
     let snapshot = scheduler.snapshot().await?;
 
     println!("scope snapshot counts: {:?}", snapshot.counts);
@@ -265,8 +265,8 @@ async fn redis_scope_overview_demo() -> Result<(), SpiderError> {
         return Ok(());
     };
 
-    let scheduler =
-        scheduler::Redis::new(url, "examples:custom-scheduler:ops").with_worker_id("example-ops");
+    let scheduler = scheduler::Redis::new(url, "examples:custom-scheduler:ops")
+        .with_worker(scheduler::Worker::new("example-ops"));
     let scopes = scheduler
         .scopes_with_prefix("examples:custom-scheduler:")
         .await?;

@@ -1,8 +1,8 @@
 use crate::error::{SchedulerError, SpiderError};
 use crate::scheduler::checkpoint::{Checkpoint, Counts};
 use crate::scheduler::snapshot::{InflightTaskSnapshot, Snapshot, WorkerSnapshot};
-use crate::scheduler::{ClaimedTask, Scheduler, Task, TaskLease};
-use jiff::Timestamp;
+use crate::scheduler::{ClaimedTask, Scheduler, Task, TaskLease, Worker};
+use jiff::{SignedDuration, Timestamp};
 use std::cmp::Ordering;
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 pub struct Memory {
     scope: String,
-    worker_id: String,
+    worker: Worker,
     state: Mutex<State>,
 }
 
@@ -36,7 +36,7 @@ impl Memory {
     pub fn new() -> Self {
         Self {
             scope: next_memory_scope(),
-            worker_id: next_memory_worker_id(),
+            worker: Worker::new(next_memory_worker_id()),
             state: Mutex::new(State::default()),
         }
     }
@@ -46,7 +46,7 @@ impl Memory {
     }
 
     pub fn worker_id(&self) -> &str {
-        &self.worker_id
+        self.worker.worker_id()
     }
 
     pub fn with_scope(mut self, scope: impl Into<String>) -> Self {
@@ -54,8 +54,12 @@ impl Memory {
         self
     }
 
-    pub fn with_worker_id(mut self, worker_id: impl Into<String>) -> Self {
-        self.worker_id = worker_id.into();
+    pub fn worker(&self) -> &Worker {
+        &self.worker
+    }
+
+    pub fn with_worker(mut self, worker: Worker) -> Self {
+        self.worker = worker;
         self
     }
 
@@ -63,7 +67,7 @@ impl Memory {
     pub fn from_checkpoint(checkpoint: Checkpoint) -> Self {
         Self {
             scope: next_memory_scope(),
-            worker_id: next_memory_worker_id(),
+            worker: Worker::new(next_memory_worker_id()),
             state: Mutex::new(State {
                 ready: VecDeque::from(checkpoint.ready),
                 delayed: checkpoint.delayed,
@@ -115,6 +119,8 @@ impl Memory {
         let mut inflight_tasks = Vec::with_capacity(state.inflight.len());
         let mut inflight_task_ids = Vec::new();
         let mut active_lease_count = 0usize;
+        let lease_timeout = self.lease_timeout();
+        let heartbeat_interval = self.heartbeat_interval();
         for entry in &state.inflight {
             let task = &entry.task;
             let ready_at = task
@@ -143,16 +149,24 @@ impl Memory {
             });
         }
         let workers = if active_lease_count > 0 {
+            let is_stale = match (state.worker_last_seen.as_ref(), lease_timeout) {
+                (Some(last_seen), Some(lease_timeout)) => {
+                    last_seen.as_millisecond().saturating_add(
+                        i64::try_from(lease_timeout.as_millis()).unwrap_or(i64::MAX),
+                    ) < Timestamp::now().as_millisecond()
+                }
+                _ => false,
+            };
             vec![WorkerSnapshot {
-                worker_id: self.worker_id.clone(),
+                worker_id: self.worker_id().to_string(),
                 last_seen: state.worker_last_seen,
-                is_stale: false,
+                is_stale,
                 inflight_count: inflight_task_ids.len(),
                 active_lease_count,
                 inflight_task_ids,
                 next_deadline: None,
-                lease_timeout: None,
-                heartbeat_interval: None,
+                lease_timeout,
+                heartbeat_interval,
             }]
         } else {
             Vec::new()
@@ -166,7 +180,7 @@ impl Memory {
                 inflight: state.inflight.len(),
             },
             worker_ids: if active_lease_count > 0 {
-                vec![self.worker_id.clone()]
+                vec![self.worker_id().to_string()]
             } else {
                 Vec::new()
             },
@@ -176,9 +190,20 @@ impl Memory {
             reclaimed_in_refresh: 0,
             inflight_tasks,
             workers,
-            lease_timeout: None,
-            heartbeat_interval: None,
+            lease_timeout,
+            heartbeat_interval,
         })
+    }
+
+    fn lease_timeout(&self) -> Option<SignedDuration> {
+        self.worker.effective_lease_timeout(None)
+    }
+
+    fn heartbeat_interval(&self) -> Option<SignedDuration> {
+        let default = self
+            .lease_timeout()
+            .map(|timeout| default_heartbeat_interval(timeout.as_millis()));
+        self.worker.effective_heartbeat_interval(default)
     }
 }
 
@@ -274,8 +299,8 @@ impl Scheduler for Memory {
 
         let lease = TaskLease::new(
             task.id.clone(),
-            self.worker_id.clone(),
-            next_memory_lease_id(self.worker_id.as_str()),
+            self.worker_id().to_string(),
+            next_memory_lease_id(self.worker_id()),
         );
         state.worker_last_seen = Some(Timestamp::now());
         state
@@ -295,12 +320,7 @@ impl Scheduler for Memory {
                 task_id: lease.task_id().as_str().to_string(),
             })
         })?;
-        ensure_memory_lease(
-            "complete",
-            self.worker_id.as_str(),
-            &state.inflight[pos],
-            lease,
-        )?;
+        ensure_memory_lease("complete", self.worker_id(), &state.inflight[pos], lease)?;
         state.inflight.remove(pos);
         state.reset_worker_if_idle();
         Ok(())
@@ -317,12 +337,7 @@ impl Scheduler for Memory {
                 task_id: lease.task_id().as_str().to_string(),
             })
         })?;
-        ensure_memory_lease(
-            "requeue",
-            self.worker_id.as_str(),
-            &state.inflight[pos],
-            lease,
-        )?;
+        ensure_memory_lease("requeue", self.worker_id(), &state.inflight[pos], lease)?;
         let entry = state.inflight.remove(pos);
         state.push_task(entry.task);
         state.reset_worker_if_idle();
@@ -340,14 +355,13 @@ impl Scheduler for Memory {
                 task_id: lease.task_id().as_str().to_string(),
             })
         })?;
-        ensure_memory_lease(
-            "heartbeat",
-            self.worker_id.as_str(),
-            &state.inflight[pos],
-            lease,
-        )?;
+        ensure_memory_lease("heartbeat", self.worker_id(), &state.inflight[pos], lease)?;
         state.worker_last_seen = Some(Timestamp::now());
         Ok(())
+    }
+
+    fn heartbeat_interval(&self) -> Option<SignedDuration> {
+        Memory::heartbeat_interval(self)
     }
 
     async fn close(&self) -> Result<(), SpiderError> {
@@ -392,6 +406,11 @@ fn next_memory_lease_id(worker_id: &str) -> String {
         Timestamp::now().as_millisecond(),
         NEXT_MEMORY_LEASE.fetch_add(1, AtomicOrdering::Relaxed)
     )
+}
+
+fn default_heartbeat_interval(lease_timeout_millis: i128) -> SignedDuration {
+    let millis = (lease_timeout_millis / 2).max(1);
+    SignedDuration::from_millis(i64::try_from(millis).unwrap_or(i64::MAX))
 }
 
 fn find_inflight_entry(
@@ -701,9 +720,11 @@ mod tests {
 
     #[test]
     fn memory_scheduler_snapshot_uses_unified_scheduler_shape() {
-        let scheduler = Memory::default()
-            .with_scope("memory:demo")
-            .with_worker_id("memory-worker-a");
+        let scheduler = Memory::default().with_scope("memory:demo").with_worker(
+            Worker::new("memory-worker-a")
+                .with_lease_timeout(SignedDuration::from_millis(50))
+                .with_heartbeat_interval(SignedDuration::from_millis(10)),
+        );
         block_on(
             scheduler.enqueue(
                 Task::new(Request::new("https://example.com/inflight"))
@@ -748,15 +769,18 @@ mod tests {
         assert_eq!(worker.active_lease_count, 1);
         assert_eq!(worker.inflight_task_ids, vec![claimed.task.id.clone()]);
         assert_eq!(worker.next_deadline, None);
-        assert_eq!(worker.lease_timeout, None);
-        assert_eq!(worker.heartbeat_interval, None);
+        assert_eq!(worker.lease_timeout, Some(SignedDuration::from_millis(50)));
+        assert_eq!(
+            worker.heartbeat_interval,
+            Some(SignedDuration::from_millis(10))
+        );
     }
 
     #[test]
     fn memory_scheduler_scopes_and_snapshots_stay_uniform() {
         let scheduler = Memory::default()
             .with_scope("jobs:memory")
-            .with_worker_id("memory-worker-a");
+            .with_worker(Worker::new("memory-worker-a"));
         block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/ready")))).unwrap();
         block_on(scheduler.enqueue(Task::with_delay(
             Request::new("https://example.com/delayed"),
@@ -822,7 +846,7 @@ mod tests {
 
     #[test]
     fn memory_scheduler_rejects_foreign_or_stale_lease_resolution() {
-        let scheduler = Memory::default().with_worker_id("memory-worker-a");
+        let scheduler = Memory::default().with_worker(Worker::new("memory-worker-a"));
         block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/lease")))).unwrap();
 
         let claimed = block_on(scheduler.take_ready()).unwrap().unwrap();
@@ -860,6 +884,20 @@ mod tests {
                 action: "complete",
                 task_id: claimed.task.id.as_str().to_string(),
             })
+        );
+    }
+
+    #[test]
+    fn memory_scheduler_accepts_shared_worker_config() {
+        let worker = Worker::new("memory-worker-a")
+            .with_lease_timeout(SignedDuration::from_millis(60))
+            .with_heartbeat_interval(SignedDuration::from_millis(15));
+        let scheduler = Memory::default().with_worker(worker);
+
+        assert_eq!(scheduler.worker_id(), "memory-worker-a");
+        assert_eq!(
+            Scheduler::heartbeat_interval(&scheduler),
+            Some(SignedDuration::from_millis(15))
         );
     }
 

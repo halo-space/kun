@@ -164,9 +164,9 @@ let settings = Settings::default()
 - `snapshot.inflight_tasks` 会直接带出每条 inflight task 的 `task_id / url / worker_id / lease_id / deadline / priority / depth / ready_at`，运维时不需要再手工回读底层 Redis key
 - `snapshot.workers` 会直接带出每个 worker 的 `last_seen / is_stale / inflight_task_ids / next_deadline / lease_timeout / heartbeat_interval`
 - `scheduler.scopes()` / `scheduler.scopes_with_prefix(...)` / `scheduler.snapshots()` / `scheduler.snapshots_with_prefix(...)` / `scheduler.overview()` / `scheduler.overview_with_prefix(...)` 是统一的 scheduler 运维读入口；像 `scheduler::Redis` 这种共享后端可以返回多个 scope，本地 `scheduler::Memory` 则默认只返回自己这一份 scope
-- 如果你想给本地 memory scheduler 一个稳定的逻辑 worker 身份，方便日志或快照里看清楚，也可以显式用 `scheduler::Memory::new().with_worker_id(...)`
+- 如果你想给 scheduler 指定稳定的逻辑 worker 身份，或者统一配置 lease / heartbeat 策略，显式传 `scheduler::Worker::new(...)` 给 `.with_worker(...)` 即可；`Memory`、`Redis`、以后其它后端都走同一入口
 - 如果你只想先看聚合后的跨 scope 摘要，优先用 `scheduler.overview()` 或 `scheduler.overview_with_prefix(...)`；它会汇总 `scope_count / pending_scope_count / stale_scope_count / counts / worker_count / active_lease_count / reclaimed_total`
-- 如果你想调整这层恢复窗口，可以用 `.with_lease_timeout(...)`；如果你想显式指定 worker 身份或 heartbeat 节奏，可以再配 `.with_worker_id(...)`、`.with_heartbeat_interval(...)`；如果你明确不想要这层自动回收，也可以用 `.without_lease_timeout()`
+- 如果你想调整这层恢复窗口、显式指定 worker 身份或 heartbeat 节奏，统一改 `scheduler::Worker::new(...).with_lease_timeout(...).with_heartbeat_interval(...)`；如果你明确不想要这层自动回收，也可以在 `Worker` 上调用 `.without_lease_timeout()`
 - `snapshot()`、`counts()`、`checkpoint()` 这类只读/静态读取入口不会把当前调用方登记成活跃 worker；真正会刷新 worker runtime 的只有 `enqueue / take_ready / complete / requeue / heartbeat`
 - 如果你是直接管理 scheduler 生命周期，不是交给 `Engine::run(...)`，结束时也可以统一调用 `scheduler.close().await?`；`Memory / Redis / 以后其它后端` 都走同一个关闭钩子
 - 如果你想自定义 checkpoint 后端，可以用 `scheduler::checkpoint::Memory::load(scheduler::checkpoint::Redis::new(...)).await?`
@@ -224,10 +224,11 @@ let engine = Engine::new()
 // 10. 原生 durable Redis scheduler
 let engine = Engine::new()
     .with_scheduler(
-        scheduler::Redis::new("redis://127.0.0.1:6379", "kun:scheduler")
-            .with_worker_id("news-worker-a")
-            .with_lease_timeout(jiff::SignedDuration::from_secs(30))
-            .with_heartbeat_interval(jiff::SignedDuration::from_secs(10)),
+        scheduler::Redis::new("redis://127.0.0.1:6379", "kun:scheduler").with_worker(
+            scheduler::Worker::new("news-worker-a")
+                .with_lease_timeout(jiff::SignedDuration::from_secs(30))
+                .with_heartbeat_interval(jiff::SignedDuration::from_secs(10)),
+        ),
     );
 
 // 11. 内存 scheduler + 自定义 Redis checkpoint

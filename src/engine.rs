@@ -1488,16 +1488,20 @@ mod tests {
         let (url, _commands_rx, server_handle) = spawn_redis_server().await;
         let namespace = "engine_heartbeat";
         let scheduler = crate::scheduler::Redis::new(format!("redis://{url}"), namespace)
-            .with_worker_id("engine-worker")
-            .with_lease_timeout(SignedDuration::from_millis(20))
-            .with_heartbeat_interval(SignedDuration::from_millis(10));
+            .with_worker(
+                crate::scheduler::Worker::new("engine-worker")
+                    .with_lease_timeout(SignedDuration::from_millis(20))
+                    .with_heartbeat_interval(SignedDuration::from_millis(10)),
+            );
         let mut engine = Engine::from_parts(scheduler, AsyncDelayedHttp { delay: 60 }, StubBrowser)
             .with_settings(Settings::default().with_idle_timeout(SignedDuration::from_millis(5)))
             .with_store(MemoryStore::default());
         let shutdown = engine.shutdown_handle();
         let observer = crate::scheduler::Redis::new(format!("redis://{url}"), namespace)
-            .with_worker_id("observer")
-            .with_lease_timeout(SignedDuration::from_millis(20));
+            .with_worker(
+                crate::scheduler::Worker::new("observer")
+                    .with_lease_timeout(SignedDuration::from_millis(20)),
+            );
         let observer_task = async move {
             tokio::time::sleep(to_std_duration(SignedDuration::from_millis(30)).unwrap()).await;
             let checkpoint = observer.checkpoint().await.unwrap();

@@ -2,7 +2,7 @@ use crate::error::SpiderError;
 use crate::redis::{Connection, ErrorContext, connect, query, validate_url};
 use crate::scheduler::checkpoint::{Checkpoint, Counts};
 use crate::scheduler::snapshot::{InflightTaskSnapshot, Snapshot, WorkerSnapshot};
-use crate::scheduler::{ClaimedTask, Scheduler, Task, TaskId, TaskLease};
+use crate::scheduler::{ClaimedTask, Scheduler, Task, TaskId, TaskLease, Worker};
 use jiff::{SignedDuration, Timestamp};
 use redis::FromRedisValue;
 use std::cmp::Ordering;
@@ -376,9 +376,7 @@ return 1
 pub struct Redis {
     url: String,
     namespace: String,
-    worker_id: String,
-    lease_timeout: Option<u64>,
-    heartbeat_interval: Option<u64>,
+    worker: Worker,
     connection: Arc<Mutex<Option<Connection>>>,
 }
 
@@ -387,9 +385,9 @@ impl Redis {
         Self {
             url: url.into(),
             namespace: namespace.into(),
-            worker_id: next_worker_id(),
-            lease_timeout: Some(DEFAULT_LEASE_TIMEOUT),
-            heartbeat_interval: None,
+            worker: Worker::new(next_worker_id()).with_lease_timeout(SignedDuration::from_millis(
+                i64::try_from(DEFAULT_LEASE_TIMEOUT).unwrap_or(i64::MAX),
+            )),
             connection: Arc::new(Mutex::new(None)),
         }
     }
@@ -407,32 +405,15 @@ impl Redis {
     }
 
     pub fn worker_id(&self) -> &str {
-        &self.worker_id
+        self.worker.worker_id()
     }
 
-    /// Overrides the logical worker id used for task ownership validation.
-    pub fn with_worker_id(mut self, worker_id: impl Into<String>) -> Self {
-        self.worker_id = worker_id.into();
-        self
+    pub fn worker(&self) -> &Worker {
+        &self.worker
     }
 
-    /// Overrides how long an `inflight` task lease may stay unresolved before
-    /// the scheduler reclaims it back into the runnable buckets.
-    pub fn with_lease_timeout(mut self, timeout: SignedDuration) -> Self {
-        self.lease_timeout = Some(non_negative_milliseconds(timeout));
-        self
-    }
-
-    /// Overrides how often the engine should renew claimed task leases.
-    pub fn with_heartbeat_interval(mut self, interval: SignedDuration) -> Self {
-        self.heartbeat_interval = Some(non_negative_milliseconds(interval));
-        self
-    }
-
-    /// Disables automatic stale `inflight` reclaim for this Redis scheduler.
-    pub fn without_lease_timeout(mut self) -> Self {
-        self.lease_timeout = None;
-        self.heartbeat_interval = None;
+    pub fn with_worker(mut self, worker: Worker) -> Self {
+        self.worker = worker;
         self
     }
 
@@ -491,7 +472,7 @@ impl Redis {
             ));
         }
 
-        if self.worker_id.trim().is_empty() {
+        if self.worker_id().trim().is_empty() {
             return Err(SpiderError::scheduler(
                 "redis scheduler worker_id cannot be empty",
             ));
@@ -527,11 +508,19 @@ impl Redis {
     }
 
     fn heartbeat_interval_millis(&self) -> Option<u64> {
-        let lease_timeout = self.lease_timeout?;
-        Some(
-            self.heartbeat_interval
-                .unwrap_or_else(|| default_heartbeat_interval(lease_timeout)),
-        )
+        let lease_timeout = self.lease_timeout_millis()?;
+        let default = Some(signed_duration_from_millis(default_heartbeat_interval(
+            lease_timeout,
+        )));
+        self.worker
+            .effective_heartbeat_interval(default)
+            .map(non_negative_milliseconds)
+    }
+
+    fn lease_timeout_millis(&self) -> Option<u64> {
+        self.worker
+            .effective_lease_timeout(Some(signed_duration_from_millis(DEFAULT_LEASE_TIMEOUT)))
+            .map(non_negative_milliseconds)
     }
 
     async fn read_checkpoint(&self) -> Result<Checkpoint, SpiderError> {
@@ -612,17 +601,17 @@ impl Redis {
             return Ok(());
         };
         let keys = self.keys();
-        clear_worker_runtime_if_idle(connection, &keys, self.worker_id.as_str()).await?;
+        clear_worker_runtime_if_idle(connection, &keys, self.worker_id()).await?;
         guard.take();
         Ok(())
     }
 
     fn validate_lease_worker(&self, lease: &TaskLease) -> Result<(), SpiderError> {
-        if lease.worker_id() != self.worker_id {
+        if lease.worker_id() != self.worker_id() {
             return Err(SpiderError::scheduler(
                 crate::error::SchedulerError::LeaseWorkerMismatch {
                     lease_worker_id: lease.worker_id().to_string(),
-                    current_worker_id: self.worker_id.clone(),
+                    current_worker_id: self.worker_id().to_string(),
                 },
             ));
         }
@@ -683,7 +672,7 @@ impl Redis {
             connection,
             &keys.meta,
             META_LEASE_TIMEOUT,
-            self.lease_timeout,
+            self.lease_timeout_millis(),
         )
         .await?;
         sync_namespace_meta_field(
@@ -696,8 +685,8 @@ impl Redis {
         touch_worker_runtime(
             connection,
             &keys,
-            self.worker_id.as_str(),
-            self.lease_timeout,
+            self.worker_id(),
+            self.lease_timeout_millis(),
             self.heartbeat_interval_millis(),
         )
         .await
@@ -789,7 +778,7 @@ impl Redis {
             return Ok(());
         };
 
-        let Some(lease_timeout) = self.lease_timeout else {
+        let Some(lease_timeout) = self.lease_timeout_millis() else {
             return Ok(());
         };
 
@@ -862,10 +851,10 @@ impl Scheduler for Redis {
         let keys = self.keys();
         let now = now().to_string();
         let lease_timeout = self
-            .lease_timeout
+            .lease_timeout_millis()
             .map(|value| value.to_string())
             .unwrap_or_default();
-        let lease_id = next_lease_id(&self.worker_id);
+        let lease_id = next_lease_id(self.worker_id());
         let result: Option<Vec<String>> = scheduler_eval(
             connection,
             SCHEDULER_CLAIM_READY_SCRIPT,
@@ -884,7 +873,7 @@ impl Scheduler for Redis {
             &[
                 now.as_str(),
                 lease_timeout.as_str(),
-                self.worker_id.as_str(),
+                self.worker_id(),
                 lease_id.as_str(),
             ],
         )
@@ -903,7 +892,7 @@ impl Scheduler for Redis {
         let task: Task = serde_json::from_str(task_json).map_err(|error| {
             SpiderError::scheduler(format!("failed to decode redis scheduler task: {error}"))
         })?;
-        let lease = TaskLease::new(task.id.clone(), self.worker_id.clone(), lease_id);
+        let lease = TaskLease::new(task.id.clone(), self.worker_id().to_string(), lease_id);
 
         Ok(Some(ClaimedTask::new(task, lease)))
     }
@@ -1857,8 +1846,9 @@ mod tests {
     async fn redis_scheduler_reclaims_stale_inflight_after_lease_timeout() {
         let (url, _commands_rx, server_handle) = spawn_redis_server().await;
         let namespace = "lease_reclaim";
-        let first = Redis::new(format!("redis://{url}"), namespace)
-            .with_lease_timeout(SignedDuration::from_millis(20));
+        let first = Redis::new(format!("redis://{url}"), namespace).with_worker(
+            Worker::new("worker-a").with_lease_timeout(SignedDuration::from_millis(20)),
+        );
         first
             .enqueue(Task::new(Request::new("https://example.com/reclaim")))
             .await
@@ -1870,8 +1860,9 @@ mod tests {
         tokio::time::sleep(std::time::Duration::try_from(SignedDuration::from_millis(40)).unwrap())
             .await;
 
-        let second = Redis::new(format!("redis://{url}"), namespace)
-            .with_lease_timeout(SignedDuration::from_millis(20));
+        let second = Redis::new(format!("redis://{url}"), namespace).with_worker(
+            Worker::new("worker-b").with_lease_timeout(SignedDuration::from_millis(20)),
+        );
         let checkpoint = second.checkpoint().await.unwrap();
 
         assert_eq!(checkpoint.ready.len(), 1);
@@ -1918,10 +1909,11 @@ mod tests {
     async fn redis_scheduler_heartbeat_keeps_lease_active_past_initial_timeout() {
         let (url, _commands_rx, server_handle) = spawn_redis_server().await;
         let namespace = "heartbeat";
-        let first = Redis::new(format!("redis://{url}"), namespace)
-            .with_worker_id("worker-a")
-            .with_lease_timeout(SignedDuration::from_millis(20))
-            .with_heartbeat_interval(SignedDuration::from_millis(10));
+        let first = Redis::new(format!("redis://{url}"), namespace).with_worker(
+            Worker::new("worker-a")
+                .with_lease_timeout(SignedDuration::from_millis(20))
+                .with_heartbeat_interval(SignedDuration::from_millis(10)),
+        );
         first
             .enqueue(Task::new(Request::new("https://example.com/heartbeat")))
             .await
@@ -1935,9 +1927,9 @@ mod tests {
         tokio::time::sleep(std::time::Duration::try_from(SignedDuration::from_millis(10)).unwrap())
             .await;
 
-        let second = Redis::new(format!("redis://{url}"), namespace)
-            .with_worker_id("worker-b")
-            .with_lease_timeout(SignedDuration::from_millis(20));
+        let second = Redis::new(format!("redis://{url}"), namespace).with_worker(
+            Worker::new("worker-b").with_lease_timeout(SignedDuration::from_millis(20)),
+        );
         let checkpoint = second.checkpoint().await.unwrap();
 
         assert!(checkpoint.ready.is_empty());
@@ -1952,9 +1944,9 @@ mod tests {
     #[tokio::test]
     async fn redis_scheduler_snapshot_reports_current_namespace_state() {
         let (url, _commands_rx, server_handle) = spawn_redis_server().await;
-        let scheduler = Redis::new(format!("redis://{url}"), "snapshot")
-            .with_worker_id("worker-a")
-            .with_lease_timeout(SignedDuration::from_millis(50));
+        let scheduler = Redis::new(format!("redis://{url}"), "snapshot").with_worker(
+            Worker::new("worker-a").with_lease_timeout(SignedDuration::from_millis(50)),
+        );
         scheduler
             .enqueue(
                 Task::new(Request::new("https://example.com/ready"))
@@ -2033,9 +2025,9 @@ mod tests {
     async fn redis_scheduler_snapshot_tracks_reclaimed_totals() {
         let (url, _commands_rx, server_handle) = spawn_redis_server().await;
         let namespace = "snapshot_reclaim";
-        let first = Redis::new(format!("redis://{url}"), namespace)
-            .with_worker_id("worker-a")
-            .with_lease_timeout(SignedDuration::from_millis(20));
+        let first = Redis::new(format!("redis://{url}"), namespace).with_worker(
+            Worker::new("worker-a").with_lease_timeout(SignedDuration::from_millis(20)),
+        );
         first
             .enqueue(Task::new(Request::new("https://example.com/reclaim-total")))
             .await
@@ -2047,9 +2039,9 @@ mod tests {
         tokio::time::sleep(std::time::Duration::try_from(SignedDuration::from_millis(40)).unwrap())
             .await;
 
-        let second = Redis::new(format!("redis://{url}"), namespace)
-            .with_worker_id("worker-b")
-            .with_lease_timeout(SignedDuration::from_millis(20));
+        let second = Redis::new(format!("redis://{url}"), namespace).with_worker(
+            Worker::new("worker-b").with_lease_timeout(SignedDuration::from_millis(20)),
+        );
         let first_snapshot = second.snapshot().await.unwrap();
 
         assert_eq!(
@@ -2102,7 +2094,8 @@ mod tests {
     async fn redis_scheduler_close_cleans_idle_worker_runtime() {
         let (url, _commands_rx, server_handle) = spawn_redis_server().await;
         let namespace = "close_idle_worker";
-        let worker = Redis::new(format!("redis://{url}"), namespace).with_worker_id("worker-a");
+        let worker =
+            Redis::new(format!("redis://{url}"), namespace).with_worker(Worker::new("worker-a"));
         worker
             .enqueue(Task::with_delay(
                 Request::new("https://example.com/close-idle"),
@@ -2112,7 +2105,8 @@ mod tests {
             .unwrap();
         worker.close().await.unwrap();
 
-        let observer = Redis::new(format!("redis://{url}"), namespace).with_worker_id("observer");
+        let observer =
+            Redis::new(format!("redis://{url}"), namespace).with_worker(Worker::new("observer"));
         let snapshot = observer.snapshot().await.unwrap();
 
         assert_eq!(snapshot.scope, namespace);
@@ -2135,7 +2129,8 @@ mod tests {
     async fn redis_scheduler_close_keeps_worker_runtime_when_inflight_is_still_owned() {
         let (url, _commands_rx, server_handle) = spawn_redis_server().await;
         let namespace = "close_inflight_worker";
-        let worker = Redis::new(format!("redis://{url}"), namespace).with_worker_id("worker-a");
+        let worker =
+            Redis::new(format!("redis://{url}"), namespace).with_worker(Worker::new("worker-a"));
         worker
             .enqueue(Task::new(Request::new(
                 "https://example.com/close-inflight",
@@ -2145,7 +2140,8 @@ mod tests {
         let claimed = worker.take_ready().await.unwrap().unwrap();
         worker.close().await.unwrap();
 
-        let observer = Redis::new(format!("redis://{url}"), namespace).with_worker_id("observer");
+        let observer =
+            Redis::new(format!("redis://{url}"), namespace).with_worker(Worker::new("observer"));
         let snapshot = observer.snapshot().await.unwrap();
 
         assert_eq!(snapshot.scope, namespace);
@@ -2193,18 +2189,19 @@ mod tests {
         let (url, _commands_rx, server_handle) = spawn_redis_server().await;
         let redis_url = format!("redis://{url}");
 
-        let news = Redis::new(redis_url.clone(), "jobs:news")
-            .with_worker_id("news-worker")
-            .with_lease_timeout(SignedDuration::from_millis(50));
+        let news = Redis::new(redis_url.clone(), "jobs:news").with_worker(
+            Worker::new("news-worker").with_lease_timeout(SignedDuration::from_millis(50)),
+        );
         news.enqueue(Task::new(Request::new("https://example.com/news")))
             .await
             .unwrap();
         let claimed = news.take_ready().await.unwrap().unwrap();
 
-        let blog = Redis::new(redis_url.clone(), "jobs:blog")
-            .with_worker_id("blog-worker")
-            .with_lease_timeout(SignedDuration::from_millis(80))
-            .with_heartbeat_interval(SignedDuration::from_millis(20));
+        let blog = Redis::new(redis_url.clone(), "jobs:blog").with_worker(
+            Worker::new("blog-worker")
+                .with_lease_timeout(SignedDuration::from_millis(80))
+                .with_heartbeat_interval(SignedDuration::from_millis(20)),
+        );
         blog.enqueue(Task::with_delay(
             Request::new("https://example.com/blog"),
             500,
@@ -2344,9 +2341,9 @@ mod tests {
     async fn redis_scheduler_rejects_stale_or_foreign_lease_resolution() {
         let (url, _commands_rx, server_handle) = spawn_redis_server().await;
         let namespace = "ownership";
-        let first = Redis::new(format!("redis://{url}"), namespace)
-            .with_worker_id("worker-a")
-            .with_lease_timeout(SignedDuration::from_millis(20));
+        let first = Redis::new(format!("redis://{url}"), namespace).with_worker(
+            Worker::new("worker-a").with_lease_timeout(SignedDuration::from_millis(20)),
+        );
         first
             .enqueue(Task::new(Request::new("https://example.com/ownership")))
             .await
@@ -2354,9 +2351,9 @@ mod tests {
 
         let claimed = first.take_ready().await.unwrap().unwrap();
 
-        let second = Redis::new(format!("redis://{url}"), namespace)
-            .with_worker_id("worker-b")
-            .with_lease_timeout(SignedDuration::from_millis(20));
+        let second = Redis::new(format!("redis://{url}"), namespace).with_worker(
+            Worker::new("worker-b").with_lease_timeout(SignedDuration::from_millis(20)),
+        );
         let error = second.complete(&claimed.lease).await.unwrap_err();
         assert_eq!(
             error,
@@ -2390,9 +2387,9 @@ mod tests {
     async fn redis_scheduler_reports_stale_complete_for_same_worker_old_lease() {
         let (url, _commands_rx, server_handle) = spawn_redis_server().await;
         let namespace = "stale_complete";
-        let scheduler = Redis::new(format!("redis://{url}"), namespace)
-            .with_worker_id("worker-a")
-            .with_lease_timeout(SignedDuration::from_millis(20));
+        let scheduler = Redis::new(format!("redis://{url}"), namespace).with_worker(
+            Worker::new("worker-a").with_lease_timeout(SignedDuration::from_millis(20)),
+        );
         scheduler
             .enqueue(Task::new(Request::new(
                 "https://example.com/stale-complete",
@@ -2452,10 +2449,11 @@ mod tests {
     async fn redis_scheduler_reports_stale_heartbeat_for_same_worker_old_lease() {
         let (url, _commands_rx, server_handle) = spawn_redis_server().await;
         let namespace = "stale_heartbeat";
-        let scheduler = Redis::new(format!("redis://{url}"), namespace)
-            .with_worker_id("worker-a")
-            .with_lease_timeout(SignedDuration::from_millis(20))
-            .with_heartbeat_interval(SignedDuration::from_millis(10));
+        let scheduler = Redis::new(format!("redis://{url}"), namespace).with_worker(
+            Worker::new("worker-a")
+                .with_lease_timeout(SignedDuration::from_millis(20))
+                .with_heartbeat_interval(SignedDuration::from_millis(10)),
+        );
         scheduler
             .enqueue(Task::new(Request::new(
                 "https://example.com/stale-heartbeat",
@@ -2501,7 +2499,7 @@ mod tests {
 
     #[tokio::test]
     async fn redis_scheduler_rejects_empty_worker_id() {
-        let scheduler = Redis::new("redis://127.0.0.1:6379", "news").with_worker_id("  ");
+        let scheduler = Redis::new("redis://127.0.0.1:6379", "news").with_worker(Worker::new("  "));
 
         let error = scheduler
             .enqueue(Task::new(Request::new("https://example.com")))

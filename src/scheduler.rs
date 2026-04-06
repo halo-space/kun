@@ -14,9 +14,11 @@ pub mod redis;
 pub mod snapshot;
 pub mod task;
 pub mod traits;
+pub mod worker;
 
 pub use memory::Memory;
 pub use redis::Redis;
 pub use snapshot::{InflightTaskSnapshot, Overview, Snapshot, WorkerSnapshot};
 pub use task::{ClaimedTask, Task, TaskId, TaskLease};
 pub use traits::Scheduler;
+pub use worker::Worker;
