@@ -1,4 +1,6 @@
 use crate::error::SpiderError;
+use crate::scheduler::checkpoint::{Checkpoint, Counts};
+use crate::scheduler::snapshot::Snapshot;
 use crate::scheduler::{ClaimedTask, Task, TaskLease};
 use jiff::SignedDuration;
 
@@ -7,9 +9,52 @@ use jiff::SignedDuration;
 ///
 /// A scheduler is responsible for moving tasks through the current runtime
 /// state buckets: `ready`, `delayed`, and `inflight`.
+///
+/// It also exposes a unified read surface for scheduler state:
+/// `checkpoint()`, `counts()`, `snapshot()`, `scopes()`, and `snapshots()`.
 pub trait Scheduler: Send + Sync {
     /// Adds a task into the scheduler buckets.
     async fn enqueue(&self, task: Task) -> Result<(), SpiderError>;
+
+    /// Exports the current scheduler checkpoint.
+    async fn checkpoint(&self) -> Result<Checkpoint, SpiderError>;
+
+    /// Returns the current number of tasks tracked in each state bucket.
+    async fn counts(&self) -> Result<Counts, SpiderError>;
+
+    /// Reads one runtime snapshot for the current scheduler scope.
+    async fn snapshot(&self) -> Result<Snapshot, SpiderError>;
+
+    /// Lists visible scheduler scopes for the current backend.
+    async fn scopes(&self) -> Result<Vec<String>, SpiderError> {
+        self.scopes_with_prefix("").await
+    }
+
+    /// Lists visible scheduler scopes whose names start with `prefix`.
+    async fn scopes_with_prefix(&self, prefix: &str) -> Result<Vec<String>, SpiderError> {
+        let snapshot = self.snapshot().await?;
+        if prefix.is_empty() || snapshot.scope.starts_with(prefix) {
+            Ok(vec![snapshot.scope])
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Reads runtime snapshots for every visible scheduler scope.
+    async fn snapshots(&self) -> Result<Vec<Snapshot>, SpiderError> {
+        self.snapshots_with_prefix("").await
+    }
+
+    /// Reads runtime snapshots for every visible scope whose name starts with
+    /// `prefix`.
+    async fn snapshots_with_prefix(&self, prefix: &str) -> Result<Vec<Snapshot>, SpiderError> {
+        let snapshot = self.snapshot().await?;
+        if prefix.is_empty() || snapshot.scope.starts_with(prefix) {
+            Ok(vec![snapshot])
+        } else {
+            Ok(Vec::new())
+        }
+    }
 
     /// Takes one ready task for execution and moves it into `inflight`.
     ///

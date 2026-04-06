@@ -31,6 +31,18 @@ impl Scheduler for RecordingScheduler {
         self.inner.enqueue(task).await
     }
 
+    async fn checkpoint(&self) -> Result<Checkpoint, SpiderError> {
+        Ok(self.inner.checkpoint())
+    }
+
+    async fn counts(&self) -> Result<scheduler::checkpoint::Counts, SpiderError> {
+        Ok(self.inner.counts())
+    }
+
+    async fn snapshot(&self) -> Result<scheduler::Snapshot, SpiderError> {
+        self.inner.snapshot().await
+    }
+
     async fn take_ready(&self) -> Result<Option<scheduler::ClaimedTask>, SpiderError> {
         let task = self.inner.take_ready().await?;
         if let Some(task) = &task {
@@ -152,10 +164,10 @@ async fn redis_snapshot_demo() -> Result<(), SpiderError> {
         .with_worker_id("example-observer");
     let snapshot = scheduler.snapshot().await?;
 
-    println!("namespace snapshot counts: {:?}", snapshot.counts);
-    println!("namespace snapshot workers: {:?}", snapshot.worker_ids);
+    println!("scope snapshot counts: {:?}", snapshot.counts);
+    println!("scope snapshot workers: {:?}", snapshot.worker_ids);
     println!(
-        "namespace snapshot reclaimed_total={}, reclaimed_in_refresh={}",
+        "scope snapshot reclaimed_total={}, reclaimed_in_refresh={}",
         snapshot.reclaimed_total, snapshot.reclaimed_in_refresh
     );
 
@@ -173,18 +185,23 @@ async fn redis_namespace_overview_demo() -> Result<(), SpiderError> {
         return Ok(());
     };
 
-    let namespaces =
-        scheduler::Redis::namespaces_with_prefix(url.clone(), "examples:custom-scheduler:").await?;
-    println!("registered namespaces: {:?}", namespaces);
+    let scheduler =
+        scheduler::Redis::new(url, "examples:custom-scheduler:ops").with_worker_id("example-ops");
+    let scopes = scheduler
+        .scopes_with_prefix("examples:custom-scheduler:")
+        .await?;
+    println!("registered scopes: {:?}", scopes);
 
-    let snapshots =
-        scheduler::Redis::namespace_snapshots_with_prefix(url, "examples:custom-scheduler:")
-            .await?;
+    let snapshots = scheduler
+        .snapshots_with_prefix("examples:custom-scheduler:")
+        .await?;
     for snapshot in snapshots {
-        println!("namespace: {}", snapshot.namespace);
+        println!("scope: {}", snapshot.scope);
         println!("counts: {:?}", snapshot.counts);
         println!("workers: {:?}", snapshot.worker_ids);
     }
+
+    scheduler.close().await?;
 
     Ok(())
 }

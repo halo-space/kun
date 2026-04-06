@@ -2,7 +2,7 @@ use crate::error::SpiderError;
 use crate::scheduler::checkpoint::File;
 use crate::scheduler::checkpoint::{Checkpoint, Counts, Persist};
 use crate::scheduler::memory::Memory as CoreMemory;
-use crate::scheduler::{ClaimedTask, Scheduler, Task, TaskLease};
+use crate::scheduler::{ClaimedTask, Scheduler, Snapshot, Task, TaskLease};
 
 /// Memory scheduler with automatic checkpoint persistence.
 ///
@@ -61,6 +61,18 @@ where
     async fn enqueue(&self, task: Task) -> Result<(), SpiderError> {
         self.scheduler.enqueue(task).await?;
         self.save_checkpoint().await
+    }
+
+    async fn checkpoint(&self) -> Result<Checkpoint, SpiderError> {
+        Ok(Memory::<P>::checkpoint(self))
+    }
+
+    async fn counts(&self) -> Result<Counts, SpiderError> {
+        Ok(Memory::<P>::counts(self))
+    }
+
+    async fn snapshot(&self) -> Result<Snapshot, SpiderError> {
+        self.scheduler.snapshot().await
     }
 
     async fn take_ready(&self) -> Result<Option<ClaimedTask>, SpiderError> {

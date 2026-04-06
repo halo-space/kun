@@ -11,10 +11,12 @@
 pub mod checkpoint;
 pub mod memory;
 pub mod redis;
+pub mod snapshot;
 pub mod task;
 pub mod traits;
 
 pub use memory::Memory;
-pub use redis::{InflightTaskSnapshot, NamespaceSnapshot, Redis, WorkerSnapshot};
+pub use redis::Redis;
+pub use snapshot::{InflightTaskSnapshot, Snapshot, WorkerSnapshot};
 pub use task::{ClaimedTask, Task, TaskId, TaskLease};
 pub use traits::Scheduler;

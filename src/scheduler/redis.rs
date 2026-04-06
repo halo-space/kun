@@ -1,6 +1,7 @@
 use crate::error::SpiderError;
 use crate::redis::{Connection, ErrorContext, connect, query, validate_url};
 use crate::scheduler::checkpoint::{Checkpoint, Counts};
+use crate::scheduler::snapshot::{InflightTaskSnapshot, Snapshot, WorkerSnapshot};
 use crate::scheduler::{ClaimedTask, Scheduler, Task, TaskId, TaskLease};
 use jiff::{SignedDuration, Timestamp};
 use redis::FromRedisValue;
@@ -381,73 +382,6 @@ pub struct Redis {
     connection: Arc<Mutex<Option<Connection>>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NamespaceSnapshot {
-    /// The Redis namespace this runtime snapshot was read from.
-    pub namespace: String,
-    /// Instantaneous ready / delayed / inflight counts after any reclaim done
-    /// by this snapshot refresh.
-    pub counts: Counts,
-    /// Unique worker ids that currently own at least one inflight task.
-    pub worker_ids: Vec<String>,
-    /// Number of active inflight lease tokens currently tracked.
-    pub active_lease_count: usize,
-    /// Number of inflight deadline entries currently tracked.
-    pub deadline_count: usize,
-    /// Cumulative reclaimed stale inflight task count for this namespace.
-    pub reclaimed_total: u64,
-    /// Number of stale inflight tasks reclaimed during this snapshot refresh.
-    pub reclaimed_in_refresh: u64,
-    /// Per-task inflight runtime details for the current namespace.
-    pub inflight_tasks: Vec<InflightTaskSnapshot>,
-    /// Per-worker runtime details currently observed for this namespace.
-    pub workers: Vec<WorkerSnapshot>,
-    pub lease_timeout: Option<SignedDuration>,
-    pub heartbeat_interval: Option<SignedDuration>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InflightTaskSnapshot {
-    /// Stable scheduler task identity.
-    pub task_id: TaskId,
-    /// Request URL currently attached to this inflight task.
-    pub url: String,
-    /// Current worker ownership recorded for this inflight task.
-    pub worker_id: Option<String>,
-    /// Current lease token recorded for this inflight task.
-    pub lease_id: Option<String>,
-    /// Current runtime deadline recorded for this inflight task.
-    pub deadline: Option<Timestamp>,
-    /// Scheduler priority attached to this task.
-    pub priority: i32,
-    /// Scheduler crawl depth attached to this task.
-    pub depth: u32,
-    /// Delayed execution timestamp carried by this task, if any.
-    pub ready_at: Option<Timestamp>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorkerSnapshot {
-    /// Logical worker id currently registered under this namespace.
-    pub worker_id: String,
-    /// Most recent runtime touch observed for this worker.
-    pub last_seen: Option<Timestamp>,
-    /// Whether this worker has exceeded its configured lease timeout window.
-    pub is_stale: bool,
-    /// Number of inflight tasks currently owned by this worker.
-    pub inflight_count: usize,
-    /// Number of active lease tokens currently owned by this worker.
-    pub active_lease_count: usize,
-    /// Stable task ids currently owned by this worker.
-    pub inflight_task_ids: Vec<TaskId>,
-    /// Earliest inflight deadline currently owned by this worker.
-    pub next_deadline: Option<Timestamp>,
-    /// Lease timeout last reported by this worker.
-    pub lease_timeout: Option<SignedDuration>,
-    /// Heartbeat interval last reported by this worker.
-    pub heartbeat_interval: Option<SignedDuration>,
-}
-
 impl Redis {
     pub fn new(url: impl Into<String>, namespace: impl Into<String>) -> Self {
         Self {
@@ -465,6 +399,10 @@ impl Redis {
     }
 
     pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
+    pub fn scope(&self) -> &str {
         &self.namespace
     }
 
@@ -498,101 +436,46 @@ impl Redis {
         self
     }
 
-    /// Lists durable scheduler namespaces already observed in this Redis
-    /// database.
-    pub async fn namespaces(url: impl Into<String>) -> Result<Vec<String>, SpiderError> {
-        Self::namespaces_with_prefix(url, "").await
-    }
-
-    /// Lists durable scheduler namespaces that start with `prefix`.
-    pub async fn namespaces_with_prefix(
-        url: impl Into<String>,
-        prefix: impl AsRef<str>,
-    ) -> Result<Vec<String>, SpiderError> {
-        let url = url.into();
-        let mut connection = connect(&url, "redis scheduler", ErrorContext::Scheduler).await?;
-        load_registry_namespaces(&mut connection, prefix.as_ref()).await
-    }
-
-    /// Reads namespace-level snapshots for every registered durable scheduler
-    /// namespace in this Redis database.
-    pub async fn namespace_snapshots(
-        url: impl Into<String>,
-    ) -> Result<Vec<NamespaceSnapshot>, SpiderError> {
-        Self::namespace_snapshots_with_prefix(url, "").await
-    }
-
-    /// Reads namespace-level snapshots for every registered durable scheduler
-    /// namespace whose name starts with `prefix`.
-    pub async fn namespace_snapshots_with_prefix(
-        url: impl Into<String>,
-        prefix: impl AsRef<str>,
-    ) -> Result<Vec<NamespaceSnapshot>, SpiderError> {
-        let url = url.into();
-        let mut connection = connect(&url, "redis scheduler", ErrorContext::Scheduler).await?;
-        let namespaces = load_registry_namespaces(&mut connection, prefix.as_ref()).await?;
-        let mut snapshots = Vec::with_capacity(namespaces.len());
-        for namespace in namespaces {
-            snapshots.push(read_namespace_snapshot(&mut connection, &namespace).await?);
-        }
-        Ok(snapshots)
-    }
-
     pub async fn checkpoint(&self) -> Result<Checkpoint, SpiderError> {
-        let mut guard = self.connection().await?;
-        let connection = self.connection_mut(&mut guard)?;
-        self.sync_namespace_metadata(connection).await?;
-        let _ = self.reclaim_expired_inflight(connection).await?;
-        let keys = self.keys();
-
-        let ready_tasks = self.load_ready_tasks(connection).await?;
-        let delayed_ids: Vec<String> = scheduler_query(
-            connection,
-            redis_command("ZRANGE", [&keys.delayed, "0", "-1"]),
-        )
-        .await?;
-        let delayed = self.load_tasks(connection, &delayed_ids).await?;
-
-        let mut inflight_ids: Vec<String> =
-            scheduler_query(connection, redis_command("SMEMBERS", [&keys.inflight])).await?;
-        inflight_ids.sort();
-        let inflight = self.load_tasks(connection, &inflight_ids).await?;
-
-        Ok(Checkpoint {
-            ready: ready_tasks.into_iter().map(|(task, _)| task).collect(),
-            delayed,
-            inflight,
-        })
+        self.read_checkpoint().await
     }
 
     pub async fn counts(&self) -> Result<Counts, SpiderError> {
-        let mut guard = self.connection().await?;
-        let connection = self.connection_mut(&mut guard)?;
-        self.sync_namespace_metadata(connection).await?;
-        let _ = self.reclaim_expired_inflight(connection).await?;
-        let keys = self.keys();
-
-        let ready: usize =
-            scheduler_query(connection, redis_command("SCARD", [&keys.ready])).await?;
-        let delayed: usize =
-            scheduler_query(connection, redis_command("ZCARD", [&keys.delayed])).await?;
-        let inflight: usize =
-            scheduler_query(connection, redis_command("SCARD", [&keys.inflight])).await?;
-
-        Ok(Counts {
-            ready,
-            delayed,
-            inflight,
-        })
+        self.read_counts().await
     }
 
-    /// Reads one namespace-level runtime snapshot for this Redis durable
+    /// Reads one scope-level runtime snapshot for this Redis durable
     /// scheduler.
-    pub async fn snapshot(&self) -> Result<NamespaceSnapshot, SpiderError> {
-        let mut guard = self.connection().await?;
-        let connection = self.connection_mut(&mut guard)?;
-        self.sync_namespace_metadata(connection).await?;
-        read_namespace_snapshot(connection, &self.namespace).await
+    pub async fn snapshot(&self) -> Result<Snapshot, SpiderError> {
+        self.read_snapshot().await
+    }
+
+    /// Lists scheduler scopes already observed in the current Redis backend.
+    pub async fn scopes(&self) -> Result<Vec<String>, SpiderError> {
+        self.read_scopes_with_prefix("").await
+    }
+
+    /// Lists scheduler scopes whose names start with `prefix`.
+    pub async fn scopes_with_prefix(
+        &self,
+        prefix: impl AsRef<str>,
+    ) -> Result<Vec<String>, SpiderError> {
+        self.read_scopes_with_prefix(prefix.as_ref()).await
+    }
+
+    /// Reads scope-level snapshots for every visible scope in the current
+    /// Redis backend.
+    pub async fn snapshots(&self) -> Result<Vec<Snapshot>, SpiderError> {
+        self.read_snapshots_with_prefix("").await
+    }
+
+    /// Reads scope-level snapshots for every visible scope whose name starts
+    /// with `prefix`.
+    pub async fn snapshots_with_prefix(
+        &self,
+        prefix: impl AsRef<str>,
+    ) -> Result<Vec<Snapshot>, SpiderError> {
+        self.read_snapshots_with_prefix(prefix.as_ref()).await
     }
 
     pub async fn close(&self) -> Result<(), SpiderError> {
@@ -653,6 +536,78 @@ impl Redis {
             self.heartbeat_interval
                 .unwrap_or_else(|| default_heartbeat_interval(lease_timeout)),
         )
+    }
+
+    async fn read_checkpoint(&self) -> Result<Checkpoint, SpiderError> {
+        let mut guard = self.connection().await?;
+        let connection = self.connection_mut(&mut guard)?;
+        self.sync_namespace_metadata(connection).await?;
+        let _ = self.reclaim_expired_inflight(connection).await?;
+        let keys = self.keys();
+
+        let ready_tasks = self.load_ready_tasks(connection).await?;
+        let delayed_ids: Vec<String> = scheduler_query(
+            connection,
+            redis_command("ZRANGE", [&keys.delayed, "0", "-1"]),
+        )
+        .await?;
+        let delayed = self.load_tasks(connection, &delayed_ids).await?;
+
+        let mut inflight_ids: Vec<String> =
+            scheduler_query(connection, redis_command("SMEMBERS", [&keys.inflight])).await?;
+        inflight_ids.sort();
+        let inflight = self.load_tasks(connection, &inflight_ids).await?;
+
+        Ok(Checkpoint {
+            ready: ready_tasks.into_iter().map(|(task, _)| task).collect(),
+            delayed,
+            inflight,
+        })
+    }
+
+    async fn read_counts(&self) -> Result<Counts, SpiderError> {
+        let mut guard = self.connection().await?;
+        let connection = self.connection_mut(&mut guard)?;
+        self.sync_namespace_metadata(connection).await?;
+        let _ = self.reclaim_expired_inflight(connection).await?;
+        let keys = self.keys();
+
+        let ready: usize =
+            scheduler_query(connection, redis_command("SCARD", [&keys.ready])).await?;
+        let delayed: usize =
+            scheduler_query(connection, redis_command("ZCARD", [&keys.delayed])).await?;
+        let inflight: usize =
+            scheduler_query(connection, redis_command("SCARD", [&keys.inflight])).await?;
+
+        Ok(Counts {
+            ready,
+            delayed,
+            inflight,
+        })
+    }
+
+    async fn read_snapshot(&self) -> Result<Snapshot, SpiderError> {
+        let mut guard = self.connection().await?;
+        let connection = self.connection_mut(&mut guard)?;
+        self.sync_namespace_metadata(connection).await?;
+        read_scope_snapshot(connection, self.scope()).await
+    }
+
+    async fn read_scopes_with_prefix(&self, prefix: &str) -> Result<Vec<String>, SpiderError> {
+        let mut guard = self.connection().await?;
+        let connection = self.connection_mut(&mut guard)?;
+        load_registry_namespaces(connection, prefix).await
+    }
+
+    async fn read_snapshots_with_prefix(&self, prefix: &str) -> Result<Vec<Snapshot>, SpiderError> {
+        let mut guard = self.connection().await?;
+        let connection = self.connection_mut(&mut guard)?;
+        let scopes = load_registry_namespaces(connection, prefix).await?;
+        let mut snapshots = Vec::with_capacity(scopes.len());
+        for scope in scopes {
+            snapshots.push(read_scope_snapshot(connection, &scope).await?);
+        }
+        Ok(snapshots)
     }
 
     fn validate_lease_worker(&self, lease: &TaskLease) -> Result<(), SpiderError> {
@@ -863,6 +818,34 @@ impl Scheduler for Redis {
         let connection = self.connection_mut(&mut guard)?;
         self.sync_runtime_metadata(connection).await?;
         self.enqueue_internal(connection, task).await
+    }
+
+    async fn checkpoint(&self) -> Result<Checkpoint, SpiderError> {
+        self.read_checkpoint().await
+    }
+
+    async fn counts(&self) -> Result<Counts, SpiderError> {
+        self.read_counts().await
+    }
+
+    async fn snapshot(&self) -> Result<Snapshot, SpiderError> {
+        self.read_snapshot().await
+    }
+
+    async fn scopes(&self) -> Result<Vec<String>, SpiderError> {
+        self.read_scopes_with_prefix("").await
+    }
+
+    async fn scopes_with_prefix(&self, prefix: &str) -> Result<Vec<String>, SpiderError> {
+        self.read_scopes_with_prefix(prefix).await
+    }
+
+    async fn snapshots(&self) -> Result<Vec<Snapshot>, SpiderError> {
+        self.read_snapshots_with_prefix("").await
+    }
+
+    async fn snapshots_with_prefix(&self, prefix: &str) -> Result<Vec<Snapshot>, SpiderError> {
+        self.read_snapshots_with_prefix(prefix).await
     }
 
     async fn take_ready(&self) -> Result<Option<ClaimedTask>, SpiderError> {
@@ -1524,10 +1507,10 @@ async fn load_worker_snapshots(
     Ok(snapshots)
 }
 
-async fn read_namespace_snapshot(
+async fn read_scope_snapshot(
     connection: &mut Connection,
     namespace: &str,
-) -> Result<NamespaceSnapshot, SpiderError> {
+) -> Result<Snapshot, SpiderError> {
     let keys = Keys::for_namespace(namespace);
     let meta = load_namespace_meta(connection, namespace).await?;
     let reclaimed_in_refresh = reclaim_expired_inflight_for_keys(connection, &keys).await?;
@@ -1559,8 +1542,8 @@ async fn read_namespace_snapshot(
         }
     }
 
-    Ok(NamespaceSnapshot {
-        namespace: namespace.to_string(),
+    Ok(Snapshot {
+        scope: namespace.to_string(),
         counts: Counts {
             ready,
             delayed,
@@ -1947,7 +1930,7 @@ mod tests {
         let claimed = scheduler.take_ready().await.unwrap().unwrap();
         let snapshot = scheduler.snapshot().await.unwrap();
 
-        assert_eq!(snapshot.namespace, "snapshot");
+        assert_eq!(snapshot.scope, "snapshot");
         assert_eq!(
             snapshot.counts,
             Counts {
@@ -2084,11 +2067,9 @@ mod tests {
         blog.counts().await.unwrap();
         scratch.counts().await.unwrap();
 
-        let namespaces = Redis::namespaces_with_prefix(redis_url, "jobs:")
-            .await
-            .unwrap();
+        let scopes = news.scopes_with_prefix("jobs:").await.unwrap();
         assert_eq!(
-            namespaces,
+            scopes,
             vec!["jobs:blog".to_string(), "jobs:news".to_string()]
         );
 
@@ -2122,14 +2103,12 @@ mod tests {
         .await
         .unwrap();
 
-        let snapshots = Redis::namespace_snapshots_with_prefix(redis_url, "jobs:")
-            .await
-            .unwrap();
+        let snapshots = news.snapshots_with_prefix("jobs:").await.unwrap();
         assert_eq!(snapshots.len(), 2);
 
         let news_snapshot = snapshots
             .iter()
-            .find(|snapshot| snapshot.namespace == "jobs:news")
+            .find(|snapshot| snapshot.scope == "jobs:news")
             .unwrap();
         assert_eq!(
             news_snapshot.counts,
@@ -2167,7 +2146,7 @@ mod tests {
 
         let blog_snapshot = snapshots
             .iter()
-            .find(|snapshot| snapshot.namespace == "jobs:blog")
+            .find(|snapshot| snapshot.scope == "jobs:blog")
             .unwrap();
         assert_eq!(
             blog_snapshot.counts,

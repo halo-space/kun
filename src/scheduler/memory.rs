@@ -1,12 +1,15 @@
 use crate::error::SpiderError;
 use crate::scheduler::checkpoint::{Checkpoint, Counts};
+use crate::scheduler::snapshot::{InflightTaskSnapshot, Snapshot};
 use crate::scheduler::{ClaimedTask, Scheduler, Task, TaskLease};
+use jiff::Timestamp;
 use std::cmp::Ordering;
 use std::collections::VecDeque;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
-#[derive(Default)]
 pub struct Memory {
+    scope: String,
     state: Mutex<State>,
 }
 
@@ -17,10 +20,29 @@ struct State {
     inflight: Vec<Task>,
 }
 
+static NEXT_MEMORY_SCOPE: AtomicU64 = AtomicU64::new(1);
+
 impl Memory {
+    pub fn new() -> Self {
+        Self {
+            scope: next_memory_scope(),
+            state: Mutex::new(State::default()),
+        }
+    }
+
+    pub fn scope(&self) -> &str {
+        &self.scope
+    }
+
+    pub fn with_scope(mut self, scope: impl Into<String>) -> Self {
+        self.scope = scope.into();
+        self
+    }
+
     /// Restores a memory scheduler from an existing checkpoint.
     pub fn from_checkpoint(checkpoint: Checkpoint) -> Self {
         Self {
+            scope: next_memory_scope(),
             state: Mutex::new(State {
                 ready: VecDeque::from(checkpoint.ready),
                 delayed: checkpoint.delayed,
@@ -53,6 +75,54 @@ impl Memory {
             delayed: state.delayed.len(),
             inflight: state.inflight.len(),
         }
+    }
+
+    fn build_snapshot(&self) -> Result<Snapshot, SpiderError> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut inflight_tasks = Vec::with_capacity(state.inflight.len());
+        for task in &state.inflight {
+            let ready_at = task
+                .ready_at
+                .map(|value| ready_at_timestamp(self.scope.as_str(), task.id.as_str(), value))
+                .transpose()?;
+            inflight_tasks.push(InflightTaskSnapshot {
+                task_id: task.id.clone(),
+                url: task.request.url.clone(),
+                worker_id: None,
+                lease_id: None,
+                deadline: None,
+                priority: task.priority,
+                depth: task.depth,
+                ready_at,
+            });
+        }
+
+        Ok(Snapshot {
+            scope: self.scope.clone(),
+            counts: Counts {
+                ready: state.ready.len(),
+                delayed: state.delayed.len(),
+                inflight: state.inflight.len(),
+            },
+            worker_ids: Vec::new(),
+            active_lease_count: 0,
+            deadline_count: 0,
+            reclaimed_total: 0,
+            reclaimed_in_refresh: 0,
+            inflight_tasks,
+            workers: Vec::new(),
+            lease_timeout: None,
+            heartbeat_interval: None,
+        })
+    }
+}
+
+impl Default for Memory {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -96,6 +166,18 @@ impl Scheduler for Memory {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.push_task(task);
         Ok(())
+    }
+
+    async fn checkpoint(&self) -> Result<Checkpoint, SpiderError> {
+        Ok(Memory::checkpoint(self))
+    }
+
+    async fn counts(&self) -> Result<Counts, SpiderError> {
+        Ok(Memory::counts(self))
+    }
+
+    async fn snapshot(&self) -> Result<Snapshot, SpiderError> {
+        self.build_snapshot()
     }
 
     async fn take_ready(&self) -> Result<Option<ClaimedTask>, SpiderError> {
@@ -153,6 +235,27 @@ fn ready_ordering(left: &Task, right: &Task) -> Ordering {
         .priority
         .cmp(&left.priority)
         .then_with(|| left.depth.cmp(&right.depth))
+}
+
+fn next_memory_scope() -> String {
+    format!(
+        "memory:{}:{}",
+        std::process::id(),
+        NEXT_MEMORY_SCOPE.fetch_add(1, AtomicOrdering::Relaxed)
+    )
+}
+
+fn ready_at_timestamp(scope: &str, task_id: &str, millis: u64) -> Result<Timestamp, SpiderError> {
+    let millis = i64::try_from(millis).map_err(|_| {
+        SpiderError::scheduler(format!(
+            "memory scheduler snapshot `ready_at` for scope `{scope}` task `{task_id}` exceeds i64 millisecond range"
+        ))
+    })?;
+    Timestamp::from_millisecond(millis).map_err(|error| {
+        SpiderError::scheduler(format!(
+            "memory scheduler snapshot `ready_at` for scope `{scope}` task `{task_id}` is invalid: {error}"
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -403,6 +506,68 @@ mod tests {
         assert_eq!(counts.delayed, 1);
         assert_eq!(counts.inflight, 1);
         assert_eq!(counts.total(), 3);
+    }
+
+    #[test]
+    fn memory_scheduler_snapshot_uses_unified_scheduler_shape() {
+        let scheduler = Memory::default().with_scope("memory:demo");
+        block_on(
+            scheduler.enqueue(
+                Task::new(Request::new("https://example.com/inflight"))
+                    .with_priority(3)
+                    .with_depth(1),
+            ),
+        )
+        .unwrap();
+        let claimed = block_on(scheduler.take_ready()).unwrap().unwrap();
+
+        let snapshot = block_on(scheduler.snapshot()).unwrap();
+
+        assert_eq!(snapshot.scope, "memory:demo");
+        assert_eq!(
+            snapshot.counts,
+            Counts {
+                ready: 0,
+                delayed: 0,
+                inflight: 1,
+            }
+        );
+        assert!(snapshot.worker_ids.is_empty());
+        assert_eq!(snapshot.active_lease_count, 0);
+        assert_eq!(snapshot.deadline_count, 0);
+        assert_eq!(snapshot.reclaimed_total, 0);
+        assert_eq!(snapshot.reclaimed_in_refresh, 0);
+        assert_eq!(snapshot.workers.len(), 0);
+        assert_eq!(snapshot.inflight_tasks.len(), 1);
+        let inflight = &snapshot.inflight_tasks[0];
+        assert_eq!(inflight.task_id, claimed.task.id);
+        assert_eq!(inflight.url, "https://example.com/inflight");
+        assert_eq!(inflight.worker_id, None);
+        assert_eq!(inflight.lease_id, None);
+        assert_eq!(inflight.deadline, None);
+        assert_eq!(inflight.priority, 3);
+        assert_eq!(inflight.depth, 1);
+    }
+
+    #[test]
+    fn memory_scheduler_scopes_and_snapshots_stay_uniform() {
+        let scheduler = Memory::default().with_scope("jobs:memory");
+
+        let scopes = block_on(scheduler.scopes()).unwrap();
+        assert_eq!(scopes, vec!["jobs:memory".to_string()]);
+        let filtered_scopes = block_on(scheduler.scopes_with_prefix("jobs:")).unwrap();
+        assert_eq!(filtered_scopes, vec!["jobs:memory".to_string()]);
+        let filtered_empty = block_on(scheduler.scopes_with_prefix("other:")).unwrap();
+        assert!(filtered_empty.is_empty());
+
+        let snapshots = block_on(scheduler.snapshots()).unwrap();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].scope, "jobs:memory");
+        let filtered_snapshots = block_on(scheduler.snapshots_with_prefix("jobs:")).unwrap();
+        assert_eq!(filtered_snapshots.len(), 1);
+        assert_eq!(filtered_snapshots[0].scope, "jobs:memory");
+        let no_snapshots = block_on(scheduler.snapshots_with_prefix("other:")).unwrap();
+        assert!(no_snapshots.is_empty());
     }
 
     fn block_on<F: Future>(future: F) -> F::Output {

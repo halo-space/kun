@@ -5,6 +5,8 @@
 只要某个 `scheduler::Redis` 真正参与过 enqueue / claim / snapshot / counts 这类访问，
 它的 namespace 就会自动登记到同一个 Redis 里的 durable scheduler registry。
 
+在统一 scheduler 抽象里，这里的 Redis `namespace` 就是一个 `scope`。
+
 最小可以这样理解：
 
 - `namespace`
@@ -54,9 +56,9 @@ let worker_b = scheduler::Redis::new("redis://127.0.0.1:6379", "jobs:news")
 
 这样两个 worker 会从同一个任务池里 claim task，但不会重复 claim 同一条 ready task。
 
-## 读取 namespace 运行时快照
+## 读取 scope 运行时快照
 
-如果你想直接看某个 namespace 当前的 durable scheduler 状态，可以调用
+如果你想直接看某个 scope 当前的 durable scheduler 状态，可以调用
 `scheduler::Redis::snapshot()`：
 
 ```rust
@@ -103,20 +105,21 @@ for task in &snapshot.inflight_tasks {
 
 ## 跨 job 运维怎么读
 
-如果同一个 Redis 里跑了多个 namespace，可以先按前缀发现它们，再批量读取各自概览：
+如果同一个 Redis 里跑了多个 scope，可以先按前缀发现它们，再批量读取各自概览：
 
 ```rust
 use halo_spider::scheduler;
 
-let namespaces =
-    scheduler::Redis::namespaces_with_prefix("redis://127.0.0.1:6379", "jobs:").await?;
-println!("registered namespaces: {:?}", namespaces);
+let scheduler = scheduler::Redis::new("redis://127.0.0.1:6379", "jobs:ops")
+    .with_worker_id("ops-reader");
 
-let snapshots =
-    scheduler::Redis::namespace_snapshots_with_prefix("redis://127.0.0.1:6379", "jobs:").await?;
+let scopes = scheduler.scopes_with_prefix("jobs:").await?;
+println!("registered scopes: {:?}", scopes);
+
+let snapshots = scheduler.snapshots_with_prefix("jobs:").await?;
 
 for snapshot in snapshots {
-    println!("namespace: {}", snapshot.namespace);
+    println!("scope: {}", snapshot.scope);
     println!("counts: {:?}", snapshot.counts);
     println!("workers: {:?}", snapshot.worker_ids);
     println!("reclaimed_total: {}", snapshot.reclaimed_total);
@@ -141,9 +144,9 @@ for snapshot in snapshots {
 
 这层边界也要明确：
 
-- `namespaces_with_prefix(...)` / `namespace_snapshots_with_prefix(...)` 是 Redis durable scheduler 的运维读入口
-- 它们不会改变共享 `scheduler::Scheduler` trait
-- `namespace_snapshots_with_prefix(...)` 读取时会顺带刷新各 namespace 的 stale reclaim，所以它看到的是“这次读取后”的即时状态
+- `scopes_with_prefix(...)` / `snapshots_with_prefix(...)` 现在属于统一的 `scheduler::Scheduler` 读能力
+- 对 `scheduler::Redis` 来说，它们会读 Redis 里共享 registry 下的多个 scope；对本地 `scheduler::Memory`，默认只会返回当前 scope
+- `snapshots_with_prefix(...)` 读取时会顺带刷新各 scope 的 stale reclaim，所以它看到的是“这次读取后”的即时状态
 
 ## 怎么看 worker 运行态
 
