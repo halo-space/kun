@@ -375,17 +375,20 @@ fn handle_eval_command(
     if script.contains("kun:scheduler:complete_v1")
         || script.contains("kun:scheduler:complete_v2")
         || script.contains("kun:scheduler:complete_v3")
+        || script.contains("kun:scheduler:complete_v4")
     {
         return eval_scheduler_complete(state, keys, args);
     }
     if script.contains("kun:scheduler:requeue_v1")
         || script.contains("kun:scheduler:requeue_v2")
         || script.contains("kun:scheduler:requeue_v3")
+        || script.contains("kun:scheduler:requeue_v4")
     {
         return eval_scheduler_requeue(state, keys, args);
     }
     if script.contains("kun:scheduler:heartbeat_v1")
         || script.contains("kun:scheduler:heartbeat_v2")
+        || script.contains("kun:scheduler:heartbeat_v3")
     {
         return eval_scheduler_heartbeat(state, keys, args);
     }
@@ -479,7 +482,7 @@ fn eval_scheduler_complete(
     keys: &[String],
     args: &[String],
 ) -> Result<Vec<u8>, std::io::Error> {
-    if keys.len() != 8 || args.len() != 3 {
+    if keys.len() != 12 || args.len() != 6 {
         return Ok(error_reply("ERR invalid complete script args"));
     }
 
@@ -489,6 +492,9 @@ fn eval_scheduler_complete(
             state, &keys[6], &keys[7], task_id, &args[1], &args[2],
         )));
     }
+    sync_worker_runtime_meta(
+        state, &keys[8], &keys[9], &keys[10], &keys[11], &args[1], &args[3], &args[4], &args[5],
+    );
     sorted_set_remove(state, &keys[5], task_id);
     set_remove(state, &keys[4], task_id);
     set_remove(state, &keys[1], task_id);
@@ -506,7 +512,7 @@ fn eval_scheduler_requeue(
     keys: &[String],
     args: &[String],
 ) -> Result<Vec<u8>, std::io::Error> {
-    if keys.len() != 9 || args.len() != 4 {
+    if keys.len() != 13 || args.len() != 7 {
         return Ok(error_reply("ERR invalid requeue script args"));
     }
 
@@ -517,6 +523,9 @@ fn eval_scheduler_requeue(
             state, &keys[6], &keys[7], task_id, &args[2], &args[3],
         )));
     }
+    sync_worker_runtime_meta(
+        state, &keys[9], &keys[10], &keys[11], &keys[12], &args[2], &args[4], &args[5], &args[6],
+    );
     let task_json = state
         .hashes
         .get(&keys[0])
@@ -546,7 +555,7 @@ fn eval_scheduler_heartbeat(
     keys: &[String],
     args: &[String],
 ) -> Result<Vec<u8>, std::io::Error> {
-    if keys.len() != 4 || args.len() != 4 {
+    if keys.len() != 8 || args.len() != 7 {
         return Ok(error_reply("ERR invalid heartbeat script args"));
     }
 
@@ -562,7 +571,45 @@ fn eval_scheduler_heartbeat(
     }
     set_insert(state, &keys[0], task_id);
     sorted_set_insert(state, &keys[1], task_id, deadline);
+    sync_worker_runtime_meta(
+        state, &keys[4], &keys[5], &keys[6], &keys[7], &args[2], &args[4], &args[5], &args[6],
+    );
     Ok(integer_reply(1))
+}
+
+fn sync_worker_runtime_meta(
+    state: &mut TestRedisState,
+    workers_key: &str,
+    worker_seen_key: &str,
+    worker_lease_timeout_key: &str,
+    worker_heartbeat_interval_key: &str,
+    worker_id: &str,
+    worker_seen: &str,
+    lease_timeout: &str,
+    heartbeat_interval: &str,
+) {
+    set_insert(state, workers_key, worker_id);
+    hash_set(state, worker_seen_key, worker_id, worker_seen.to_string());
+    if lease_timeout.is_empty() {
+        hash_delete(state, worker_lease_timeout_key, worker_id);
+    } else {
+        hash_set(
+            state,
+            worker_lease_timeout_key,
+            worker_id,
+            lease_timeout.to_string(),
+        );
+    }
+    if heartbeat_interval.is_empty() {
+        hash_delete(state, worker_heartbeat_interval_key, worker_id);
+    } else {
+        hash_set(
+            state,
+            worker_heartbeat_interval_key,
+            worker_id,
+            heartbeat_interval.to_string(),
+        );
+    }
 }
 
 fn eval_scheduler_release_inflight(

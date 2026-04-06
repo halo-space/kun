@@ -207,6 +207,11 @@ scheduler.close().await?;
 - 它适合 graceful drain，不是日常正常完成任务的主路径
 - 如果 worker 是直接崩溃，还是靠 `lease_timeout` + reclaim 自动恢复
 
+另外有一个实现边界：
+
+- worker 的 `last_seen` 只会在成功的 runtime 迁移上刷新
+- stale lease 失败的 `heartbeat / complete / requeue` 不会再把 worker 误记成“还活着”
+
 ## 崩溃恢复语义
 
 - worker 正常运行时

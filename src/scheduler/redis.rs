@@ -227,7 +227,7 @@ end
 return {best_task_json, lease_id}
 "#;
 const SCHEDULER_COMPLETE_SCRIPT: &str = r#"
--- kun:scheduler:complete_v3
+-- kun:scheduler:complete_v4
 local tasks = KEYS[1]
 local ready = KEYS[2]
 local ready_order = KEYS[3]
@@ -236,10 +236,32 @@ local inflight = KEYS[5]
 local inflight_deadlines = KEYS[6]
 local inflight_workers = KEYS[7]
 local inflight_leases = KEYS[8]
+local workers = KEYS[9]
+local worker_seen = KEYS[10]
+local worker_lease_timeout = KEYS[11]
+local worker_heartbeat_interval = KEYS[12]
 
 local task_id = ARGV[1]
 local worker_id = ARGV[2]
 local lease_id = ARGV[3]
+local now = ARGV[4]
+local lease_timeout = ARGV[5]
+local heartbeat_interval = ARGV[6]
+
+local function sync_worker_runtime()
+    redis.call('SADD', workers, worker_id)
+    redis.call('HSET', worker_seen, worker_id, now)
+    if lease_timeout == '' then
+        redis.call('HDEL', worker_lease_timeout, worker_id)
+    else
+        redis.call('HSET', worker_lease_timeout, worker_id, lease_timeout)
+    end
+    if heartbeat_interval == '' then
+        redis.call('HDEL', worker_heartbeat_interval, worker_id)
+    else
+        redis.call('HSET', worker_heartbeat_interval, worker_id, heartbeat_interval)
+    end
+end
 
 local current_worker = redis.call('HGET', inflight_workers, task_id)
 local current_lease = redis.call('HGET', inflight_leases, task_id)
@@ -256,6 +278,7 @@ if current_lease ~= lease_id then
     return -2
 end
 
+sync_worker_runtime()
 redis.call('ZREM', inflight_deadlines, task_id)
 redis.call('SREM', inflight, task_id)
 redis.call('SREM', ready, task_id)
@@ -267,7 +290,7 @@ redis.call('HDEL', tasks, task_id)
 return 1
 "#;
 const SCHEDULER_REQUEUE_SCRIPT: &str = r#"
--- kun:scheduler:requeue_v3
+-- kun:scheduler:requeue_v4
 local tasks = KEYS[1]
 local ready = KEYS[2]
 local ready_order = KEYS[3]
@@ -277,16 +300,38 @@ local inflight_deadlines = KEYS[6]
 local inflight_workers = KEYS[7]
 local inflight_leases = KEYS[8]
 local sequence = KEYS[9]
+local workers = KEYS[10]
+local worker_seen = KEYS[11]
+local worker_lease_timeout = KEYS[12]
+local worker_heartbeat_interval = KEYS[13]
 
 local task_id = ARGV[1]
 local now = tonumber(ARGV[2])
 local worker_id = ARGV[3]
 local lease_id = ARGV[4]
+local worker_seen_now = ARGV[5]
+local lease_timeout = ARGV[6]
+local heartbeat_interval = ARGV[7]
 
 local function push_ready(id)
     local next_ready_order = redis.call('INCR', sequence)
     redis.call('SADD', ready, id)
     redis.call('HSET', ready_order, id, tostring(next_ready_order))
+end
+
+local function sync_worker_runtime()
+    redis.call('SADD', workers, worker_id)
+    redis.call('HSET', worker_seen, worker_id, worker_seen_now)
+    if lease_timeout == '' then
+        redis.call('HDEL', worker_lease_timeout, worker_id)
+    else
+        redis.call('HSET', worker_lease_timeout, worker_id, lease_timeout)
+    end
+    if heartbeat_interval == '' then
+        redis.call('HDEL', worker_heartbeat_interval, worker_id)
+    else
+        redis.call('HSET', worker_heartbeat_interval, worker_id, heartbeat_interval)
+    end
 end
 
 local current_worker = redis.call('HGET', inflight_workers, task_id)
@@ -304,6 +349,7 @@ if current_lease ~= lease_id then
     return -2
 end
 
+sync_worker_runtime()
 local task_json = redis.call('HGET', tasks, task_id)
 
 redis.call('SREM', inflight, task_id)
@@ -333,16 +379,38 @@ end
 return 1
 "#;
 const SCHEDULER_HEARTBEAT_SCRIPT: &str = r#"
--- kun:scheduler:heartbeat_v2
+-- kun:scheduler:heartbeat_v3
 local inflight = KEYS[1]
 local inflight_deadlines = KEYS[2]
 local inflight_workers = KEYS[3]
 local inflight_leases = KEYS[4]
+local workers = KEYS[5]
+local worker_seen = KEYS[6]
+local worker_lease_timeout = KEYS[7]
+local worker_heartbeat_interval = KEYS[8]
 
 local task_id = ARGV[1]
 local deadline = ARGV[2]
 local worker_id = ARGV[3]
 local lease_id = ARGV[4]
+local now = ARGV[5]
+local lease_timeout = ARGV[6]
+local heartbeat_interval = ARGV[7]
+
+local function sync_worker_runtime()
+    redis.call('SADD', workers, worker_id)
+    redis.call('HSET', worker_seen, worker_id, now)
+    if lease_timeout == '' then
+        redis.call('HDEL', worker_lease_timeout, worker_id)
+    else
+        redis.call('HSET', worker_lease_timeout, worker_id, lease_timeout)
+    end
+    if heartbeat_interval == '' then
+        redis.call('HDEL', worker_heartbeat_interval, worker_id)
+    else
+        redis.call('HSET', worker_heartbeat_interval, worker_id, heartbeat_interval)
+    end
+end
 
 local current_worker = redis.call('HGET', inflight_workers, task_id)
 local current_lease = redis.call('HGET', inflight_leases, task_id)
@@ -364,6 +432,7 @@ if redis.call('SREM', inflight, task_id) == 0 then
 end
 redis.call('SADD', inflight, task_id)
 redis.call('ZADD', inflight_deadlines, deadline, task_id)
+sync_worker_runtime()
 return 1
 "#;
 const SCHEDULER_RELEASE_INFLIGHT_SCRIPT: &str = r#"
@@ -719,7 +788,7 @@ impl Redis {
         Ok(())
     }
 
-    async fn sync_runtime_metadata(&self, connection: &mut Connection) -> Result<(), SpiderError> {
+    async fn sync_scope_metadata(&self, connection: &mut Connection) -> Result<(), SpiderError> {
         let keys = self.keys();
         self.sync_namespace_metadata(connection).await?;
 
@@ -736,7 +805,14 @@ impl Redis {
             META_HEARTBEAT_INTERVAL,
             self.heartbeat_interval_millis(),
         )
-        .await?;
+        .await
+    }
+
+    async fn touch_current_worker_runtime(
+        &self,
+        connection: &mut Connection,
+    ) -> Result<(), SpiderError> {
+        let keys = self.keys();
         touch_worker_runtime(
             connection,
             &keys,
@@ -745,6 +821,11 @@ impl Redis {
             self.heartbeat_interval_millis(),
         )
         .await
+    }
+
+    async fn sync_runtime_metadata(&self, connection: &mut Connection) -> Result<(), SpiderError> {
+        self.sync_scope_metadata(connection).await?;
+        self.touch_current_worker_runtime(connection).await
     }
 
     async fn reclaim_expired_inflight(
@@ -839,9 +920,13 @@ impl Redis {
 
         let _ = heartbeat_interval;
         let keys = self.keys();
-        let deadline = now()
+        let current_time = now();
+        let worker_seen = current_time.to_string();
+        let deadline = current_time
             .saturating_add(i64::try_from(lease_timeout).unwrap_or(i64::MAX))
             .to_string();
+        let lease_timeout = lease_timeout.to_string();
+        let heartbeat_interval = heartbeat_interval.to_string();
         let result: i64 = scheduler_eval(
             connection,
             SCHEDULER_HEARTBEAT_SCRIPT,
@@ -850,12 +935,19 @@ impl Redis {
                 keys.inflight_deadlines.as_str(),
                 keys.inflight_workers.as_str(),
                 keys.inflight_leases.as_str(),
+                keys.workers.as_str(),
+                keys.worker_seen.as_str(),
+                keys.worker_lease_timeout.as_str(),
+                keys.worker_heartbeat_interval.as_str(),
             ],
             &[
                 lease.task_id().as_str(),
                 deadline.as_str(),
                 lease.worker_id(),
                 lease.lease_id(),
+                worker_seen.as_str(),
+                lease_timeout.as_str(),
+                heartbeat_interval.as_str(),
             ],
         )
         .await?;
@@ -956,8 +1048,17 @@ impl Scheduler for Redis {
         self.validate_lease_worker(lease)?;
         let mut guard = self.connection().await?;
         let connection = self.connection_mut(&mut guard)?;
-        self.sync_runtime_metadata(connection).await?;
+        self.sync_scope_metadata(connection).await?;
         let keys = self.keys();
+        let worker_seen = now().to_string();
+        let lease_timeout = self
+            .lease_timeout_millis()
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        let heartbeat_interval = self
+            .heartbeat_interval_millis()
+            .map(|value| value.to_string())
+            .unwrap_or_default();
         let result: i64 = scheduler_eval(
             connection,
             SCHEDULER_COMPLETE_SCRIPT,
@@ -970,11 +1071,18 @@ impl Scheduler for Redis {
                 keys.inflight_deadlines.as_str(),
                 keys.inflight_workers.as_str(),
                 keys.inflight_leases.as_str(),
+                keys.workers.as_str(),
+                keys.worker_seen.as_str(),
+                keys.worker_lease_timeout.as_str(),
+                keys.worker_heartbeat_interval.as_str(),
             ],
             &[
                 lease.task_id().as_str(),
                 lease.worker_id(),
                 lease.lease_id(),
+                worker_seen.as_str(),
+                lease_timeout.as_str(),
+                heartbeat_interval.as_str(),
             ],
         )
         .await?;
@@ -985,9 +1093,18 @@ impl Scheduler for Redis {
         self.validate_lease_worker(lease)?;
         let mut guard = self.connection().await?;
         let connection = self.connection_mut(&mut guard)?;
-        self.sync_runtime_metadata(connection).await?;
+        self.sync_scope_metadata(connection).await?;
         let keys = self.keys();
         let now = now().to_string();
+        let worker_seen = now.clone();
+        let lease_timeout = self
+            .lease_timeout_millis()
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        let heartbeat_interval = self
+            .heartbeat_interval_millis()
+            .map(|value| value.to_string())
+            .unwrap_or_default();
         let result: i64 = scheduler_eval(
             connection,
             SCHEDULER_REQUEUE_SCRIPT,
@@ -1001,12 +1118,19 @@ impl Scheduler for Redis {
                 keys.inflight_workers.as_str(),
                 keys.inflight_leases.as_str(),
                 keys.sequence.as_str(),
+                keys.workers.as_str(),
+                keys.worker_seen.as_str(),
+                keys.worker_lease_timeout.as_str(),
+                keys.worker_heartbeat_interval.as_str(),
             ],
             &[
                 lease.task_id().as_str(),
                 now.as_str(),
                 lease.worker_id(),
                 lease.lease_id(),
+                worker_seen.as_str(),
+                lease_timeout.as_str(),
+                heartbeat_interval.as_str(),
             ],
         )
         .await?;
@@ -1044,7 +1168,7 @@ impl Scheduler for Redis {
         self.validate_lease_worker(lease)?;
         let mut guard = self.connection().await?;
         let connection = self.connection_mut(&mut guard)?;
-        self.sync_runtime_metadata(connection).await?;
+        self.sync_scope_metadata(connection).await?;
         self.heartbeat_internal(connection, lease).await
     }
 
@@ -2600,6 +2724,63 @@ mod tests {
                 lease_id: first_claim.lease.lease_id().to_string(),
             })
         );
+
+        scheduler.complete(&second_claim.lease).await.unwrap();
+        scheduler.close().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn redis_scheduler_stale_heartbeat_does_not_refresh_worker_last_seen() {
+        let (url, _commands_rx, server_handle) = spawn_redis_server().await;
+        let namespace = "stale_heartbeat_last_seen";
+        let scheduler = Redis::new(format!("redis://{url}"), namespace).with_worker(
+            Worker::new("worker-a")
+                .with_lease_timeout(SignedDuration::from_millis(20))
+                .with_heartbeat_interval(SignedDuration::from_millis(10)),
+        );
+        scheduler
+            .enqueue(Task::new(Request::new(
+                "https://example.com/stale-heartbeat-last-seen",
+            )))
+            .await
+            .unwrap();
+
+        let first_claim = scheduler.take_ready().await.unwrap().unwrap();
+        tokio::time::sleep(std::time::Duration::try_from(SignedDuration::from_millis(40)).unwrap())
+            .await;
+        let second_claim = scheduler.take_ready().await.unwrap().unwrap();
+
+        let before_snapshot = scheduler.snapshot().await.unwrap();
+        let before_last_seen = before_snapshot
+            .workers
+            .iter()
+            .find(|worker| worker.worker_id == "worker-a")
+            .and_then(|worker| worker.last_seen)
+            .expect("worker-a should have last_seen after reclaim");
+
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+        let error = scheduler.heartbeat(&first_claim.lease).await.unwrap_err();
+        assert_eq!(
+            error,
+            SpiderError::scheduler(SchedulerError::StaleLease {
+                action: "heartbeat",
+                task_id: first_claim.task.id.as_str().to_string(),
+                worker_id: "worker-a".to_string(),
+                lease_id: first_claim.lease.lease_id().to_string(),
+            })
+        );
+
+        let after_snapshot = scheduler.snapshot().await.unwrap();
+        let after_last_seen = after_snapshot
+            .workers
+            .iter()
+            .find(|worker| worker.worker_id == "worker-a")
+            .and_then(|worker| worker.last_seen)
+            .expect("worker-a should still have last_seen");
+
+        assert_eq!(after_last_seen, before_last_seen);
 
         scheduler.complete(&second_claim.lease).await.unwrap();
         scheduler.close().await.unwrap();
