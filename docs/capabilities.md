@@ -15,7 +15,7 @@ README 负责总览，这里负责把每个模块现在到底能做什么、还�
 
 如果只看“代码爬虫底层能力”这一层，而不看 DSL，当前和 Scrapy 更完整运行时相比，最主要的剩余缺口是：
 
-- `robots.txt` 这层虽然已经补到 `Crawl-delay`、`Request-rate`、wildcard / group、持久化 cache、`cache_ttl` 刷新与可选 sitemap 自动种子，但更高阶站点策略还没补完
+- 更完整的 `signals / extensions` 生态、exporter 与跨 job 运维能力还没补完
 
 ## Request
 
@@ -527,7 +527,8 @@ let engine = Engine::new().with_dedup(MethodUrlDedup {
 当前 `engine` 已提供最小 `signals / extensions` 边界。
 
 - 如果你想拿到最原始的 runtime 事件流，用 `Engine::with_signal_listener(...)`
-- 如果你想挂更语义化的扩展，用 `Engine::with_extension(...)`
+- 如果你只关心部分 signal kind，可以用 `Engine::with_signal_listener_for([...], ...)`
+- 如果你想挂更语义化的扩展，用 `Engine::with_extension(...)` 或 `Engine::with_extension_for([...], ...)`
 - `with_extension(...)` 底层复用同一条 signal bus，不会额外引入另一套 runtime
 - 当前内置信号类型包括：`spider_opened`、`spider_closed`、`request_scheduled`、`response_received`、`item_scraped`、`spider_error`
 - `spider_closed` 会携带最终 `stats::Snapshot`
@@ -543,15 +544,27 @@ use halo_spider::extensions;
 let engine = Engine::new().with_extension(extensions::Summary);
 ```
 
+如果你只想监听部分 signal kind，可以这样写：
+
+```rust
+use halo_spider::engine::Engine;
+use halo_spider::signals;
+
+let engine = Engine::new().with_signal_listener_for(
+    [signals::Kind::SpiderClosed, signals::Kind::SpiderError],
+    my_listener,
+);
+```
+
 如果你要自定义：
 
-- 实现 `signals::Listener`，再挂到 `.with_signal_listener(...)`
-- 或实现 `extensions::Extension`，再挂到 `.with_extension(...)`
+- 实现 `signals::Listener`，再挂到 `.with_signal_listener(...)` 或 `.with_signal_listener_for([...], ...)`
+- 或实现 `extensions::Extension`，再挂到 `.with_extension(...)` 或 `.with_extension_for([...], ...)`
 
 当前边界也要明确：
 
 - 这是一条 engine 内部 runtime hook，不是新的 plugin registry
-- 当前也还没有按 signal kind 做过滤订阅、持久化事件总线或跨进程分发
+- 当前也还没有持久化事件总线或跨进程分发
 - plugin 自动装载能力仍然只落在 `middleware` kind
 
 ## Robots
@@ -570,9 +583,10 @@ let engine = Engine::new().with_extension(extensions::Summary);
 - 当 `robots.txt` 临时不可用且当前 origin 没有可用缓存时，默认按 `robots::UnavailablePolicy::AllowAll` fail-open；如果调用方想更保守，可以显式切到 `robots::UnavailablePolicy::DisallowAll`
 - 对这类“临时不可用且暂无可用 cache”的结果，默认还会按 `60s` 的 `unavailable_retry_delay` 做短暂退避；在这个窗口内，同一 origin 不会每次请求都重新抓一次 `robots.txt`
 - 当前也已提供内置 `robots::cache::File`，用于把 robots policy 持久化到磁盘 JSON 文件；`robots::cache::File::default()` 的路径是 `output/robots-cache.json`
-- `robots::Memory` 现在也支持 `with_site_policy(origin, robots::SitePolicy::new()...)` 这种 per-origin 站点策略 overlay
-- 这层 overlay 当前可以强制 `AllowAll / DisallowAll`、追加更严格的最小 delay、补充额外 sitemap，以及单独覆盖某个 origin 的 unavailable policy
-- `with_site_policy(...)` 里的 origin 以 `scheme://host[:port]` 为准；如果传完整 URL，当前会自动归一化回对应 origin
+- `robots::Memory` 现在也支持 `with_site_policy(robots::Site::..., robots::SitePolicy::new()...)` 这种显式站点 matcher overlay
+- 当前内置的 matcher 是 `robots::Site::origin(...)`、`robots::Site::host(...)` 与 `robots::Site::pattern(...)`
+- 这层 overlay 当前可以强制 `AllowAll / DisallowAll`、追加更严格的最小 delay、补充额外 sitemap，以及单独覆盖 unavailable policy
+- 多条 matcher 同时命中时，`access` 与 `unavailable_policy` 由更具体 matcher 决定；同一 specificity 下后注册规则优先；`delay` 取更严格值；`sitemaps` 做去重合并
 - 如果调用方想保留 `robots::Memory` 这套抓取与判定逻辑、但替换 cache backend，可以继续用 `robots::Memory::with_cache(...)`
 - 如果调用方要替换这层策略，可以通过 `Engine::with_robots(...)` 挂自己的实现
 - `robots::Robot` 现在除了 `is_allowed(...)`，也可以通过 `check(...)` 返回 `Allow / Disallow / Delay(...)`，并通过 `sitemaps(...)` 读取当前 origin 声明的 sitemap URL
@@ -603,9 +617,6 @@ let engine = Engine::new().with_extension(extensions::Summary);
 - stale cache 刷新失败时，当前会优先回退旧缓存，而不是直接把旧 policy 冲掉
 - 如果当前 origin 没有可用 cache 且这次抓取临时失败，`robots::Memory` 默认会在 `60s` 的 retry delay 窗口里复用这次 unavailable 决策；调用方也可以通过 `with_unavailable_retry_delay(...)` 覆盖，或通过 `without_unavailable_retry_delay()` 关闭
 - sitemap 自动种子当前只走最小 HTTP 抓取和 XML 解析；抓取失败时会记录日志并继续原有 start URL，不会中断整轮爬取
-- 当前 site policy overlay 只支持 exact origin 级别，不支持域名模式、通配匹配或更复杂的多站点分组策略
-- 更复杂的站点级策略还没补
-
 如果只想用内置持久化 cache，可以直接这样挂：
 
 ```rust
@@ -654,7 +665,7 @@ let engine = Engine::new()
     .with_settings(Settings::default().with_robots_obey(true));
 ```
 
-如果你希望对某个 origin 叠加显式站点策略，而不是重写整套 `Robot`，可以这样写：
+如果你希望对某个站点 matcher 叠加显式站点策略，而不是重写整套 `Robot`，可以这样写：
 
 ```rust
 use halo_spider::engine::Engine;
@@ -662,14 +673,19 @@ use halo_spider::robots;
 use halo_spider::settings::Settings;
 use jiff::SignedDuration;
 
-let robots = robots::Memory::new().with_site_policy(
-    "https://example.com/articles/1",
-    robots::SitePolicy::new()
-        .with_access(robots::SiteAccess::AllowAll)
-        .with_delay(SignedDuration::from_millis(500))
-        .with_sitemap("https://example.com/custom-sitemap.xml")
-        .with_unavailable_policy(robots::UnavailablePolicy::DisallowAll),
-);
+let robots = robots::Memory::new()
+    .with_site_policy(
+        robots::Site::pattern("*.example.com"),
+        robots::SitePolicy::new()
+            .with_delay(SignedDuration::from_millis(500))
+            .with_sitemap("https://example.com/network-sitemap.xml"),
+    )
+    .with_site_policy(
+        robots::Site::host("news.example.com"),
+        robots::SitePolicy::new()
+            .with_access(robots::SiteAccess::AllowAll)
+            .with_unavailable_policy(robots::UnavailablePolicy::DisallowAll),
+    );
 
 let engine = Engine::new()
     .with_robots(robots)

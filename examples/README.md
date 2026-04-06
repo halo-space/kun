@@ -17,6 +17,7 @@
 - `concurrency_control.rs`：从 `period.xml` 扇出多个版面请求，观察并发与节流配置
 - `http_cache.rs`：`http_cache` 的 `ttl / strategy / file backend / stats` 最小用法示例
 - `custom_http_cache.rs`：自定义 `middleware::http_cache::Cache` backend，再复用内置 `HttpCache` 行为
+- `robots_site_policy.rs`：`robots::Site::pattern / host / origin` 的 precedence、delay merge 和 sitemap union
 - `custom_middleware.rs`：引擎级中间件注册与执行顺序
 - `custom_dedup.rs`：自定义 `dedup::Dedup`，替换默认 request 去重实现
 - `custom_scheduler.rs`：自定义 `scheduler::Scheduler` 与自定义 `scheduler::checkpoint::Persist` 的接线方式

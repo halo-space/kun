@@ -51,7 +51,7 @@
 
 - 当前已经有最小 `Engine::stats()` 运行时快照，包含 `request_count`、`response_count`、`error_count`、`retry_count`、`item_count` 与 `pipeline_drop_count`。
 - 当前 stats 还是 engine 实例内的内存累计计数，还没有 Prometheus / OpenTelemetry exporter 或持久化/外发能力。
-- 当前已经有最小 `robots.txt` 抓取策略：默认关闭、按 origin 内存缓存、支持 `User-agent` / `Allow` / `Disallow` 前缀语义；但 `Crawl-delay`、`Sitemap`、更完整 wildcard 规则和持久化 cache 还没补。
+- 当前 `robots.txt` 已支持 file cache、更完整 group / wildcard 规则、`Crawl-delay` / `Request-rate` / `Sitemap`，以及 `Site::origin / host / pattern` 这套显式站点策略 overlay；更复杂的跨 job 共享策略与运维能力还没有统一。
 - HTTP cache / conditional request 仍未实现，`ETag` / `Last-Modified` 语义还没有进入下载运行时；当前已明确列为 `P3`，放到第三期再做。
 
 ## 7. Plugin 边界

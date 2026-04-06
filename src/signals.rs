@@ -6,7 +6,7 @@ use crate::response::Response;
 use crate::stats::Snapshot as StatsSnapshot;
 use std::sync::{Arc, Mutex};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Kind {
     SpiderOpened,
     SpiderClosed,
@@ -141,7 +141,13 @@ pub trait Listener: Send + Sync {
 
 #[derive(Default)]
 pub(crate) struct Bus {
-    listeners: Mutex<Vec<Arc<dyn Listener>>>,
+    listeners: Mutex<Vec<Registration>>,
+}
+
+#[derive(Clone)]
+struct Registration {
+    kinds: Option<Vec<Kind>>,
+    listener: Arc<dyn Listener>,
 }
 
 impl std::fmt::Debug for Bus {
@@ -159,7 +165,26 @@ impl std::fmt::Debug for Bus {
 impl Bus {
     pub(crate) fn add_listener(&self, listener: Arc<dyn Listener>) {
         if let Ok(mut listeners) = self.listeners.lock() {
-            listeners.push(listener);
+            listeners.push(Registration {
+                kinds: None,
+                listener,
+            });
+        }
+    }
+
+    pub(crate) fn add_listener_for<I>(&self, kinds: I, listener: Arc<dyn Listener>)
+    where
+        I: IntoIterator<Item = Kind>,
+    {
+        let mut kinds = kinds.into_iter().collect::<Vec<_>>();
+        kinds.sort_unstable();
+        kinds.dedup();
+
+        if let Ok(mut listeners) = self.listeners.lock() {
+            listeners.push(Registration {
+                kinds: Some(kinds),
+                listener,
+            });
         }
     }
 
@@ -169,7 +194,14 @@ impl Bus {
             Err(_) => return,
         };
 
-        for listener in listeners {
+        for registration in listeners {
+            if let Some(kinds) = &registration.kinds
+                && !kinds.contains(&signal.kind())
+            {
+                continue;
+            }
+
+            let listener = registration.listener;
             listener.on_signal(&signal).await;
         }
     }
@@ -205,6 +237,22 @@ mod tests {
         assert_eq!(
             listener.events.lock().unwrap().clone(),
             vec![Kind::SpiderOpened, Kind::SpiderClosed]
+        );
+    }
+
+    #[tokio::test]
+    async fn bus_can_filter_listeners_by_signal_kind() {
+        let bus = Bus::default();
+        let listener = Arc::new(RecordingListener::default());
+        bus.add_listener_for([Kind::SpiderClosed], listener.clone());
+
+        bus.emit(Signal::spider_opened("example")).await;
+        bus.emit(Signal::spider_closed("example", StatsSnapshot::default()))
+            .await;
+
+        assert_eq!(
+            listener.events.lock().unwrap().clone(),
+            vec![Kind::SpiderClosed]
         );
     }
 }

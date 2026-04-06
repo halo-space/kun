@@ -373,9 +373,35 @@ where
         self
     }
 
+    /// Register an async signal listener for a selected subset of signal
+    /// kinds.
+    pub fn with_signal_listener_for<I>(
+        self,
+        kinds: I,
+        listener: impl crate::signals::Listener + 'static,
+    ) -> Self
+    where
+        I: IntoIterator<Item = crate::signals::Kind>,
+    {
+        self.signals.add_listener_for(kinds, Arc::new(listener));
+        self
+    }
+
     /// Register an extension through the engine signal bus.
     pub fn with_extension(self, extension: impl crate::extensions::Extension + 'static) -> Self {
         self.with_signal_listener(extension)
+    }
+
+    /// Register an extension for a selected subset of signal kinds.
+    pub fn with_extension_for<I>(
+        self,
+        kinds: I,
+        extension: impl crate::extensions::Extension + 'static,
+    ) -> Self
+    where
+        I: IntoIterator<Item = crate::signals::Kind>,
+    {
+        self.with_signal_listener_for(kinds, extension)
     }
 
     /// Load plugin manifests and verify that every declared middleware plugin
@@ -2315,6 +2341,33 @@ mod tests {
     }
 
     #[test]
+    fn engine_with_filtered_signal_listener_only_receives_selected_events() {
+        let listener = RecordingSignalListener::default();
+        let recorded_events = listener.events.clone();
+        let recorded_titles = listener.item_titles.clone();
+        let recorded_urls = listener.request_urls.clone();
+
+        let mut engine = Engine::from_parts(Memory::default(), StubHttp, StubBrowser)
+            .with_store(MemoryStore::default())
+            .with_signal_listener_for([SignalKind::ItemScraped], listener);
+
+        block_on(engine.enqueue(Request::new("https://example.com/item"))).unwrap();
+
+        let mut step_chains = BTreeMap::new();
+        block_on(engine.execute_spider_once(&ItemSpider, None, &mut step_chains)).unwrap();
+
+        assert_eq!(
+            recorded_events.lock().unwrap().clone(),
+            vec![SignalKind::ItemScraped]
+        );
+        assert!(recorded_urls.lock().unwrap().is_empty());
+        assert_eq!(
+            recorded_titles.lock().unwrap().clone(),
+            vec!["post".to_string()]
+        );
+    }
+
+    #[test]
     fn engine_with_extension_registers_extension_on_signal_bus() {
         let extension = RecordingExtension::default();
         let recorded_events = extension.events.clone();
@@ -2335,6 +2388,26 @@ mod tests {
                 SignalKind::ResponseReceived,
                 SignalKind::ItemScraped,
             ]
+        );
+    }
+
+    #[test]
+    fn engine_with_filtered_extension_only_receives_selected_events() {
+        let extension = RecordingExtension::default();
+        let recorded_events = extension.events.clone();
+
+        let mut engine = Engine::from_parts(Memory::default(), StubHttp, StubBrowser)
+            .with_store(MemoryStore::default())
+            .with_extension_for([SignalKind::ResponseReceived], extension);
+
+        block_on(engine.enqueue(Request::new("https://example.com/item"))).unwrap();
+
+        let mut step_chains = BTreeMap::new();
+        block_on(engine.execute_spider_once(&ItemSpider, None, &mut step_chains)).unwrap();
+
+        assert_eq!(
+            recorded_events.lock().unwrap().clone(),
+            vec![SignalKind::ResponseReceived]
         );
     }
 

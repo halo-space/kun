@@ -63,6 +63,30 @@ pub enum UnavailablePolicy {
     DisallowAll,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Site {
+    Origin(String),
+    Host(String),
+    Pattern(String),
+}
+
+impl Site {
+    pub fn origin(value: impl Into<String>) -> Self {
+        let value = value.into();
+        Self::Origin(normalize_site_origin(value.as_str()))
+    }
+
+    pub fn host(value: impl Into<String>) -> Self {
+        let value = value.into();
+        Self::Host(normalize_site_host(value.as_str()))
+    }
+
+    pub fn pattern(value: impl Into<String>) -> Self {
+        let value = value.into();
+        Self::Pattern(normalize_site_pattern(value.as_str()))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SiteAccess {
     AllowAll,
@@ -116,7 +140,7 @@ pub struct Memory<C = cache::Memory> {
     cache_ttl: Option<u64>,
     unavailable_policy: UnavailablePolicy,
     unavailable_retry_delay: Option<u64>,
-    site_policies: BTreeMap<String, SitePolicy>,
+    site_policies: Vec<SiteRule>,
     policies: tokio::sync::Mutex<BTreeMap<String, CachedPolicy>>,
     request_deadlines: tokio::sync::Mutex<BTreeMap<String, u64>>,
     unavailable_retry_at: tokio::sync::Mutex<BTreeMap<String, u64>>,
@@ -126,6 +150,64 @@ pub struct Memory<C = cache::Memory> {
 struct CachedPolicy {
     fetched_at: u64,
     policy: Arc<Policy>,
+}
+
+#[derive(Debug, Clone)]
+struct SiteRule {
+    matcher: SiteMatcher,
+    policy: SitePolicy,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ResolvedSitePolicy {
+    access: Option<SiteAccess>,
+    delay: Option<u64>,
+    sitemaps: Vec<String>,
+    unavailable_policy: Option<UnavailablePolicy>,
+}
+
+#[derive(Debug, Clone)]
+enum SiteMatcher {
+    Origin(String),
+    Host(String),
+    Pattern {
+        regex: PatternRegex,
+        literal_len: usize,
+    },
+}
+
+impl SiteMatcher {
+    fn matches(&self, url: &Url) -> bool {
+        match self {
+            Self::Origin(origin) => origin_key(url) == *origin,
+            Self::Host(host) => request_host(url).eq_ignore_ascii_case(host),
+            Self::Pattern { regex, .. } => {
+                let host = request_host(url).to_ascii_lowercase();
+                regex.is_match(host.as_str())
+            }
+        }
+    }
+
+    fn priority(&self, index: usize) -> (u8, usize, usize) {
+        match self {
+            Self::Origin(origin) => (3, origin.len(), index),
+            Self::Host(host) => (2, host.len(), index),
+            Self::Pattern { literal_len, .. } => (1, *literal_len, index),
+        }
+    }
+}
+
+impl From<Site> for SiteMatcher {
+    fn from(site: Site) -> Self {
+        match site {
+            Site::Origin(origin) => Self::Origin(origin),
+            Site::Host(host) => Self::Host(host),
+            Site::Pattern(value) => Self::Pattern {
+                literal_len: site_pattern_specificity(value.as_str()),
+                regex: compile_site_pattern_regex(value.as_str()),
+            },
+        }
+    }
 }
 
 impl Memory<cache::Memory> {
@@ -141,7 +223,7 @@ impl Default for Memory<cache::Memory> {
             cache_ttl: Some(86_400_000),
             unavailable_policy: UnavailablePolicy::AllowAll,
             unavailable_retry_delay: Some(60_000),
-            site_policies: BTreeMap::new(),
+            site_policies: Vec::new(),
             policies: tokio::sync::Mutex::new(BTreeMap::new()),
             request_deadlines: tokio::sync::Mutex::new(BTreeMap::new()),
             unavailable_retry_at: tokio::sync::Mutex::new(BTreeMap::new()),
@@ -193,9 +275,11 @@ impl<C> Memory<C> {
         self
     }
 
-    pub fn with_site_policy(mut self, origin: impl Into<String>, policy: SitePolicy) -> Self {
-        self.site_policies
-            .insert(normalize_site_origin(origin.into().as_str()), policy);
+    pub fn with_site_policy(mut self, site: Site, policy: SitePolicy) -> Self {
+        self.site_policies.push(SiteRule {
+            matcher: site.into(),
+            policy,
+        });
         self
     }
 }
@@ -214,10 +298,11 @@ impl<C: Cache> Robot for Memory<C> {
                 return Ok(true);
             }
 
-            let origin = origin_key(&url);
-            let site_policy = self.site_policy(origin.as_str());
-            let policy = self.policy_for(&url, request, user_agent).await?;
-            Ok(match site_policy.and_then(|policy| policy.access) {
+            let site_policy = self.site_policy(&url);
+            let policy = self
+                .policy_for(&url, request, user_agent, &site_policy)
+                .await?;
+            Ok(match site_policy.access {
                 Some(SiteAccess::AllowAll) => true,
                 Some(SiteAccess::DisallowAll) => false,
                 None => policy.is_allowed(&url, user_agent),
@@ -239,30 +324,24 @@ impl<C: Cache> Robot for Memory<C> {
             }
 
             let origin = origin_key(&url);
-            let site_policy = self.site_policy(origin.as_str());
-            let policy = self.policy_for(&url, request, user_agent).await?;
+            let site_policy = self.site_policy(&url);
+            let policy = self
+                .policy_for(&url, request, user_agent, &site_policy)
+                .await?;
 
-            if matches!(
-                site_policy.as_ref().and_then(|policy| policy.access),
-                Some(SiteAccess::DisallowAll)
-            ) {
+            if matches!(site_policy.access, Some(SiteAccess::DisallowAll)) {
                 return Ok(Decision::Disallow);
             }
 
-            if !matches!(
-                site_policy.as_ref().and_then(|policy| policy.access),
-                Some(SiteAccess::AllowAll)
-            ) && !policy.is_allowed(&url, user_agent)
+            if !matches!(site_policy.access, Some(SiteAccess::AllowAll))
+                && !policy.is_allowed(&url, user_agent)
             {
                 return Ok(Decision::Disallow);
             }
 
             let required_delay = max_delay(
                 policy.required_delay(user_agent),
-                site_policy
-                    .as_ref()
-                    .and_then(|policy| policy.delay)
-                    .map(duration_from_millis),
+                site_policy.delay.map(duration_from_millis),
             );
 
             let Some(required_delay) = required_delay else {
@@ -300,15 +379,11 @@ impl<C: Cache> Robot for Memory<C> {
                 return Ok(Vec::new());
             }
 
-            let origin = origin_key(&url);
-            let site_policy = self.site_policy(origin.as_str());
-            let policy = self.policy_for(&url, request, "").await?;
+            let site_policy = self.site_policy(&url);
+            let policy = self.policy_for(&url, request, "", &site_policy).await?;
             Ok(merge_sitemaps(
                 policy.sitemaps(),
-                site_policy
-                    .as_ref()
-                    .map(|policy| policy.sitemaps.as_slice())
-                    .unwrap_or_default(),
+                site_policy.sitemaps.as_slice(),
             ))
         })
     }
@@ -320,10 +395,10 @@ impl<C: Cache> Memory<C> {
         url: &Url,
         request: &Request,
         user_agent: &str,
+        site_policy: &ResolvedSitePolicy,
     ) -> Result<Arc<Policy>, SpiderError> {
         let origin = origin_key(url);
         let current_time = now();
-        let site_policy = self.site_policy(origin.as_str());
 
         if let Some(policy) = self.fresh_hot_policy(origin.as_str(), current_time).await {
             return Ok(policy);
@@ -351,8 +426,7 @@ impl<C: Cache> Memory<C> {
             }
 
             let unavailable_policy = site_policy
-                .as_ref()
-                .and_then(|policy| policy.unavailable_policy)
+                .unavailable_policy
                 .unwrap_or(self.unavailable_policy);
             return Ok(Arc::new(unavailable_policy.policy()));
         }
@@ -383,8 +457,7 @@ impl<C: Cache> Memory<C> {
                 self.remember_unavailable_retry(origin.as_str(), current_time)
                     .await;
                 let unavailable_policy = site_policy
-                    .as_ref()
-                    .and_then(|policy| policy.unavailable_policy)
+                    .unavailable_policy
                     .unwrap_or(self.unavailable_policy);
                 tracing::warn!(
                     origin = origin.as_str(),
@@ -396,8 +469,43 @@ impl<C: Cache> Memory<C> {
         }
     }
 
-    fn site_policy(&self, origin: &str) -> Option<SitePolicy> {
-        self.site_policies.get(origin).cloned()
+    fn site_policy(&self, url: &Url) -> ResolvedSitePolicy {
+        let mut resolved = ResolvedSitePolicy::default();
+        let mut access = None;
+        let mut unavailable_policy = None;
+
+        for (index, rule) in self.site_policies.iter().enumerate() {
+            if !rule.matcher.matches(url) {
+                continue;
+            }
+
+            let priority = rule.matcher.priority(index);
+
+            if let Some(candidate) = rule.policy.access
+                && access
+                    .as_ref()
+                    .map(|(current, _)| priority > *current)
+                    .unwrap_or(true)
+            {
+                access = Some((priority, candidate));
+            }
+
+            resolved.delay = max_millis(resolved.delay, rule.policy.delay);
+            resolved.sitemaps = merge_sitemaps(resolved.sitemaps, rule.policy.sitemaps.as_slice());
+
+            if let Some(candidate) = rule.policy.unavailable_policy
+                && unavailable_policy
+                    .as_ref()
+                    .map(|(current, _)| priority > *current)
+                    .unwrap_or(true)
+            {
+                unavailable_policy = Some((priority, candidate));
+            }
+        }
+
+        resolved.access = access.map(|(_, value)| value);
+        resolved.unavailable_policy = unavailable_policy.map(|(_, value)| value);
+        resolved
     }
 
     async fn fresh_hot_policy(&self, origin: &str, current_time: u64) -> Option<Arc<Policy>> {
@@ -928,6 +1036,48 @@ fn normalize_site_origin(value: &str) -> String {
     trimmed.trim_end_matches('/').to_ascii_lowercase()
 }
 
+fn normalize_site_host(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    if let Ok(url) = Url::parse(trimmed) {
+        return request_host(&url).to_ascii_lowercase();
+    }
+
+    if trimmed.starts_with("//")
+        && let Ok(url) = Url::parse(format!("https:{trimmed}").as_str())
+    {
+        return request_host(&url).to_ascii_lowercase();
+    }
+
+    if !trimmed.contains("://")
+        && let Ok(url) = Url::parse(format!("https://{trimmed}").as_str())
+    {
+        return request_host(&url).to_ascii_lowercase();
+    }
+
+    trimmed
+        .trim_end_matches('/')
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+}
+
+fn normalize_site_pattern(value: &str) -> String {
+    value
+        .trim()
+        .trim_end_matches('/')
+        .trim_start_matches("http://")
+        .trim_start_matches("https://")
+        .split('/')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+}
+
 fn request_path(url: &Url) -> String {
     match url.query() {
         Some(query) => format!("{}?{query}", url.path()),
@@ -1015,6 +1165,24 @@ fn compile_rule_regex(pattern: &str) -> Option<PatternRegex> {
     PatternRegex::new(regex.as_str()).ok()
 }
 
+fn compile_site_pattern_regex(pattern: &str) -> PatternRegex {
+    let mut regex = String::from("^");
+
+    for ch in pattern.chars() {
+        match ch {
+            '*' => regex.push_str(".*"),
+            other => regex.push_str(regex::escape(other.to_string().as_str()).as_str()),
+        }
+    }
+
+    regex.push('$');
+    PatternRegex::new(regex.as_str()).expect("escaped site pattern must compile")
+}
+
+fn site_pattern_specificity(pattern: &str) -> usize {
+    pattern.chars().filter(|ch| *ch != '*').count()
+}
+
 fn rule_specificity_len(pattern: &str) -> usize {
     pattern
         .trim_end_matches('$')
@@ -1031,6 +1199,15 @@ fn max_delay(
     left: Option<SignedDuration>,
     right: Option<SignedDuration>,
 ) -> Option<SignedDuration> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (Some(left), None) => Some(left),
+        (None, Some(right)) => Some(right),
+        (None, None) => None,
+    }
+}
+
+fn max_millis(left: Option<u64>, right: Option<u64>) -> Option<u64> {
     match (left, right) {
         (Some(left), Some(right)) => Some(left.max(right)),
         (Some(left), None) => Some(left),
@@ -1343,9 +1520,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn robot_site_policy_can_force_disallow() {
+    async fn robot_site_policy_origin_can_force_disallow() {
         let robot = Memory::new().with_site_policy(
-            "https://example.com/news",
+            Site::origin("https://example.com/news"),
             SitePolicy::new().with_access(SiteAccess::DisallowAll),
         );
         robot
@@ -1362,9 +1539,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn robot_site_policy_can_force_allow() {
+    async fn robot_site_policy_host_can_force_allow() {
         let robot = Memory::new().with_site_policy(
-            "https://example.com",
+            Site::host("example.com"),
             SitePolicy::new().with_access(SiteAccess::AllowAll),
         );
         robot
@@ -1381,20 +1558,47 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn robot_site_policy_can_apply_additional_delay() {
+    async fn robot_site_policy_pattern_can_force_disallow() {
         let robot = Memory::new().with_site_policy(
-            "https://example.com",
-            SitePolicy::new().with_delay(SignedDuration::from_millis(20)),
+            Site::pattern("*.example.com"),
+            SitePolicy::new().with_access(SiteAccess::DisallowAll),
         );
         robot
             .seed_from_body(
-                "https://example.com/news/1",
+                "https://news.example.com/news/1",
+                "User-agent: *\nAllow: /\n",
+            )
+            .await;
+
+        let request = Request::new("https://news.example.com/news/1");
+
+        assert!(!robot.is_allowed(&request, "kun").await.unwrap());
+        assert_eq!(
+            robot.check(&request, "kun").await.unwrap(),
+            Decision::Disallow
+        );
+    }
+
+    #[tokio::test]
+    async fn robot_site_policy_uses_strictest_delay_across_matches() {
+        let robot = Memory::new()
+            .with_site_policy(
+                Site::pattern("*.example.com"),
+                SitePolicy::new().with_delay(SignedDuration::from_millis(20)),
+            )
+            .with_site_policy(
+                Site::host("news.example.com"),
+                SitePolicy::new().with_delay(SignedDuration::from_millis(40)),
+            );
+        robot
+            .seed_from_body(
+                "https://news.example.com/news/1",
                 "User-agent: *\nAllow: /\nCrawl-delay: 0.01\n",
             )
             .await;
 
-        let first_request = Request::new("https://example.com/news/1");
-        let second_request = Request::new("https://example.com/news/2");
+        let first_request = Request::new("https://news.example.com/news/1");
+        let second_request = Request::new("https://news.example.com/news/2");
 
         assert_eq!(
             robot.check(&first_request, "kun").await.unwrap(),
@@ -1404,42 +1608,104 @@ mod tests {
 
         assert!(matches!(
             second,
-            Decision::Delay(delay) if delay >= SignedDuration::from_millis(15)
+            Decision::Delay(delay) if delay >= SignedDuration::from_millis(30)
         ));
     }
 
     #[tokio::test]
-    async fn robot_site_policy_can_add_sitemaps() {
-        let robot = Memory::new().with_site_policy(
-            "https://example.com",
-            SitePolicy::new()
-                .with_sitemap("https://example.com/custom.xml")
-                .with_sitemap("https://example.com/news.xml"),
-        );
+    async fn robot_site_policy_unions_sitemaps_across_matches() {
+        let robot = Memory::new()
+            .with_site_policy(
+                Site::pattern("*.example.com"),
+                SitePolicy::new().with_sitemap("https://news.example.com/network.xml"),
+            )
+            .with_site_policy(
+                Site::host("news.example.com"),
+                SitePolicy::new()
+                    .with_sitemap("https://news.example.com/custom.xml")
+                    .with_sitemap("https://news.example.com/news.xml"),
+            );
         robot
             .seed_from_body(
-                "https://example.com/news/1",
-                "User-agent: *\nAllow: /\nSitemap: https://example.com/news.xml\n",
+                "https://news.example.com/news/1",
+                "User-agent: *\nAllow: /\nSitemap: https://news.example.com/news.xml\n",
             )
             .await;
 
-        let request = Request::new("https://example.com/news/1");
+        let request = Request::new("https://news.example.com/news/1");
 
         assert_eq!(
             robot.sitemaps(&request).await.unwrap(),
             vec![
-                "https://example.com/news.xml".to_string(),
-                "https://example.com/custom.xml".to_string(),
+                "https://news.example.com/news.xml".to_string(),
+                "https://news.example.com/network.xml".to_string(),
+                "https://news.example.com/custom.xml".to_string(),
             ]
         );
     }
 
     #[tokio::test]
-    async fn robot_site_policy_can_override_unavailable_policy_for_origin() {
-        let robot = Memory::new().with_site_policy(
-            "http://127.0.0.1:9/private/page",
-            SitePolicy::new().with_unavailable_policy(UnavailablePolicy::DisallowAll),
+    async fn robot_site_policy_prefers_more_specific_access() {
+        let robot = Memory::new()
+            .with_site_policy(
+                Site::pattern("*.example.com"),
+                SitePolicy::new().with_access(SiteAccess::AllowAll),
+            )
+            .with_site_policy(
+                Site::host("news.example.com"),
+                SitePolicy::new().with_access(SiteAccess::DisallowAll),
+            );
+        robot
+            .seed_from_body(
+                "https://news.example.com/news/1",
+                "User-agent: *\nAllow: /\n",
+            )
+            .await;
+
+        let request = Request::new("https://news.example.com/news/1");
+
+        assert!(!robot.is_allowed(&request, "kun").await.unwrap());
+        assert_eq!(
+            robot.check(&request, "kun").await.unwrap(),
+            Decision::Disallow
         );
+    }
+
+    #[tokio::test]
+    async fn robot_site_policy_prefers_later_rule_when_specificity_ties() {
+        let robot = Memory::new()
+            .with_site_policy(
+                Site::host("example.com"),
+                SitePolicy::new().with_access(SiteAccess::AllowAll),
+            )
+            .with_site_policy(
+                Site::host("example.com"),
+                SitePolicy::new().with_access(SiteAccess::DisallowAll),
+            );
+        robot
+            .seed_from_body("https://example.com/news/1", "User-agent: *\nAllow: /\n")
+            .await;
+
+        let request = Request::new("https://example.com/news/1");
+
+        assert!(!robot.is_allowed(&request, "kun").await.unwrap());
+        assert_eq!(
+            robot.check(&request, "kun").await.unwrap(),
+            Decision::Disallow
+        );
+    }
+
+    #[tokio::test]
+    async fn robot_site_policy_prefers_more_specific_unavailable_policy() {
+        let robot = Memory::new()
+            .with_site_policy(
+                Site::pattern("127.*"),
+                SitePolicy::new().with_unavailable_policy(UnavailablePolicy::AllowAll),
+            )
+            .with_site_policy(
+                Site::origin("http://127.0.0.1:9/private/page"),
+                SitePolicy::new().with_unavailable_policy(UnavailablePolicy::DisallowAll),
+            );
         let request = Request::new("http://127.0.0.1:9/private/page");
 
         assert!(!robot.is_allowed(&request, "kun").await.unwrap());
