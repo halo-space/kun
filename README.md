@@ -169,7 +169,7 @@ let settings = Settings::default()
 - `checkpoint` 仍然只是静态快照恢复边界；它不会替代 durable scheduler 的 runtime reclaim
 - 如果你想自定义 scheduler 或 checkpoint 后端，分别实现 `scheduler::Scheduler` 或 `scheduler::checkpoint::Persist` 即可；自定义 scheduler 也应统一实现 `checkpoint / counts / snapshot / scopes / snapshots` 这组读能力
 - 如果你更喜欢链式写法，可以从 `Engine::new()` 开始，再用 `.with_scheduler(...)`、`.with_checkpoint(...)` 或 `.load_checkpoint(...).await?`
-- 完整 demo 见 `examples/custom_scheduler.rs`
+- 完整 demo 见 `examples/custom_scheduler.rs`，里面现在同时包含 `scheduler::Memory` 和 `scheduler::Redis` 的 `counts / snapshot / scopes / snapshots` 用法
 - 分布式运行说明见 `docs/distributed_scheduler.md`
 
 ```rust

@@ -92,8 +92,10 @@ impl Persist for InMemoryCheckpoint {
 async fn main() -> Result<(), SpiderError> {
     custom_scheduler_demo().await?;
     custom_checkpoint_demo().await?;
+    memory_snapshot_demo().await?;
+    memory_scope_overview_demo().await?;
     redis_snapshot_demo().await?;
-    redis_namespace_overview_demo().await?;
+    redis_scope_overview_demo().await?;
     Ok(())
 }
 
@@ -150,6 +152,75 @@ async fn custom_checkpoint_demo() -> Result<(), SpiderError> {
     Ok(())
 }
 
+async fn memory_snapshot_demo() -> Result<(), SpiderError> {
+    println!("== memory scheduler snapshot demo ==");
+
+    let scheduler = scheduler::Memory::default().with_scope("examples:custom-scheduler:memory");
+    scheduler
+        .enqueue(
+            Task::new(Request::new("https://example.com/memory/ready"))
+                .with_priority(5)
+                .with_depth(1),
+        )
+        .await?;
+    scheduler
+        .enqueue(Task::with_delay(
+            Request::new("https://example.com/memory/delayed"),
+            500,
+        ))
+        .await?;
+
+    let claimed = scheduler
+        .take_ready()
+        .await?
+        .expect("memory task should exist");
+
+    let counts = Scheduler::counts(&scheduler).await?;
+    let snapshot = scheduler.snapshot().await?;
+
+    println!("counts: {:?}", counts);
+    println!("scope: {}", snapshot.scope);
+    println!("workers: {:?}", snapshot.worker_ids);
+    println!(
+        "reclaimed_total={}, reclaimed_in_refresh={}",
+        snapshot.reclaimed_total, snapshot.reclaimed_in_refresh
+    );
+    for task in &snapshot.inflight_tasks {
+        println!(
+            "inflight task={} url={} worker={:?} lease={:?}",
+            task.task_id.as_str(),
+            task.url,
+            task.worker_id,
+            task.lease_id
+        );
+    }
+
+    scheduler.complete(&claimed.lease).await?;
+    Ok(())
+}
+
+async fn memory_scope_overview_demo() -> Result<(), SpiderError> {
+    println!("== memory scheduler scope overview demo ==");
+
+    let scheduler =
+        scheduler::Memory::default().with_scope("examples:custom-scheduler:memory-overview");
+    let scopes = scheduler
+        .scopes_with_prefix("examples:custom-scheduler:")
+        .await?;
+    println!("visible scopes: {:?}", scopes);
+
+    let snapshots = scheduler
+        .snapshots_with_prefix("examples:custom-scheduler:")
+        .await?;
+    for snapshot in snapshots {
+        println!("scope: {}", snapshot.scope);
+        println!("counts: {:?}", snapshot.counts);
+        println!("workers: {:?}", snapshot.worker_ids);
+    }
+
+    Ok(())
+}
+
 async fn redis_snapshot_demo() -> Result<(), SpiderError> {
     println!("== redis scheduler snapshot demo ==");
 
@@ -175,12 +246,12 @@ async fn redis_snapshot_demo() -> Result<(), SpiderError> {
     Ok(())
 }
 
-async fn redis_namespace_overview_demo() -> Result<(), SpiderError> {
-    println!("== redis scheduler multi-namespace overview demo ==");
+async fn redis_scope_overview_demo() -> Result<(), SpiderError> {
+    println!("== redis scheduler multi-scope overview demo ==");
 
     let Ok(url) = std::env::var("HALO_SPIDER_EXAMPLE_REDIS_URL") else {
         println!(
-            "set HALO_SPIDER_EXAMPLE_REDIS_URL=redis://127.0.0.1:6379 to run the Redis namespace overview demo"
+            "set HALO_SPIDER_EXAMPLE_REDIS_URL=redis://127.0.0.1:6379 to run the Redis scope overview demo"
         );
         return Ok(());
     };
