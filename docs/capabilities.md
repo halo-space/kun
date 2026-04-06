@@ -205,9 +205,11 @@ browser 在这里的角色是“渲染型下载器”，不是另起一套通用
 - `scheduler::Redis` 现在会通过 Redis 脚本原子完成 `enqueue / claim / complete / requeue / reclaim` 这类关键状态迁移；多个 worker 共享同一个 namespace 时，不会再因为“先读 ready 再分步迁移”而重复领取同一条 task
 - `scheduler::Redis` 现在还显式支持 `worker_id` ownership 校验，以及 engine 运行时的 heartbeat 续租
 - `scheduler::Scheduler` 现在统一还包含 `checkpoint() / counts() / snapshot() / scopes() / snapshots() / overview()` 这组读能力；共享后端可以返回多个 scope，本地后端则至少返回当前 scope
+- `scheduler::Memory` 现在在 active inflight task 上也会带出本地 `worker_id / lease_id`，所以 `snapshot.inflight_tasks`、`snapshot.workers` 与 `overview()` 在本地和共享后端上都是统一形状；`Redis` 额外再承担 stale reclaim、heartbeat 与跨 scope registry
 - `scheduler.snapshot().await?` 可以直接读取当前 scheduler scope 这一刻的运行时快照；对于 `scheduler::Redis` 来说，这个 scope 对应 Redis namespace
 - `snapshot.inflight_tasks` 会直接带出每条 inflight task 的 task id、url、worker、lease、deadline 与 priority/depth 元信息
 - 如果同一个后端里有多个 job / scope，可以用 `scheduler.scopes_with_prefix(...)` 和 `scheduler.snapshots_with_prefix(...)` 做跨 job 运维读取；如果只想先看聚合摘要，可以直接读 `scheduler.overview()` 或 `scheduler.overview_with_prefix(...)`
+- 如果想让本地 memory scheduler 在快照里显示稳定的逻辑 worker 身份，也可以显式用 `scheduler::Memory::new().with_worker_id(...)`
 - 如果需要调整恢复窗口：`scheduler::Redis::new(...).with_lease_timeout(...)`
 - 如果需要显式指定 worker 或 heartbeat：`scheduler::Redis::new(...).with_worker_id(...).with_heartbeat_interval(...)`
 - 如果明确不想启用这层自动回收：`scheduler::Redis::new(...).without_lease_timeout()`

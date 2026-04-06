@@ -5,14 +5,14 @@ pub enum SchedulerError {
     #[error("{0}")]
     Message(String),
     #[error(
-        "redis scheduler lease belongs to worker `{lease_worker_id}`, current worker is `{current_worker_id}`"
+        "scheduler lease belongs to worker `{lease_worker_id}`, current worker is `{current_worker_id}`"
     )]
     LeaseWorkerMismatch {
         lease_worker_id: String,
         current_worker_id: String,
     },
     #[error(
-        "redis scheduler cannot {action} task `{task_id}` because worker `{worker_id}` no longer owns its lease"
+        "scheduler cannot {action} task `{task_id}` because worker `{worker_id}` no longer owns its lease"
     )]
     LeaseOwnershipConflict {
         action: &'static str,
@@ -20,7 +20,7 @@ pub enum SchedulerError {
         worker_id: String,
     },
     #[error(
-        "redis scheduler cannot {action} task `{task_id}` because lease `{lease_id}` for worker `{worker_id}` is stale"
+        "scheduler cannot {action} task `{task_id}` because lease `{lease_id}` for worker `{worker_id}` is stale"
     )]
     StaleLease {
         action: &'static str,
@@ -29,7 +29,7 @@ pub enum SchedulerError {
         lease_id: String,
     },
     #[error(
-        "redis scheduler cannot {action} task `{task_id}` because its inflight lease is no longer active"
+        "scheduler cannot {action} task `{task_id}` because its inflight lease is no longer active"
     )]
     InactiveLease {
         action: &'static str,

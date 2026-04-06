@@ -160,9 +160,11 @@ let settings = Settings::default()
 - `scheduler::Redis` 现在会通过 Redis 脚本原子完成 `claim / complete / requeue / reclaim` 这类关键迁移；多个 worker 共享同一个 namespace 时，不会再因为本地“先读 ready 再分步搬运”而重复领取同一条 task
 - `scheduler::Redis` 现在还显式支持 `worker_id`、runtime lease ownership 校验，以及 engine 运行中的 heartbeat 续租
 - `scheduler.snapshot().await?` 读取的是当前 scheduler scope 这一刻的即时状态；对 `scheduler::Redis` 来说，这个 scope 对应 Redis namespace；它和 `Engine::stats()` 不一样，后者仍然是单个 engine 实例生命周期内的累计计数
+- `scheduler::Memory` 现在在 active inflight task 上也会带出本地 `worker_id / lease_id`，所以 `snapshot.inflight_tasks`、`snapshot.workers`、`overview()` 这套读视图在本地和共享后端上都是同一形状；`Redis` 额外提供 stale reclaim、heartbeat 与跨 scope registry
 - `snapshot.inflight_tasks` 会直接带出每条 inflight task 的 `task_id / url / worker_id / lease_id / deadline / priority / depth / ready_at`，运维时不需要再手工回读底层 Redis key
 - `snapshot.workers` 会直接带出每个 worker 的 `last_seen / is_stale / inflight_task_ids / next_deadline / lease_timeout / heartbeat_interval`
 - `scheduler.scopes()` / `scheduler.scopes_with_prefix(...)` / `scheduler.snapshots()` / `scheduler.snapshots_with_prefix(...)` / `scheduler.overview()` / `scheduler.overview_with_prefix(...)` 是统一的 scheduler 运维读入口；像 `scheduler::Redis` 这种共享后端可以返回多个 scope，本地 `scheduler::Memory` 则默认只返回自己这一份 scope
+- 如果你想给本地 memory scheduler 一个稳定的逻辑 worker 身份，方便日志或快照里看清楚，也可以显式用 `scheduler::Memory::new().with_worker_id(...)`
 - 如果你只想先看聚合后的跨 scope 摘要，优先用 `scheduler.overview()` 或 `scheduler.overview_with_prefix(...)`；它会汇总 `scope_count / pending_scope_count / stale_scope_count / counts / worker_count / active_lease_count / reclaimed_total`
 - 如果你想调整这层恢复窗口，可以用 `.with_lease_timeout(...)`；如果你想显式指定 worker 身份或 heartbeat 节奏，可以再配 `.with_worker_id(...)`、`.with_heartbeat_interval(...)`；如果你明确不想要这层自动回收，也可以用 `.without_lease_timeout()`
 - `snapshot()`、`counts()`、`checkpoint()` 这类只读/静态读取入口不会把当前调用方登记成活跃 worker；真正会刷新 worker runtime 的只有 `enqueue / take_ready / complete / requeue / heartbeat`

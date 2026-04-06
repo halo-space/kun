@@ -155,7 +155,9 @@ async fn custom_checkpoint_demo() -> Result<(), SpiderError> {
 async fn memory_snapshot_demo() -> Result<(), SpiderError> {
     println!("== memory scheduler snapshot demo ==");
 
-    let scheduler = scheduler::Memory::default().with_scope("examples:custom-scheduler:memory");
+    let scheduler = scheduler::Memory::default()
+        .with_scope("examples:custom-scheduler:memory")
+        .with_worker_id("example-memory-worker");
     scheduler
         .enqueue(
             Task::new(Request::new("https://example.com/memory/ready"))
@@ -203,8 +205,9 @@ async fn memory_snapshot_demo() -> Result<(), SpiderError> {
 async fn memory_scope_overview_demo() -> Result<(), SpiderError> {
     println!("== memory scheduler scope overview demo ==");
 
-    let scheduler =
-        scheduler::Memory::default().with_scope("examples:custom-scheduler:memory-overview");
+    let scheduler = scheduler::Memory::default()
+        .with_scope("examples:custom-scheduler:memory-overview")
+        .with_worker_id("example-memory-worker");
     let scopes = scheduler
         .scopes_with_prefix("examples:custom-scheduler:")
         .await?;
