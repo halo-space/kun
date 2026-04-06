@@ -15,6 +15,6 @@ pub mod task;
 pub mod traits;
 
 pub use memory::Memory;
-pub use redis::{NamespaceSnapshot, Redis};
+pub use redis::{InflightTaskSnapshot, NamespaceSnapshot, Redis};
 pub use task::{ClaimedTask, Task, TaskId, TaskLease};
 pub use traits::Scheduler;

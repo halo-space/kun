@@ -203,6 +203,7 @@ browser 在这里的角色是“渲染型下载器”，不是另起一套通用
 - `scheduler::Redis` 现在会通过 Redis 脚本原子完成 `enqueue / claim / complete / requeue / reclaim` 这类关键状态迁移；多个 worker 共享同一个 namespace 时，不会再因为“先读 ready 再分步迁移”而重复领取同一条 task
 - `scheduler::Redis` 现在还显式支持 `worker_id` ownership 校验，以及 engine 运行时的 heartbeat 续租
 - `scheduler::Redis::snapshot().await?` 可以直接读取单个 namespace 当前这一刻的运行时快照
+- `snapshot.inflight_tasks` 会直接带出每条 inflight task 的 task id、url、worker、lease、deadline 与 priority/depth 元信息
 - 如果同一个 Redis 里有多个 job / namespace，可以用 `scheduler::Redis::namespaces_with_prefix(...)` 和 `scheduler::Redis::namespace_snapshots_with_prefix(...)` 做跨 job 运维读取
 - 如果需要调整恢复窗口：`scheduler::Redis::new(...).with_lease_timeout(...)`
 - 如果需要显式指定 worker 或 heartbeat：`scheduler::Redis::new(...).with_worker_id(...).with_heartbeat_interval(...)`

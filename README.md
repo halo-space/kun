@@ -160,6 +160,7 @@ let settings = Settings::default()
 - `scheduler::Redis` 现在会通过 Redis 脚本原子完成 `claim / complete / requeue / reclaim` 这类关键迁移；多个 worker 共享同一个 namespace 时，不会再因为本地“先读 ready 再分步搬运”而重复领取同一条 task
 - `scheduler::Redis` 现在还显式支持 `worker_id`、runtime lease ownership 校验，以及 engine 运行中的 heartbeat 续租
 - `scheduler::Redis::snapshot().await?` 读取的是某一个 namespace 当前这一刻的 durable scheduler 即时状态；它和 `Engine::stats()` 不一样，后者仍然是单个 engine 实例生命周期内的累计计数
+- `snapshot.inflight_tasks` 会直接带出每条 inflight task 的 `task_id / url / worker_id / lease_id / deadline / priority / depth / ready_at`，运维时不需要再手工回读底层 Redis key
 - 如果同一个 Redis 里同时跑多个 job，可以用 `scheduler::Redis::namespaces_with_prefix(...)` 先按前缀发现 namespace，再用 `scheduler::Redis::namespace_snapshots_with_prefix(...)` 批量读取各 job 的运行时概览
 - 如果你想调整这层恢复窗口，可以用 `.with_lease_timeout(...)`；如果你想显式指定 worker 身份或 heartbeat 节奏，可以再配 `.with_worker_id(...)`、`.with_heartbeat_interval(...)`；如果你明确不想要这层自动回收，也可以用 `.without_lease_timeout()`
 - 如果你想自定义 checkpoint 后端，可以用 `scheduler::checkpoint::Memory::load(scheduler::checkpoint::Redis::new(...)).await?`

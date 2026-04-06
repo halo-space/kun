@@ -164,6 +164,34 @@ fn handle_command(
                 .and_then(|fields| fields.get(&command[2]).cloned());
             Ok(bulk_reply(value))
         }
+        "HMGET" => {
+            if command.len() < 3 {
+                return Ok(error_reply("ERR wrong number of arguments for HMGET"));
+            }
+            let values = command[2..]
+                .iter()
+                .map(|field| {
+                    state
+                        .hashes
+                        .get(&command[1])
+                        .and_then(|fields| fields.get(field).cloned())
+                })
+                .collect::<Vec<_>>();
+            Ok(array_reply_optional(values))
+        }
+        "HGETALL" => {
+            if command.len() != 2 {
+                return Ok(error_reply("ERR wrong number of arguments for HGETALL"));
+            }
+            let mut values = Vec::new();
+            if let Some(fields) = state.hashes.get(&command[1]) {
+                for (field, value) in fields {
+                    values.push(field.clone());
+                    values.push(value.clone());
+                }
+            }
+            Ok(array_reply(values))
+        }
         "HDEL" => {
             if command.len() < 3 {
                 return Ok(error_reply("ERR wrong number of arguments for HDEL"));
@@ -245,12 +273,29 @@ fn handle_command(
             Ok(integer_reply(added))
         }
         "ZRANGE" => {
-            if command.len() != 4 {
+            if command.len() != 4 && command.len() != 5 {
                 return Ok(error_reply("ERR wrong number of arguments for ZRANGE"));
             }
             let members = sorted_members(state.sorted_sets.get(&command[1]));
-            let range = slice_range(&members, &command[2], &command[3])?;
-            Ok(array_reply(range))
+            let withscores = command
+                .get(4)
+                .is_some_and(|option| option.eq_ignore_ascii_case("WITHSCORES"));
+            if command.len() == 5 && !withscores {
+                return Ok(error_reply("ERR syntax error"));
+            }
+            let range = slice_range_entries(&members, &command[2], &command[3])?;
+            if withscores {
+                let mut values = Vec::with_capacity(range.len() * 2);
+                for (member, score) in range {
+                    values.push(member);
+                    values.push(score.to_string());
+                }
+                Ok(array_reply(values))
+            } else {
+                Ok(array_reply(
+                    range.into_iter().map(|(member, _)| member).collect(),
+                ))
+            }
         }
         "ZRANGEBYSCORE" => {
             if command.len() != 4 {
@@ -858,11 +903,11 @@ fn parse_score_bound(value: &str) -> Result<i64, std::io::Error> {
     }
 }
 
-fn slice_range(
+fn slice_range_entries(
     members: &[(String, i64)],
     start: &str,
     stop: &str,
-) -> Result<Vec<String>, std::io::Error> {
+) -> Result<Vec<(String, i64)>, std::io::Error> {
     let len = i64::try_from(members.len()).unwrap_or_default();
     let start = normalize_index(start.parse::<i64>().map_err(int_error)?, len);
     let stop = normalize_index(stop.parse::<i64>().map_err(int_error)?, len);
@@ -873,10 +918,7 @@ fn slice_range(
 
     let start = usize::try_from(start.max(0)).unwrap_or_default();
     let stop = usize::try_from(stop.min(len - 1)).unwrap_or_default();
-    Ok(members[start..=stop]
-        .iter()
-        .map(|(member, _)| member.clone())
-        .collect())
+    Ok(members[start..=stop].to_vec())
 }
 
 fn normalize_index(index: i64, len: i64) -> i64 {

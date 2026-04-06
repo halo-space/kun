@@ -1,11 +1,11 @@
 use crate::error::SpiderError;
 use crate::redis::{Connection, ErrorContext, connect, query, validate_url};
 use crate::scheduler::checkpoint::{Checkpoint, Counts};
-use crate::scheduler::{ClaimedTask, Scheduler, Task, TaskLease};
+use crate::scheduler::{ClaimedTask, Scheduler, Task, TaskId, TaskLease};
 use jiff::{SignedDuration, Timestamp};
 use redis::FromRedisValue;
 use std::cmp::Ordering;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use tokio::sync::Mutex;
@@ -398,8 +398,30 @@ pub struct NamespaceSnapshot {
     pub reclaimed_total: u64,
     /// Number of stale inflight tasks reclaimed during this snapshot refresh.
     pub reclaimed_in_refresh: u64,
+    /// Per-task inflight runtime details for the current namespace.
+    pub inflight_tasks: Vec<InflightTaskSnapshot>,
     pub lease_timeout: Option<SignedDuration>,
     pub heartbeat_interval: Option<SignedDuration>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InflightTaskSnapshot {
+    /// Stable scheduler task identity.
+    pub task_id: TaskId,
+    /// Request URL currently attached to this inflight task.
+    pub url: String,
+    /// Current worker ownership recorded for this inflight task.
+    pub worker_id: Option<String>,
+    /// Current lease token recorded for this inflight task.
+    pub lease_id: Option<String>,
+    /// Current runtime deadline recorded for this inflight task.
+    pub deadline: Option<Timestamp>,
+    /// Scheduler priority attached to this task.
+    pub priority: i32,
+    /// Scheduler crawl depth attached to this task.
+    pub depth: u32,
+    /// Delayed execution timestamp carried by this task, if any.
+    pub ready_at: Option<Timestamp>,
 }
 
 impl Redis {
@@ -1191,6 +1213,130 @@ async fn reclaim_expired_inflight_for_keys(
     Ok(u64::try_from(reclaimed).unwrap_or_default())
 }
 
+async fn load_hash_entries(
+    connection: &mut Connection,
+    key: &str,
+) -> Result<BTreeMap<String, String>, SpiderError> {
+    scheduler_query(connection, redis_command("HGETALL", [key])).await
+}
+
+async fn load_deadline_entries(
+    connection: &mut Connection,
+    namespace: &str,
+    key: &str,
+) -> Result<BTreeMap<String, Timestamp>, SpiderError> {
+    let deadline_entries: Vec<String> = scheduler_query(
+        connection,
+        redis_command("ZRANGE", [key, "0", "-1", "WITHSCORES"]),
+    )
+    .await?;
+
+    if deadline_entries.len() % 2 != 0 {
+        return Err(SpiderError::scheduler(format!(
+            "redis scheduler deadline view for namespace `{namespace}` returned an odd number of values"
+        )));
+    }
+
+    let mut deadlines = BTreeMap::new();
+    for entry in deadline_entries.chunks_exact(2) {
+        let task_id = entry[0].clone();
+        let millis = parse_timestamp_score(namespace, &task_id, "deadline", &entry[1])?;
+        deadlines.insert(
+            task_id,
+            timestamp_from_i64(namespace, &entry[0], "deadline", millis)?,
+        );
+    }
+
+    Ok(deadlines)
+}
+
+async fn load_task_payloads(
+    connection: &mut Connection,
+    namespace: &str,
+    tasks_key: &str,
+    task_ids: &[String],
+) -> Result<Vec<Task>, SpiderError> {
+    if task_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut command = redis::cmd("HMGET");
+    command.arg(tasks_key);
+    for task_id in task_ids {
+        command.arg(task_id);
+    }
+    let task_jsons: Vec<Option<String>> = scheduler_query(connection, command).await?;
+
+    if task_jsons.len() != task_ids.len() {
+        return Err(SpiderError::scheduler(format!(
+            "redis scheduler task payload view for namespace `{namespace}` returned {} values for {} task ids",
+            task_jsons.len(),
+            task_ids.len()
+        )));
+    }
+
+    let mut tasks = Vec::with_capacity(task_ids.len());
+    for (task_id, task_json) in task_ids.iter().zip(task_jsons) {
+        let task_json = task_json.ok_or_else(|| {
+            SpiderError::scheduler(format!(
+                "redis scheduler task payload is missing for namespace `{namespace}` task id `{task_id}`"
+            ))
+        })?;
+        let task: Task = serde_json::from_str(&task_json).map_err(|error| {
+            SpiderError::scheduler(format!(
+                "failed to decode redis scheduler task for namespace `{namespace}` task id `{task_id}`: {error}"
+            ))
+        })?;
+        if task.id.as_str() != task_id.as_str() {
+            return Err(SpiderError::scheduler(format!(
+                "redis scheduler task payload id mismatch for namespace `{namespace}`: expected `{task_id}`, got `{}`",
+                task.id.as_str()
+            )));
+        }
+        tasks.push(task);
+    }
+
+    Ok(tasks)
+}
+
+async fn load_inflight_tasks(
+    connection: &mut Connection,
+    namespace: &str,
+    keys: &Keys,
+    task_ids: &[String],
+) -> Result<Vec<InflightTaskSnapshot>, SpiderError> {
+    if task_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let tasks = load_task_payloads(connection, namespace, &keys.tasks, task_ids).await?;
+    let workers = load_hash_entries(connection, &keys.inflight_workers).await?;
+    let leases = load_hash_entries(connection, &keys.inflight_leases).await?;
+    let deadlines = load_deadline_entries(connection, namespace, &keys.inflight_deadlines).await?;
+
+    let mut inflight_tasks = Vec::with_capacity(tasks.len());
+    for task in tasks {
+        let task_id = task.id.clone();
+        let ready_at = task
+            .ready_at
+            .map(|value| timestamp_from_u64(namespace, task_id.as_str(), "ready_at", value))
+            .transpose()?;
+
+        inflight_tasks.push(InflightTaskSnapshot {
+            task_id: task_id.clone(),
+            url: task.request.url,
+            worker_id: workers.get(task_id.as_str()).cloned(),
+            lease_id: leases.get(task_id.as_str()).cloned(),
+            deadline: deadlines.get(task_id.as_str()).cloned(),
+            priority: task.priority,
+            depth: task.depth,
+            ready_at,
+        });
+    }
+
+    Ok(inflight_tasks)
+}
+
 async fn read_namespace_snapshot(
     connection: &mut Connection,
     namespace: &str,
@@ -1202,8 +1348,9 @@ async fn read_namespace_snapshot(
     let ready: usize = scheduler_query(connection, redis_command("SCARD", [&keys.ready])).await?;
     let delayed: usize =
         scheduler_query(connection, redis_command("ZCARD", [&keys.delayed])).await?;
-    let inflight_ids: Vec<String> =
+    let mut inflight_ids: Vec<String> =
         scheduler_query(connection, redis_command("SMEMBERS", [&keys.inflight])).await?;
+    inflight_ids.sort();
     let deadline_count: usize = scheduler_query(
         connection,
         redis_command("ZCARD", [&keys.inflight_deadlines]),
@@ -1211,25 +1358,15 @@ async fn read_namespace_snapshot(
     .await?;
     let reclaimed_total: Option<u64> =
         scheduler_query(connection, redis_command("GET", [&keys.reclaimed_total])).await?;
+    let inflight_tasks = load_inflight_tasks(connection, namespace, &keys, &inflight_ids).await?;
 
     let mut worker_ids = BTreeSet::new();
     let mut active_lease_count = 0usize;
-    for task_id in &inflight_ids {
-        let worker_id: Option<String> = scheduler_query(
-            connection,
-            redis_command("HGET", [&keys.inflight_workers, task_id]),
-        )
-        .await?;
-        let lease_id: Option<String> = scheduler_query(
-            connection,
-            redis_command("HGET", [&keys.inflight_leases, task_id]),
-        )
-        .await?;
-
-        if let Some(worker_id) = worker_id {
+    for task in &inflight_tasks {
+        if let Some(worker_id) = task.worker_id.clone() {
             worker_ids.insert(worker_id);
         }
-        if lease_id.is_some() {
+        if task.lease_id.is_some() {
             active_lease_count += 1;
         }
     }
@@ -1239,16 +1376,73 @@ async fn read_namespace_snapshot(
         counts: Counts {
             ready,
             delayed,
-            inflight: inflight_ids.len(),
+            inflight: inflight_tasks.len(),
         },
         worker_ids: worker_ids.into_iter().collect(),
         active_lease_count,
         deadline_count,
         reclaimed_total: reclaimed_total.unwrap_or_default(),
         reclaimed_in_refresh,
+        inflight_tasks,
         lease_timeout: meta.lease_timeout.map(signed_duration_from_millis),
         heartbeat_interval: meta.heartbeat_interval.map(signed_duration_from_millis),
     })
+}
+
+fn timestamp_from_i64(
+    namespace: &str,
+    task_id: &str,
+    field: &str,
+    millis: i64,
+) -> Result<Timestamp, SpiderError> {
+    Timestamp::from_millisecond(millis).map_err(|error| {
+        SpiderError::scheduler(format!(
+            "redis scheduler snapshot `{field}` for namespace `{namespace}` task `{task_id}` is invalid: {error}"
+        ))
+    })
+}
+
+fn timestamp_from_u64(
+    namespace: &str,
+    task_id: &str,
+    field: &str,
+    millis: u64,
+) -> Result<Timestamp, SpiderError> {
+    let millis = i64::try_from(millis).map_err(|_| {
+        SpiderError::scheduler(format!(
+            "redis scheduler snapshot `{field}` for namespace `{namespace}` task `{task_id}` exceeds i64 millisecond range"
+        ))
+    })?;
+    timestamp_from_i64(namespace, task_id, field, millis)
+}
+
+fn parse_timestamp_score(
+    namespace: &str,
+    task_id: &str,
+    field: &str,
+    value: &str,
+) -> Result<i64, SpiderError> {
+    if let Ok(millis) = value.parse::<i64>() {
+        return Ok(millis);
+    }
+
+    let score = value.parse::<f64>().map_err(|error| {
+        SpiderError::scheduler(format!(
+            "redis scheduler snapshot `{field}` for namespace `{namespace}` task `{task_id}` is invalid: {error}"
+        ))
+    })?;
+    if !score.is_finite() || score.fract() != 0.0 {
+        return Err(SpiderError::scheduler(format!(
+            "redis scheduler snapshot `{field}` for namespace `{namespace}` task `{task_id}` is not an integer millisecond score: {value}"
+        )));
+    }
+    if score < i64::MIN as f64 || score > i64::MAX as f64 {
+        return Err(SpiderError::scheduler(format!(
+            "redis scheduler snapshot `{field}` for namespace `{namespace}` task `{task_id}` exceeds i64 millisecond range"
+        )));
+    }
+
+    Ok(score as i64)
 }
 
 fn redis_command<T>(name: &'static str, args: impl IntoIterator<Item = T>) -> redis::Cmd
@@ -1515,7 +1709,11 @@ mod tests {
             .with_worker_id("worker-a")
             .with_lease_timeout(SignedDuration::from_millis(50));
         scheduler
-            .enqueue(Task::new(Request::new("https://example.com/ready")))
+            .enqueue(
+                Task::new(Request::new("https://example.com/ready"))
+                    .with_priority(7)
+                    .with_depth(2),
+            )
             .await
             .unwrap();
         scheduler
@@ -1543,6 +1741,7 @@ mod tests {
         assert_eq!(snapshot.deadline_count, 1);
         assert_eq!(snapshot.reclaimed_total, 0);
         assert_eq!(snapshot.reclaimed_in_refresh, 0);
+        assert_eq!(snapshot.inflight_tasks.len(), 1);
         assert_eq!(
             snapshot.lease_timeout,
             Some(SignedDuration::from_millis(50))
@@ -1551,6 +1750,15 @@ mod tests {
             snapshot.heartbeat_interval,
             Some(SignedDuration::from_millis(25))
         );
+        let inflight = &snapshot.inflight_tasks[0];
+        assert_eq!(inflight.task_id, claimed.task.id);
+        assert_eq!(inflight.url, "https://example.com/ready");
+        assert_eq!(inflight.worker_id.as_deref(), Some("worker-a"));
+        assert_eq!(inflight.lease_id.as_deref(), Some(claimed.lease.lease_id()));
+        assert!(inflight.deadline.is_some());
+        assert_eq!(inflight.priority, 7);
+        assert_eq!(inflight.depth, 2);
+        assert_eq!(inflight.ready_at, None);
 
         scheduler.complete(&claimed.lease).await.unwrap();
         scheduler.close().await.unwrap();
@@ -1593,10 +1801,12 @@ mod tests {
         assert!(first_snapshot.worker_ids.is_empty());
         assert_eq!(first_snapshot.active_lease_count, 0);
         assert_eq!(first_snapshot.deadline_count, 0);
+        assert!(first_snapshot.inflight_tasks.is_empty());
 
         let second_snapshot = second.snapshot().await.unwrap();
         assert_eq!(second_snapshot.reclaimed_in_refresh, 0);
         assert_eq!(second_snapshot.reclaimed_total, 1);
+        assert!(second_snapshot.inflight_tasks.is_empty());
 
         let reclaimed = second.take_ready().await.unwrap().unwrap();
         assert_eq!(reclaimed.task.id, claimed.task.id);
@@ -1683,6 +1893,16 @@ mod tests {
             news_snapshot.heartbeat_interval,
             Some(SignedDuration::from_millis(25))
         );
+        assert_eq!(news_snapshot.inflight_tasks.len(), 1);
+        let news_task = &news_snapshot.inflight_tasks[0];
+        assert_eq!(news_task.task_id, claimed.task.id);
+        assert_eq!(news_task.url, "https://example.com/news");
+        assert_eq!(news_task.worker_id.as_deref(), Some("news-worker"));
+        assert_eq!(
+            news_task.lease_id.as_deref(),
+            Some(claimed.lease.lease_id())
+        );
+        assert!(news_task.deadline.is_some());
 
         let blog_snapshot = snapshots
             .iter()
@@ -1705,6 +1925,7 @@ mod tests {
             blog_snapshot.heartbeat_interval,
             Some(SignedDuration::from_millis(20))
         );
+        assert!(blog_snapshot.inflight_tasks.is_empty());
 
         news.complete(&claimed.lease).await.unwrap();
         news.close().await.unwrap();

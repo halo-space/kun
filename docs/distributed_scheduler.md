@@ -72,6 +72,16 @@ println!("workers: {:?}", snapshot.worker_ids);
 println!("active leases: {}", snapshot.active_lease_count);
 println!("reclaimed total: {}", snapshot.reclaimed_total);
 println!("reclaimed in refresh: {}", snapshot.reclaimed_in_refresh);
+for task in &snapshot.inflight_tasks {
+    println!(
+        "inflight task={} url={} worker={:?} lease={:?} deadline={:?}",
+        task.task_id.as_str(),
+        task.url,
+        task.worker_id,
+        task.lease_id,
+        task.deadline
+    );
+}
 ```
 
 这里有两个边界要区分：
@@ -98,6 +108,14 @@ for snapshot in snapshots {
     println!("counts: {:?}", snapshot.counts);
     println!("workers: {:?}", snapshot.worker_ids);
     println!("reclaimed_total: {}", snapshot.reclaimed_total);
+    for task in &snapshot.inflight_tasks {
+        println!(
+            "  inflight task={} worker={:?} lease={:?}",
+            task.task_id.as_str(),
+            task.worker_id,
+            task.lease_id
+        );
+    }
 }
 ```
 
