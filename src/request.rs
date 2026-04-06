@@ -353,7 +353,7 @@ mod option_signed_duration_millis {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::request::browser::{Driver, Engine};
+    use crate::request::browser::{Driver, Engine, FingerprintProfile, SessionReuse};
     use crate::value::Value;
     use jiff::SignedDuration;
 
@@ -505,7 +505,14 @@ mod tests {
                     .with_driver(Driver::Playwright)
                     .with_engine(Engine::Chromium)
                     .with_stealth(true)
-                    .with_fingerprint_profile("desktop_zh_cn")
+                    .with_custom_fingerprint_profile(
+                        FingerprintProfile::new()
+                            .with_locale("zh-CN")
+                            .with_timezone("Asia/Shanghai")
+                            .with_accept_language("zh-CN,zh;q=0.9,en;q=0.8")
+                            .with_languages(["zh-CN", "zh", "en"]),
+                    )
+                    .with_session_reuse(SessionReuse::Context)
                     .with_wait_for("#app"),
             );
 
@@ -548,6 +555,18 @@ mod tests {
                 .as_ref()
                 .and_then(|config| config.wait_for.as_deref()),
             Some("#app")
+        );
+        assert_eq!(
+            decoded.browser.as_ref().map(|config| config.session_reuse),
+            Some(SessionReuse::Context)
+        );
+        assert_eq!(
+            decoded
+                .browser
+                .as_ref()
+                .and_then(|config| config.custom_fingerprint_profile.as_ref())
+                .map(|profile| profile.timezone.as_str()),
+            Some("Asia/Shanghai")
         );
     }
 }

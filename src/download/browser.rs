@@ -2,15 +2,15 @@ use crate::download::traits::Downloader;
 use crate::error::SpiderError;
 #[cfg(any(feature = "browser", test))]
 use crate::request::Headers;
-use crate::request::browser::Config as BrowserConfig;
+use crate::request::browser::{Config as BrowserConfig, FingerprintProfile, SessionReuse};
 use crate::request::{Request, RequestMode};
 use crate::response::Response;
 #[cfg(feature = "browser")]
 use jiff::SignedDuration;
 #[cfg(feature = "browser")]
 use playwright_rs::protocol::{
-    BrowserContextOptions, ContinueOptions, Cookie, GotoOptions, Playwright, ProxySettings,
-    Viewport,
+    BrowserContext, BrowserContextOptions, ContinueOptions, Cookie, GotoOptions, Page, Playwright,
+    ProxySettings, Viewport,
 };
 #[cfg(any(feature = "browser", test))]
 use serde_json::json;
@@ -96,11 +96,12 @@ fn browser_feature_disabled_error() -> SpiderError {
 }
 
 fn validate_browser_request_contract(
-    _request: &Request,
+    request: &Request,
     config: &BrowserConfig,
 ) -> Result<(), SpiderError> {
     resolve_fingerprint_profile(config).map(|_| ())?;
     validate_browser_wait_for(config)?;
+    validate_browser_session_reuse(request, config)?;
 
     Ok(())
 }
@@ -117,12 +118,71 @@ fn validate_browser_wait_for(config: &BrowserConfig) -> Result<(), SpiderError> 
     Ok(())
 }
 
+fn validate_browser_session_reuse(
+    request: &Request,
+    config: &BrowserConfig,
+) -> Result<(), SpiderError> {
+    if config.session_reuse != SessionReuse::Storage && request.session.is_none() {
+        return Err(SpiderError::download(
+            "browser session_reuse=context/page requires request.session",
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_custom_fingerprint_profile(profile: &FingerprintProfile) -> Result<(), SpiderError> {
+    validate_non_empty_browser_profile_field("user_agent", &profile.user_agent)?;
+    validate_non_empty_browser_profile_field("locale", &profile.locale)?;
+    validate_non_empty_browser_profile_field("timezone", &profile.timezone)?;
+    validate_non_empty_browser_profile_field("accept_language", &profile.accept_language)?;
+    validate_non_empty_browser_profile_field("platform", &profile.platform)?;
+    validate_non_empty_browser_profile_field("vendor", &profile.vendor)?;
+
+    if profile.languages.is_empty() {
+        return Err(SpiderError::download(
+            "browser custom_fingerprint_profile.languages must not be empty",
+        ));
+    }
+    if profile
+        .languages
+        .iter()
+        .any(|value| value.trim().is_empty())
+    {
+        return Err(SpiderError::download(
+            "browser custom_fingerprint_profile.languages must not contain empty values",
+        ));
+    }
+    if profile.hardware_concurrency == 0 {
+        return Err(SpiderError::download(
+            "browser custom_fingerprint_profile.hardware_concurrency must be greater than 0",
+        ));
+    }
+    if profile.device_memory == 0 {
+        return Err(SpiderError::download(
+            "browser custom_fingerprint_profile.device_memory must be greater than 0",
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_non_empty_browser_profile_field(field: &str, value: &str) -> Result<(), SpiderError> {
+    if value.trim().is_empty() {
+        return Err(SpiderError::download(format!(
+            "browser custom_fingerprint_profile.{field} must not be empty"
+        )));
+    }
+
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct BrowserFingerprintProfile {
+struct BuiltinBrowserFingerprintProfile {
     name: &'static str,
     user_agent: &'static str,
     locale: &'static str,
-    timezone_id: &'static str,
+    timezone: &'static str,
     accept_language: &'static str,
     languages: &'static [&'static str],
     platform: &'static str,
@@ -132,12 +192,28 @@ struct BrowserFingerprintProfile {
     max_touch_points: u8,
 }
 
-const BROWSER_FINGERPRINT_PROFILES: [BrowserFingerprintProfile; 6] = [
-    BrowserFingerprintProfile {
+impl BuiltinBrowserFingerprintProfile {
+    fn to_profile(self) -> FingerprintProfile {
+        FingerprintProfile::new()
+            .with_user_agent(self.user_agent)
+            .with_locale(self.locale)
+            .with_timezone(self.timezone)
+            .with_accept_language(self.accept_language)
+            .with_languages(self.languages.iter().copied())
+            .with_platform(self.platform)
+            .with_vendor(self.vendor)
+            .with_hardware_concurrency(self.hardware_concurrency)
+            .with_device_memory(self.device_memory)
+            .with_max_touch_points(self.max_touch_points)
+    }
+}
+
+const BROWSER_FINGERPRINT_PROFILES: [BuiltinBrowserFingerprintProfile; 6] = [
+    BuiltinBrowserFingerprintProfile {
         name: "desktop_zh_cn",
         user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
         locale: "zh-CN",
-        timezone_id: "Asia/Shanghai",
+        timezone: "Asia/Shanghai",
         accept_language: "zh-CN,zh;q=0.9,en;q=0.8",
         languages: &["zh-CN", "zh", "en"],
         platform: "Win32",
@@ -146,11 +222,11 @@ const BROWSER_FINGERPRINT_PROFILES: [BrowserFingerprintProfile; 6] = [
         device_memory: 8,
         max_touch_points: 0,
     },
-    BrowserFingerprintProfile {
+    BuiltinBrowserFingerprintProfile {
         name: "desktop_en_us",
         user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
         locale: "en-US",
-        timezone_id: "America/New_York",
+        timezone: "America/New_York",
         accept_language: "en-US,en;q=0.9",
         languages: &["en-US", "en"],
         platform: "Win32",
@@ -159,11 +235,11 @@ const BROWSER_FINGERPRINT_PROFILES: [BrowserFingerprintProfile; 6] = [
         device_memory: 8,
         max_touch_points: 0,
     },
-    BrowserFingerprintProfile {
+    BuiltinBrowserFingerprintProfile {
         name: "desktop_en_gb",
         user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
         locale: "en-GB",
-        timezone_id: "Europe/London",
+        timezone: "Europe/London",
         accept_language: "en-GB,en;q=0.9",
         languages: &["en-GB", "en"],
         platform: "Win32",
@@ -172,11 +248,11 @@ const BROWSER_FINGERPRINT_PROFILES: [BrowserFingerprintProfile; 6] = [
         device_memory: 8,
         max_touch_points: 0,
     },
-    BrowserFingerprintProfile {
+    BuiltinBrowserFingerprintProfile {
         name: "desktop_ja_jp",
         user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
         locale: "ja-JP",
-        timezone_id: "Asia/Tokyo",
+        timezone: "Asia/Tokyo",
         accept_language: "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
         languages: &["ja-JP", "ja", "en-US", "en"],
         platform: "Win32",
@@ -185,11 +261,11 @@ const BROWSER_FINGERPRINT_PROFILES: [BrowserFingerprintProfile; 6] = [
         device_memory: 8,
         max_touch_points: 0,
     },
-    BrowserFingerprintProfile {
+    BuiltinBrowserFingerprintProfile {
         name: "desktop_de_de",
         user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
         locale: "de-DE",
-        timezone_id: "Europe/Berlin",
+        timezone: "Europe/Berlin",
         accept_language: "de-DE,de;q=0.9,en;q=0.8",
         languages: &["de-DE", "de", "en"],
         platform: "Win32",
@@ -198,11 +274,11 @@ const BROWSER_FINGERPRINT_PROFILES: [BrowserFingerprintProfile; 6] = [
         device_memory: 8,
         max_touch_points: 0,
     },
-    BrowserFingerprintProfile {
+    BuiltinBrowserFingerprintProfile {
         name: "desktop_fr_fr",
         user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
         locale: "fr-FR",
-        timezone_id: "Europe/Paris",
+        timezone: "Europe/Paris",
         accept_language: "fr-FR,fr;q=0.9,en;q=0.8",
         languages: &["fr-FR", "fr", "en"],
         platform: "Win32",
@@ -213,19 +289,30 @@ const BROWSER_FINGERPRINT_PROFILES: [BrowserFingerprintProfile; 6] = [
     },
 ];
 
-fn builtin_browser_fingerprint_profiles() -> &'static [BrowserFingerprintProfile] {
+fn builtin_browser_fingerprint_profiles() -> &'static [BuiltinBrowserFingerprintProfile] {
     &BROWSER_FINGERPRINT_PROFILES
 }
 
-#[cfg(feature = "browser")]
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct BrowserExecutionPlan {
-    profile: Option<BrowserFingerprintProfile>,
-    init_script: Option<String>,
+fn builtin_browser_fingerprint_profile_names() -> String {
+    builtin_browser_fingerprint_profiles()
+        .iter()
+        .map(|profile| profile.name)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
-#[cfg(feature = "browser")]
+#[cfg(any(feature = "browser", test))]
+#[cfg_attr(all(test, not(feature = "browser")), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BrowserExecutionPlan {
+    profile: Option<FingerprintProfile>,
+    init_script: Option<String>,
+    session_reuse: SessionReuse,
+}
+
+#[cfg(any(feature = "browser", test))]
 impl BrowserExecutionPlan {
+    #[cfg_attr(all(test, not(feature = "browser")), allow(dead_code))]
     fn from_config(config: &BrowserConfig) -> Result<Self, SpiderError> {
         let profile = resolve_fingerprint_profile(config)?;
         let init_script = build_browser_init_script(config, profile.as_ref());
@@ -233,13 +320,25 @@ impl BrowserExecutionPlan {
         Ok(Self {
             profile,
             init_script,
+            session_reuse: config.session_reuse,
         })
     }
 }
 
 fn resolve_fingerprint_profile(
     config: &BrowserConfig,
-) -> Result<Option<BrowserFingerprintProfile>, SpiderError> {
+) -> Result<Option<FingerprintProfile>, SpiderError> {
+    if config.fingerprint_profile.is_some() && config.custom_fingerprint_profile.is_some() {
+        return Err(SpiderError::download(
+            "browser request cannot set both fingerprint_profile and custom_fingerprint_profile",
+        ));
+    }
+
+    if let Some(profile) = config.custom_fingerprint_profile.as_ref() {
+        validate_custom_fingerprint_profile(profile)?;
+        return Ok(Some(profile.clone()));
+    }
+
     let Some(profile_name) = config.fingerprint_profile.as_deref() else {
         return Ok(None);
     };
@@ -249,15 +348,10 @@ fn resolve_fingerprint_profile(
         .copied()
         .find(|profile| profile.name == profile_name)
     {
-        return Ok(Some(profile));
+        return Ok(Some(profile.to_profile()));
     }
 
-    let supported = builtin_browser_fingerprint_profiles()
-        .iter()
-        .map(|profile| profile.name)
-        .collect::<Vec<_>>()
-        .join(", ");
-
+    let supported = builtin_browser_fingerprint_profile_names();
     Err(SpiderError::download(format!(
         "browser fingerprint_profile is not supported on the Playwright route: {profile_name}; supported profiles: {supported}"
     )))
@@ -266,20 +360,25 @@ fn resolve_fingerprint_profile(
 #[cfg(any(feature = "browser", test))]
 fn build_browser_init_script(
     config: &BrowserConfig,
-    profile: Option<&BrowserFingerprintProfile>,
+    profile: Option<&FingerprintProfile>,
 ) -> Option<String> {
     if !config.stealth && profile.is_none() {
         return None;
     }
 
     let languages = profile
-        .map(|profile| profile.languages)
-        .unwrap_or(&["en-US", "en"]);
-    let language = languages.first().copied().unwrap_or("en-US");
-    let platform = profile.map(|profile| profile.platform).unwrap_or("Win32");
+        .map(|profile| profile.languages.clone())
+        .unwrap_or_else(|| vec!["en-US".to_string(), "en".to_string()]);
+    let language = languages
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "en-US".to_string());
+    let platform = profile
+        .map(|profile| profile.platform.clone())
+        .unwrap_or_else(|| "Win32".to_string());
     let vendor = profile
-        .map(|profile| profile.vendor)
-        .unwrap_or("Google Inc.");
+        .map(|profile| profile.vendor.clone())
+        .unwrap_or_else(|| "Google Inc.".to_string());
     let hardware_concurrency = profile
         .map(|profile| profile.hardware_concurrency)
         .unwrap_or(8);
@@ -503,20 +602,178 @@ async fn browser_response_metadata(
 }
 
 #[cfg(feature = "browser")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BrowserSessionSignature {
+    engine: crate::request::browser::Engine,
+    headless: bool,
+    viewport: crate::request::browser::Viewport,
+    stealth: bool,
+    session_reuse: SessionReuse,
+    profile: Option<FingerprintProfile>,
+    proxy: Option<String>,
+}
+
+#[cfg(feature = "browser")]
+impl BrowserSessionSignature {
+    fn for_request(
+        request: &Request,
+        config: &BrowserConfig,
+        execution_plan: &BrowserExecutionPlan,
+    ) -> Self {
+        Self {
+            engine: config.engine,
+            headless: config.headless,
+            viewport: config.viewport.clone(),
+            stealth: config.stealth,
+            session_reuse: execution_plan.session_reuse,
+            profile: execution_plan.profile.clone(),
+            proxy: request.proxy.as_ref().map(|proxy| proxy.url.clone()),
+        }
+    }
+}
+
+#[cfg(feature = "browser")]
+struct BrowserLiveSession {
+    signature: BrowserSessionSignature,
+    #[allow(dead_code)]
+    // Keeps the underlying Playwright server process alive for this live session.
+    playwright: Playwright,
+    context: BrowserContext,
+    page: Option<Page>,
+}
+
+#[cfg(feature = "browser")]
 async fn fetch_with_playwright_inner(
     request: &Request,
     config: &BrowserConfig,
 ) -> Result<BrowserFetchResult, SpiderError> {
     let _session_execution_guard = acquire_browser_session_execution_guard(request).await;
-    let playwright = Playwright::launch().await.map_err(map_playwright_error)?;
     let execution_plan = BrowserExecutionPlan::from_config(config)?;
+
+    if request.session.is_some() && execution_plan.session_reuse != SessionReuse::Storage {
+        return fetch_with_playwright_live_session(request, config, &execution_plan).await;
+    }
+
+    fetch_with_playwright_isolated_session(request, config, &execution_plan).await
+}
+
+#[cfg(feature = "browser")]
+async fn fetch_with_playwright_isolated_session(
+    request: &Request,
+    config: &BrowserConfig,
+    execution_plan: &BrowserExecutionPlan,
+) -> Result<BrowserFetchResult, SpiderError> {
+    let (playwright, context, user_data_dir) =
+        launch_browser_context(request, config, execution_plan).await?;
+    let outcome = run_browser_request_in_context(
+        &context,
+        request,
+        config,
+        execution_plan.profile.as_ref(),
+        false,
+        None,
+    )
+    .await
+    .map(|(result, _page)| result);
+
+    let close_outcome = context.close().await.map_err(map_playwright_error);
+    let shutdown_outcome = playwright.shutdown().await.map_err(map_playwright_error);
+    let cleanup_outcome = user_data_dir.cleanup().await;
+
+    match outcome {
+        Err(error) => {
+            let _ = close_outcome;
+            let _ = shutdown_outcome;
+            cleanup_outcome?;
+            Err(error)
+        }
+        Ok(result) => {
+            close_outcome?;
+            shutdown_outcome?;
+            cleanup_outcome?;
+            Ok(result)
+        }
+    }
+}
+
+#[cfg(feature = "browser")]
+async fn fetch_with_playwright_live_session(
+    request: &Request,
+    config: &BrowserConfig,
+    execution_plan: &BrowserExecutionPlan,
+) -> Result<BrowserFetchResult, SpiderError> {
+    let session_id = request
+        .session
+        .as_ref()
+        .map(|session| session.id.clone())
+        .ok_or_else(|| SpiderError::download("browser live session requires request.session"))?;
+    let signature = BrowserSessionSignature::for_request(request, config, execution_plan);
+    let mut session = match take_browser_live_session(&session_id).await {
+        Some(session) => {
+            if session.signature != signature {
+                store_browser_live_session(&session_id, session).await;
+                return Err(browser_live_session_mismatch_error(&session_id));
+            }
+            session
+        }
+        None => {
+            let (playwright, context, _user_data_dir) =
+                launch_browser_context(request, config, execution_plan).await?;
+            BrowserLiveSession {
+                signature: signature.clone(),
+                playwright,
+                context,
+                page: None,
+            }
+        }
+    };
+
+    let keep_page = execution_plan.session_reuse == SessionReuse::Page;
+    let existing_page = if keep_page { session.page.take() } else { None };
+    let outcome = run_browser_request_in_context(
+        &session.context,
+        request,
+        config,
+        execution_plan.profile.as_ref(),
+        keep_page,
+        existing_page,
+    )
+    .await;
+
+    match outcome {
+        Ok((result, page)) => {
+            session.page = page;
+            store_browser_live_session(&session_id, session).await;
+            Ok(result)
+        }
+        Err(error) => {
+            session.page = None;
+            store_browser_live_session(&session_id, session).await;
+            Err(error)
+        }
+    }
+}
+
+#[cfg(feature = "browser")]
+fn browser_live_session_mismatch_error(session_id: &str) -> SpiderError {
+    SpiderError::download(format!(
+        "browser live session `{session_id}` requires stable engine/headless/viewport/stealth/fingerprint_profile/proxy/session_reuse across requests"
+    ))
+}
+
+#[cfg(feature = "browser")]
+async fn launch_browser_context(
+    request: &Request,
+    config: &BrowserConfig,
+    execution_plan: &BrowserExecutionPlan,
+) -> Result<(Playwright, BrowserContext, BrowserUserDataDir), SpiderError> {
+    let playwright = Playwright::launch().await.map_err(map_playwright_error)?;
     let options = build_context_options(
         config,
         request,
         request.timeout,
         execution_plan.profile.as_ref(),
     )?;
-    let navigation_request_override = BrowserNavigationRequestOverride::for_request(request);
     let user_data_dir = BrowserUserDataDir::for_request(request).await?;
     let user_data_path = user_data_dir.path().to_string_lossy().into_owned();
 
@@ -543,45 +800,110 @@ async fn fetch_with_playwright_inner(
     let context = match context_result {
         Ok(context) => context,
         Err(error) => {
-            user_data_dir.cleanup().await?;
+            let cleanup_outcome = user_data_dir.cleanup().await;
+            let shutdown_outcome = playwright.shutdown().await.map_err(map_playwright_error);
+            cleanup_outcome?;
+            shutdown_outcome?;
             return Err(map_playwright_error(error));
         }
     };
 
-    let outcome = async {
-        apply_execution_plan_to_context(&context, &execution_plan).await?;
-        apply_request_cookies_to_context(&context, request).await?;
+    if let Err(error) = apply_execution_plan_to_context(&context, execution_plan).await {
+        let _ = context.close().await.map_err(map_playwright_error);
+        let shutdown_outcome = playwright.shutdown().await.map_err(map_playwright_error);
+        let cleanup_outcome = user_data_dir.cleanup().await;
+        cleanup_outcome?;
+        shutdown_outcome?;
+        return Err(error);
+    }
 
-        if let Some(navigation_request_override) = navigation_request_override.clone() {
-            let navigation_override_applied = Arc::new(AtomicBool::new(false));
-            let navigation_override_state = Arc::clone(&navigation_override_applied);
+    Ok((playwright, context, user_data_dir))
+}
 
-            context
-                .route("**", move |route| {
-                    let navigation_request_override = navigation_request_override.clone();
-                    let navigation_override_state = Arc::clone(&navigation_override_state);
+#[cfg(feature = "browser")]
+async fn run_browser_request_in_context(
+    context: &BrowserContext,
+    request: &Request,
+    config: &BrowserConfig,
+    profile: Option<&FingerprintProfile>,
+    keep_page: bool,
+    existing_page: Option<Page>,
+) -> Result<(BrowserFetchResult, Option<Page>), SpiderError> {
+    apply_request_state_to_context(context, request, profile).await?;
 
-                    async move {
-                        let intercepted_request = route.request();
+    let page = match existing_page.filter(|page| !page.is_closed()) {
+        Some(page) => page,
+        None => context.new_page().await.map_err(map_playwright_error)?,
+    };
+    let outcome = execute_browser_request_on_page(&page, request, config).await;
 
-                        if navigation_request_override.matches(
-                            intercepted_request.url(),
-                            intercepted_request.is_navigation_request(),
-                        ) && !navigation_override_state.swap(true, Ordering::SeqCst)
-                        {
-                            return route
-                                .continue_(Some(navigation_request_override.to_continue_options()))
-                                .await;
-                        }
-
-                        route.continue_(None).await
-                    }
-                })
-                .await
-                .map_err(map_playwright_error)?;
+    match outcome {
+        Ok(result) if keep_page && !page.is_closed() => Ok((result, Some(page))),
+        Ok(result) => {
+            if !page.is_closed() {
+                page.close().await.map_err(map_playwright_error)?;
+            }
+            Ok((result, None))
         }
+        Err(error) => {
+            if !page.is_closed() {
+                let _ = page.close().await.map_err(map_playwright_error);
+            }
+            Err(error)
+        }
+    }
+}
 
-        let page = context.new_page().await.map_err(map_playwright_error)?;
+#[cfg(feature = "browser")]
+async fn apply_request_state_to_context(
+    context: &BrowserContext,
+    request: &Request,
+    profile: Option<&FingerprintProfile>,
+) -> Result<(), SpiderError> {
+    context
+        .set_extra_http_headers(build_browser_context_headers(request, profile))
+        .await
+        .map_err(map_playwright_error)?;
+    apply_request_cookies_to_context(context, request).await
+}
+
+#[cfg(feature = "browser")]
+async fn execute_browser_request_on_page(
+    page: &Page,
+    request: &Request,
+    config: &BrowserConfig,
+) -> Result<BrowserFetchResult, SpiderError> {
+    let navigation_request_override = BrowserNavigationRequestOverride::for_request(request);
+
+    if let Some(navigation_request_override) = navigation_request_override.clone() {
+        let navigation_override_applied = Arc::new(AtomicBool::new(false));
+        let navigation_override_state = Arc::clone(&navigation_override_applied);
+
+        page.route("**", move |route| {
+            let navigation_request_override = navigation_request_override.clone();
+            let navigation_override_state = Arc::clone(&navigation_override_state);
+
+            async move {
+                let intercepted_request = route.request();
+
+                if navigation_request_override.matches(
+                    intercepted_request.url(),
+                    intercepted_request.is_navigation_request(),
+                ) && !navigation_override_state.swap(true, Ordering::SeqCst)
+                {
+                    return route
+                        .continue_(Some(navigation_request_override.to_continue_options()))
+                        .await;
+                }
+
+                route.continue_(None).await
+            }
+        })
+        .await
+        .map_err(map_playwright_error)?;
+    }
+
+    let outcome = async {
         let goto = request
             .timeout
             .map(|timeout| {
@@ -596,7 +918,6 @@ async fn fetch_with_playwright_inner(
             .goto(&request.url, goto)
             .await
             .map_err(map_playwright_error)?;
-
         let frame = page.main_frame().await.map_err(map_playwright_error)?;
 
         if let Some(selector) = &config.wait_for {
@@ -615,13 +936,13 @@ async fn fetch_with_playwright_inner(
     }
     .await;
 
-    let close_outcome = context.close().await.map_err(map_playwright_error);
-    let cleanup_outcome = user_data_dir.cleanup().await;
-
+    let cleanup_outcome = page.unroute_all(None).await.map_err(map_playwright_error);
     match outcome {
-        Err(error) => Err(error),
+        Err(error) => {
+            let _ = cleanup_outcome;
+            Err(error)
+        }
         Ok(result) => {
-            close_outcome?;
             cleanup_outcome?;
             Ok(result)
         }
@@ -633,7 +954,7 @@ fn build_context_options(
     config: &BrowserConfig,
     request: &Request,
     timeout: Option<SignedDuration>,
-    profile: Option<&BrowserFingerprintProfile>,
+    profile: Option<&FingerprintProfile>,
 ) -> Result<BrowserContextOptions, SpiderError> {
     let mut builder = BrowserContextOptions::builder()
         .headless(config.headless)
@@ -644,9 +965,9 @@ fn build_context_options(
 
     if let Some(profile) = profile {
         builder = builder
-            .user_agent(profile.user_agent.to_string())
-            .locale(profile.locale.to_string())
-            .timezone_id(profile.timezone_id.to_string());
+            .user_agent(profile.user_agent.clone())
+            .locale(profile.locale.clone())
+            .timezone_id(profile.timezone.clone());
     }
 
     if let Some(timeout) = timeout {
@@ -674,7 +995,7 @@ fn build_context_options(
 
 #[cfg(feature = "browser")]
 async fn apply_execution_plan_to_context(
-    context: &playwright_rs::protocol::BrowserContext,
+    context: &BrowserContext,
     execution_plan: &BrowserExecutionPlan,
 ) -> Result<(), SpiderError> {
     let Some(init_script) = execution_plan.init_script.as_deref() else {
@@ -690,14 +1011,14 @@ async fn apply_execution_plan_to_context(
 #[cfg(any(feature = "browser", test))]
 fn build_browser_context_headers(
     request: &Request,
-    profile: Option<&BrowserFingerprintProfile>,
+    profile: Option<&FingerprintProfile>,
 ) -> std::collections::HashMap<String, String> {
     let mut headers = BTreeMap::new();
 
     if let Some(profile) = profile {
         headers.insert(
             "accept-language".to_string(),
-            profile.accept_language.to_string(),
+            profile.accept_language.clone(),
         );
     }
 
@@ -748,7 +1069,7 @@ fn build_browser_request_cookies(
 
 #[cfg(feature = "browser")]
 async fn apply_request_cookies_to_context(
-    context: &playwright_rs::protocol::BrowserContext,
+    context: &BrowserContext,
     request: &Request,
 ) -> Result<(), SpiderError> {
     let cookies = build_browser_request_cookies(request)?;
@@ -848,6 +1169,29 @@ async fn acquire_browser_session_execution_guard(
     let lock = browser_session_execution_lock(&session.id).await;
     let guard = lock.lock_owned().await;
     Some(BrowserSessionExecutionGuard { _guard: guard })
+}
+
+#[cfg(feature = "browser")]
+fn browser_live_session_cache() -> &'static tokio::sync::Mutex<BTreeMap<String, BrowserLiveSession>>
+{
+    static LIVE_SESSIONS: OnceLock<tokio::sync::Mutex<BTreeMap<String, BrowserLiveSession>>> =
+        OnceLock::new();
+
+    LIVE_SESSIONS.get_or_init(|| tokio::sync::Mutex::new(BTreeMap::new()))
+}
+
+#[cfg(feature = "browser")]
+async fn take_browser_live_session(session_id: &str) -> Option<BrowserLiveSession> {
+    let cache = browser_live_session_cache();
+    let mut cache = cache.lock().await;
+    cache.remove(session_id)
+}
+
+#[cfg(feature = "browser")]
+async fn store_browser_live_session(session_id: &str, session: BrowserLiveSession) {
+    let cache = browser_live_session_cache();
+    let mut cache = cache.lock().await;
+    cache.insert(session_id.to_string(), session);
 }
 
 #[cfg(any(feature = "browser", test))]
@@ -953,7 +1297,7 @@ impl TemporaryUserDataDir {
 mod tests {
     use super::*;
     use crate::download::traits::Downloader;
-    use crate::request::browser::Config as BrowserConfig;
+    use crate::request::browser::{Config as BrowserConfig, FingerprintProfile, SessionReuse};
     use std::sync::Arc;
 
     #[test]
@@ -999,6 +1343,29 @@ mod tests {
     }
 
     #[test]
+    fn browser_request_contract_allows_custom_fingerprint_profile() {
+        let request = Request::browser("https://example.com").with_browser(
+            BrowserConfig::default().with_custom_fingerprint_profile(
+                FingerprintProfile::new()
+                    .with_locale("ja-JP")
+                    .with_timezone("Asia/Tokyo")
+                    .with_accept_language("ja-JP,ja;q=0.9")
+                    .with_languages(["ja-JP", "ja"]),
+            ),
+        );
+
+        let result = validate_browser_request_contract(
+            &request,
+            request
+                .browser
+                .as_ref()
+                .expect("browser config should exist"),
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
     fn browser_request_contract_rejects_unsupported_fingerprint_profile() {
         let request = Request::browser("https://example.com")
             .with_browser(BrowserConfig::default().with_fingerprint_profile("desktop_unknown"));
@@ -1018,6 +1385,43 @@ mod tests {
                 "browser fingerprint_profile is not supported on the Playwright route: desktop_unknown; supported profiles: desktop_zh_cn, desktop_en_us, desktop_en_gb, desktop_ja_jp, desktop_de_de, desktop_fr_fr",
             )
         );
+    }
+
+    #[test]
+    fn browser_request_contract_rejects_live_reuse_without_session() {
+        let request = Request::browser("https://example.com")
+            .with_browser(BrowserConfig::default().with_session_reuse(SessionReuse::Context));
+
+        let error = validate_browser_request_contract(
+            &request,
+            request
+                .browser
+                .as_ref()
+                .expect("browser config should exist"),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            SpiderError::download("browser session_reuse=context/page requires request.session")
+        );
+    }
+
+    #[test]
+    fn browser_request_contract_allows_live_reuse_with_session() {
+        let request = Request::browser("https://example.com")
+            .with_session("shared-browser")
+            .with_browser(BrowserConfig::default().with_session_reuse(SessionReuse::Page));
+
+        let result = validate_browser_request_contract(
+            &request,
+            request
+                .browser
+                .as_ref()
+                .expect("browser config should exist"),
+        );
+
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -1236,10 +1640,34 @@ mod tests {
             .unwrap()
             .expect("profile should resolve");
 
-        assert_eq!(profile.name, "desktop_zh_cn");
+        assert_eq!(
+            profile.user_agent,
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
+        );
         assert_eq!(profile.locale, "zh-CN");
-        assert_eq!(profile.timezone_id, "Asia/Shanghai");
-        assert_eq!(profile.languages, ["zh-CN", "zh", "en"]);
+        assert_eq!(profile.timezone, "Asia/Shanghai");
+        assert_eq!(profile.languages, vec!["zh-CN", "zh", "en"]);
+    }
+
+    #[test]
+    fn resolve_fingerprint_profile_returns_custom_profile() {
+        let config = BrowserConfig::default().with_custom_fingerprint_profile(
+            FingerprintProfile::new()
+                .with_user_agent("custom-agent")
+                .with_locale("fr-FR")
+                .with_timezone("Europe/Paris")
+                .with_accept_language("fr-FR,fr;q=0.9")
+                .with_languages(["fr-FR", "fr"]),
+        );
+
+        let profile = resolve_fingerprint_profile(&config)
+            .unwrap()
+            .expect("profile should resolve");
+
+        assert_eq!(profile.user_agent, "custom-agent");
+        assert_eq!(profile.locale, "fr-FR");
+        assert_eq!(profile.timezone, "Europe/Paris");
+        assert_eq!(profile.languages, vec!["fr-FR", "fr"]);
     }
 
     #[test]

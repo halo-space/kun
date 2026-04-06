@@ -54,7 +54,7 @@ README 这里只保留总览；模块级细节统一放到 [docs/capabilities.md
 - 观测能力还不完整：虽然已经有细粒度 `stats`、`signals / extensions` 和 `Engine::with_stats_reporter(...)`，但还没有内置 Prometheus / OpenTelemetry exporter、trace 链路、持久化事件总线或跨 job 运维视角。
 - durable scheduler 已经可用，但更强的分布式协调、事务边界、跨 worker ownership / heartbeat 运维语义还没完全统一收口。
 - `store` 边界已经建立，但更丰富的文件格式、更高阶消息语义和更多内置外部系统适配还没有继续铺开。
-- browser 已经是可用的渲染型下载器，但更完整 stealth、自定义 fingerprint profile、更细粒度的 context/page 复用策略还没补齐。
+- browser 已经支持内置 profile、结构化自定义 profile 与显式 `session_reuse`；当前剩余缺口主要是更高阶第三方 stealth 套件与跨 engine 更完整的品牌级指纹伪装。
 - validation 本身已经比较完整，但“校验失败如何映射到 runtime 行为”这层统一策略还没完全收口。
 - plugin 自动装载当前仍只支持 `middleware` kind；`store`、`scheduler`、`dedup`、`robots`、`http`、`browser` 这些 kind 还没有真正自动接线。
 - DSL 继续后置，尚未完全追平代码爬虫已经具备的共享 request / parse / schedule / validation 能力。
@@ -541,13 +541,20 @@ Spider / rules
 - request proxy
 - request session
 - built-in `fingerprint_profile = desktop_zh_cn | desktop_en_us | desktop_en_gb | desktop_ja_jp | desktop_de_de | desktop_fr_fr`
+- structured `custom_fingerprint_profile`
+- explicit `session_reuse = storage | context | page`
 - richer `stealth = true` bootstrap
 - browser response status / headers
 - 页面渲染后的 HTML 抓取
 
 其中 browser `session` 当前会把同一个 session id 映射到稳定的 Playwright user data dir，
-用于复用 cookies 和 local storage 这类浏览器态数据；user data dir、临时 profile 目录和会话锁这条实现路径也已经收口到更适合 async runtime 的处理方式；相同 session id 的实际浏览器执行会按 session 串行化，
-避免共享 profile 目录时出现竞态。
+用于复用 cookies 和 local storage 这类浏览器态数据；同时 `session_reuse` 现在也可以显式选择：
+
+- `storage`：只复用稳定 user data dir，每次请求仍新建并关闭 context/page
+- `context`：同一 session 复用 live context，但每次请求新建 page
+- `page`：同一 session 复用 live context 和同一张 live page
+
+user data dir、临时 profile 目录和会话锁这条实现路径也已经收口到更适合 async runtime 的处理方式；相同 session id 的实际浏览器执行仍会按 session 串行化，避免共享 profile 目录或 live runtime 时出现竞态。
 
 当前 browser `Response` 会带上真实的导航 `status` 与响应头；`protocol` 继续表示
 browser 执行路径，`ip_address` 与 `certificate` 由于 Playwright 当前接口限制仍保持为空。
@@ -558,13 +565,14 @@ browser 执行路径，`ip_address` 与 `certificate` 由于 Playwright 当前�
 当前已经支持的 browser 指纹能力边界：
 
 - `fingerprint_profile` 当前只支持内置 profile：`desktop_zh_cn`、`desktop_en_us`、`desktop_en_gb`、`desktop_ja_jp`、`desktop_de_de`、`desktop_fr_fr`
+- `custom_fingerprint_profile` 可以直接传结构化 profile，不必先注册新的内置 preset 名称
 - 这些 profile 会稳定映射 `user_agent`、`locale`、`timezone`、`accept-language`、`languages`、`platform`
 - `stealth = true` 当前会注入一版更完整但仍然克制的 bootstrap，覆盖 `navigator.webdriver`、`navigator.language(s)`、`navigator.platform`、`navigator.vendor`、`hardwareConcurrency`、`deviceMemory`、`maxTouchPoints`、`plugins`、`mimeTypes`、`pdfViewerEnabled`、screen depth、notifications permissions 查询补丁，以及 Chromium 路线上的最小 `window.chrome` / `navigator.userAgentData`
 - 这组 profile 和 stealth 仍然只是稳定内置 preset，不追求跨所有 Playwright engine 的“完全品牌一致”高阶伪装能力
 
 当前仍未实现、并且会继续显式报错的能力：
 
-- 自定义 `fingerprint_profile` 名称或结构化自定义 profile
+- 自定义 `fingerprint_profile` 名称注册机制
 - 更完整的第三方 stealth 套件或更高阶浏览器指纹伪装能力
 
 如果当前构建没有启用 `browser` feature，browser request 会直接返回显式错误，不会再返回 stub response。
@@ -589,11 +597,19 @@ use jiff::SignedDuration;
 
 let request = Request::browser("https://example.com/app")
     .with_timeout(SignedDuration::from_secs(15))
+    .with_session("news-browser")
     .with_browser(
         browser::Config::default()
             .with_engine(browser::Engine::Chromium)
             .with_wait_for("#app")
-            .with_fingerprint_profile("desktop_ja_jp")
+            .with_custom_fingerprint_profile(
+                browser::FingerprintProfile::new()
+                    .with_locale("ja-JP")
+                    .with_timezone("Asia/Tokyo")
+                    .with_accept_language("ja-JP,ja;q=0.9")
+                    .with_languages(["ja-JP", "ja", "en-US", "en"]),
+            )
+            .with_session_reuse(browser::SessionReuse::Context)
             .with_stealth(true),
     );
 ```
