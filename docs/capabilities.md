@@ -15,7 +15,10 @@ README 负责总览，这里负责把每个模块现在到底能做什么、还�
 
 如果只看“代码爬虫底层能力”这一层，而不看 DSL，当前和 Scrapy 更完整运行时相比，最主要的剩余缺口是：
 
-- 更完整的 `signals / extensions` 生态、exporter 与跨 job 运维能力还没补完
+- 更完整的观测能力：exporter、trace 链路、跨 job 运维视角还没补完
+- 更强的分布式 scheduler 协调与事务语义还没完全统一
+- browser 的高级 stealth / profile / context 复用能力还没补齐
+- plugin 自动装载与 DSL 对齐仍明显落后于底层 runtime 能力
 
 ## Request
 

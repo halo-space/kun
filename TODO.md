@@ -50,9 +50,9 @@
 ## 6. Runtime 观测与抓取策略缺口
 
 - 当前已经有最小 `Engine::stats()` 运行时快照，包含 `request_count`、`response_count`、`error_count`、`retry_count`、`item_count` 与 `pipeline_drop_count`。
-- 当前 stats 还是 engine 实例内的内存累计计数，还没有 Prometheus / OpenTelemetry exporter 或持久化/外发能力。
+- 当前也已经有最小 `signals / extensions` 与 `Engine::with_stats_reporter(...)` 观测边界，但还没有 Prometheus / OpenTelemetry exporter、trace 链路、持久化事件总线或跨 job 运维视角。
 - 当前 `robots.txt` 已支持 file cache、更完整 group / wildcard 规则、`Crawl-delay` / `Request-rate` / `Sitemap`，以及 `Site::origin / host / pattern` 这套显式站点策略 overlay；更复杂的跨 job 共享策略与运维能力还没有统一。
-- HTTP cache / conditional request 仍未实现，`ETag` / `Last-Modified` 语义还没有进入下载运行时；当前已明确列为 `P3`，放到第三期再做。
+- 当前 HTTP cache 已支持 `ETag / Last-Modified` 条件请求、`ttl`、`validators / response` 策略和 file backend；更完整的 `Cache-Control / Expires / Vary` 语义、分层缓存策略与跨进程复用能力还没有继续收口。
 
 ## 7. Plugin 边界
 
