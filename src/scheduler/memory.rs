@@ -556,6 +556,13 @@ mod tests {
     #[test]
     fn memory_scheduler_scopes_and_snapshots_stay_uniform() {
         let scheduler = Memory::default().with_scope("jobs:memory");
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/ready")))).unwrap();
+        block_on(scheduler.enqueue(Task::with_delay(
+            Request::new("https://example.com/delayed"),
+            500,
+        )))
+        .unwrap();
+        let _claimed = block_on(scheduler.take_ready()).unwrap().unwrap();
 
         let scopes = block_on(scheduler.scopes()).unwrap();
         assert_eq!(scopes, vec!["jobs:memory".to_string()]);
@@ -570,8 +577,46 @@ mod tests {
         let filtered_snapshots = block_on(scheduler.snapshots_with_prefix("jobs:")).unwrap();
         assert_eq!(filtered_snapshots.len(), 1);
         assert_eq!(filtered_snapshots[0].scope, "jobs:memory");
+        assert_eq!(
+            filtered_snapshots[0].counts,
+            Counts {
+                ready: 0,
+                delayed: 1,
+                inflight: 1,
+            }
+        );
         let no_snapshots = block_on(scheduler.snapshots_with_prefix("other:")).unwrap();
         assert!(no_snapshots.is_empty());
+
+        let overview = block_on(scheduler.overview()).unwrap();
+        assert_eq!(overview.scope_count, 1);
+        assert_eq!(overview.pending_scope_count, 1);
+        assert_eq!(overview.stale_scope_count, 0);
+        assert_eq!(
+            overview.counts,
+            Counts {
+                ready: 0,
+                delayed: 1,
+                inflight: 1,
+            }
+        );
+        assert_eq!(overview.worker_count, 0);
+        assert_eq!(overview.stale_worker_count, 0);
+        assert_eq!(overview.active_lease_count, 0);
+        assert_eq!(overview.reclaimed_total, 0);
+
+        let filtered_overview = block_on(scheduler.overview_with_prefix("jobs:")).unwrap();
+        assert_eq!(filtered_overview, overview);
+
+        let no_overview = block_on(scheduler.overview_with_prefix("other:")).unwrap();
+        assert_eq!(no_overview.scope_count, 0);
+        assert_eq!(no_overview.pending_scope_count, 0);
+        assert_eq!(no_overview.stale_scope_count, 0);
+        assert_eq!(no_overview.counts, Counts::default());
+        assert_eq!(no_overview.worker_count, 0);
+        assert_eq!(no_overview.stale_worker_count, 0);
+        assert_eq!(no_overview.active_lease_count, 0);
+        assert_eq!(no_overview.reclaimed_total, 0);
     }
 
     fn block_on<F: Future>(future: F) -> F::Output {

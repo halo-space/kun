@@ -2290,6 +2290,50 @@ mod tests {
             Some(SignedDuration::from_millis(20))
         );
 
+        let overview = news.overview().await.unwrap();
+        assert_eq!(overview.scope_count, 2);
+        assert_eq!(overview.pending_scope_count, 2);
+        assert_eq!(overview.stale_scope_count, 0);
+        assert_eq!(
+            overview.counts,
+            Counts {
+                ready: 0,
+                delayed: 1,
+                inflight: 1,
+            }
+        );
+        assert_eq!(overview.worker_count, 2);
+        assert_eq!(overview.stale_worker_count, 0);
+        assert_eq!(overview.active_lease_count, 1);
+        assert_eq!(overview.reclaimed_total, 0);
+
+        let blog_overview = news.overview_with_prefix("jobs:blog").await.unwrap();
+        assert_eq!(blog_overview.scope_count, 1);
+        assert_eq!(blog_overview.pending_scope_count, 1);
+        assert_eq!(blog_overview.stale_scope_count, 0);
+        assert_eq!(
+            blog_overview.counts,
+            Counts {
+                ready: 0,
+                delayed: 1,
+                inflight: 0,
+            }
+        );
+        assert_eq!(blog_overview.worker_count, 1);
+        assert_eq!(blog_overview.stale_worker_count, 0);
+        assert_eq!(blog_overview.active_lease_count, 0);
+        assert_eq!(blog_overview.reclaimed_total, 0);
+
+        let no_overview = news.overview_with_prefix("other:").await.unwrap();
+        assert_eq!(no_overview.scope_count, 0);
+        assert_eq!(no_overview.pending_scope_count, 0);
+        assert_eq!(no_overview.stale_scope_count, 0);
+        assert_eq!(no_overview.counts, Counts::default());
+        assert_eq!(no_overview.worker_count, 0);
+        assert_eq!(no_overview.stale_worker_count, 0);
+        assert_eq!(no_overview.active_lease_count, 0);
+        assert_eq!(no_overview.reclaimed_total, 0);
+
         news.complete(&claimed.lease).await.unwrap();
         news.close().await.unwrap();
         blog.close().await.unwrap();

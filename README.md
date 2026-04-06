@@ -33,7 +33,7 @@ README 这里只保留总览；模块级细节统一放到 [docs/capabilities.md
 - `download::Browser` 已具备最小可用浏览器下载能力，并支持统一 `Request` 上的 `method` / `body` / `headers` / `timeout` / `proxy` / cookies / `session`
 - `Response.body` 与 `Response.text` 的语义已经明确并统一解码
 - Spider 现在除了 `start_urls()` / `build_start_urls()`，也可以直接覆写 `build_start_requests()` 返回完整 `Request`；默认仍然是把 URL 自动包成 `Request::new(...)`
-- `scheduler::Memory` 与 `scheduler::Redis` 已把任务状态收口为 `ready / delayed / inflight`，并支持 `priority / depth` 排序；其中 `scheduler::Memory` 仍支持 `scheduler::checkpoint::Checkpoint` 导出/恢复，`scheduler::Redis` 也已补最小 `lease_timeout` stale inflight reclaim，把 `enqueue / claim / complete / requeue / reclaim` 这些关键状态迁移收口成 Redis 原子脚本；现在所有 scheduler 后端统一通过 `Scheduler` 暴露 `checkpoint() / counts() / snapshot() / scopes() / snapshots()` 这组读能力，`Redis` 这类共享后端可以返回多个 scope，本地 `Memory` 则返回当前 scope
+- `scheduler::Memory` 与 `scheduler::Redis` 已把任务状态收口为 `ready / delayed / inflight`，并支持 `priority / depth` 排序；其中 `scheduler::Memory` 仍支持 `scheduler::checkpoint::Checkpoint` 导出/恢复，`scheduler::Redis` 也已补最小 `lease_timeout` stale inflight reclaim，把 `enqueue / claim / complete / requeue / reclaim` 这些关键状态迁移收口成 Redis 原子脚本；现在所有 scheduler 后端统一通过 `Scheduler` 暴露 `checkpoint() / counts() / snapshot() / scopes() / snapshots() / overview()` 这组读能力，`Redis` 这类共享后端可以返回多个 scope，本地 `Memory` 则返回当前 scope
 - 已提供 `scheduler::checkpoint::File`、`scheduler::checkpoint::Redis` 与 `scheduler::checkpoint::Memory`，用于文件、Redis 的 scheduler checkpoint 持久化；也已提供直接基于 Redis 的 durable scheduler
 - `dedup` 已从默认 middleware 收口为显式 engine 组件；当前默认使用精确 `dedup::Memory`，也内置可选 `dedup::Bloom`，并可以通过 `Engine::with_dedup(...)` 切换为其它实现
 - `robots` 已提升为显式 engine 组件；当前默认使用 `robots::Memory`，也可以通过 `Engine::with_robots(...)` 切换为其它实现
@@ -52,7 +52,7 @@ README 这里只保留总览；模块级细节统一放到 [docs/capabilities.md
 当前仍待补齐的底层能力：
 
 - 观测能力还不完整：虽然已经有细粒度 `stats`、`signals / extensions` 和 `Engine::with_stats_reporter(...)`，但还没有内置 Prometheus / OpenTelemetry exporter、trace 链路、持久化事件总线或跨 job 运维视角。
-- durable scheduler 已经覆盖 worker ownership、heartbeat、stale reclaim、scope snapshot 与 worker 运行态运维视图；当前剩余缺口主要是更强的分布式协调、事务边界，以及跨 job 的统一观测与运维能力。
+- durable scheduler 已经覆盖 worker ownership、heartbeat、stale reclaim、scope snapshot、跨 scope `overview()` 与 worker 运行态运维视图；当前剩余缺口主要是更强的分布式协调、事务边界，以及更完整的 exporter / 事件总线 / 自动化运维能力。
 - `store` 边界已经建立，但更丰富的文件格式、更高阶消息语义和更多内置外部系统适配还没有继续铺开。
 - browser 已经支持内置 profile、结构化自定义 profile 与显式 `session_reuse`；当前剩余缺口主要是更高阶第三方 stealth 套件与跨 engine 更完整的品牌级指纹伪装。
 - validation 本身已经比较完整，但“校验失败如何映射到 runtime 行为”这层统一策略还没完全收口。
@@ -162,15 +162,16 @@ let settings = Settings::default()
 - `scheduler.snapshot().await?` 读取的是当前 scheduler scope 这一刻的即时状态；对 `scheduler::Redis` 来说，这个 scope 对应 Redis namespace；它和 `Engine::stats()` 不一样，后者仍然是单个 engine 实例生命周期内的累计计数
 - `snapshot.inflight_tasks` 会直接带出每条 inflight task 的 `task_id / url / worker_id / lease_id / deadline / priority / depth / ready_at`，运维时不需要再手工回读底层 Redis key
 - `snapshot.workers` 会直接带出每个 worker 的 `last_seen / is_stale / inflight_task_ids / next_deadline / lease_timeout / heartbeat_interval`
-- `scheduler.scopes()` / `scheduler.scopes_with_prefix(...)` / `scheduler.snapshots()` / `scheduler.snapshots_with_prefix(...)` 是统一的 scheduler 运维读入口；像 `scheduler::Redis` 这种共享后端可以返回多个 scope，`scheduler::Memory` 则默认只返回自己这一份 scope
+- `scheduler.scopes()` / `scheduler.scopes_with_prefix(...)` / `scheduler.snapshots()` / `scheduler.snapshots_with_prefix(...)` / `scheduler.overview()` / `scheduler.overview_with_prefix(...)` 是统一的 scheduler 运维读入口；像 `scheduler::Redis` 这种共享后端可以返回多个 scope，本地 `scheduler::Memory` 则默认只返回自己这一份 scope
+- 如果你只想先看聚合后的跨 scope 摘要，优先用 `scheduler.overview()` 或 `scheduler.overview_with_prefix(...)`；它会汇总 `scope_count / pending_scope_count / stale_scope_count / counts / worker_count / active_lease_count / reclaimed_total`
 - 如果你想调整这层恢复窗口，可以用 `.with_lease_timeout(...)`；如果你想显式指定 worker 身份或 heartbeat 节奏，可以再配 `.with_worker_id(...)`、`.with_heartbeat_interval(...)`；如果你明确不想要这层自动回收，也可以用 `.without_lease_timeout()`
 - `snapshot()`、`counts()`、`checkpoint()` 这类只读/静态读取入口不会把当前调用方登记成活跃 worker；真正会刷新 worker runtime 的只有 `enqueue / take_ready / complete / requeue / heartbeat`
 - 如果你是直接管理 scheduler 生命周期，不是交给 `Engine::run(...)`，结束时也可以统一调用 `scheduler.close().await?`；`Memory / Redis / 以后其它后端` 都走同一个关闭钩子
 - 如果你想自定义 checkpoint 后端，可以用 `scheduler::checkpoint::Memory::load(scheduler::checkpoint::Redis::new(...)).await?`
 - `checkpoint` 仍然只是静态快照恢复边界；它不会替代 durable scheduler 的 runtime reclaim
-- 如果你想自定义 scheduler 或 checkpoint 后端，分别实现 `scheduler::Scheduler` 或 `scheduler::checkpoint::Persist` 即可；自定义 scheduler 也应统一实现 `checkpoint / counts / snapshot / scopes / snapshots` 这组读能力
+- 如果你想自定义 scheduler 或 checkpoint 后端，分别实现 `scheduler::Scheduler` 或 `scheduler::checkpoint::Persist` 即可；自定义 scheduler 也应统一实现 `checkpoint / counts / snapshot / scopes / snapshots / overview` 这组读能力
 - 如果你更喜欢链式写法，可以从 `Engine::new()` 开始，再用 `.with_scheduler(...)`、`.with_checkpoint(...)` 或 `.load_checkpoint(...).await?`
-- 完整 demo 见 `examples/custom_scheduler.rs`，里面现在同时包含 `scheduler::Memory` 和 `scheduler::Redis` 的 `counts / snapshot / scopes / snapshots` 用法
+- 完整 demo 见 `examples/custom_scheduler.rs`，里面现在同时包含 `scheduler::Memory` 和 `scheduler::Redis` 的 `counts / snapshot / scopes / snapshots / overview` 用法
 - 分布式运行说明见 `docs/distributed_scheduler.md`
 
 ```rust

@@ -1,6 +1,6 @@
 use crate::error::SpiderError;
 use crate::scheduler::checkpoint::{Checkpoint, Counts};
-use crate::scheduler::snapshot::Snapshot;
+use crate::scheduler::snapshot::{Overview, Snapshot};
 use crate::scheduler::{ClaimedTask, Task, TaskLease};
 use jiff::SignedDuration;
 
@@ -11,7 +11,8 @@ use jiff::SignedDuration;
 /// state buckets: `ready`, `delayed`, and `inflight`.
 ///
 /// It also exposes a unified read surface for scheduler state:
-/// `checkpoint()`, `counts()`, `snapshot()`, `scopes()`, and `snapshots()`.
+/// `checkpoint()`, `counts()`, `snapshot()`, `scopes()`, `snapshots()`, and
+/// `overview()`.
 pub trait Scheduler: Send + Sync {
     /// Adds a task into the scheduler buckets.
     async fn enqueue(&self, task: Task) -> Result<(), SpiderError>;
@@ -54,6 +55,18 @@ pub trait Scheduler: Send + Sync {
         } else {
             Ok(Vec::new())
         }
+    }
+
+    /// Reads an aggregate overview across every visible scheduler scope.
+    async fn overview(&self) -> Result<Overview, SpiderError> {
+        self.overview_with_prefix("").await
+    }
+
+    /// Reads an aggregate overview across every visible scope whose name
+    /// starts with `prefix`.
+    async fn overview_with_prefix(&self, prefix: &str) -> Result<Overview, SpiderError> {
+        let snapshots = self.snapshots_with_prefix(prefix).await?;
+        Ok(Overview::from_snapshots(snapshots))
     }
 
     /// Takes one ready task for execution and moves it into `inflight`.

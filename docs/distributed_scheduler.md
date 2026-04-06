@@ -58,11 +58,11 @@ let worker_b = scheduler::Redis::new("redis://127.0.0.1:6379", "jobs:news")
 
 ## 读取 scope 运行时快照
 
-如果你想直接看某个 scope 当前的 durable scheduler 状态，可以调用
-`scheduler::Redis::snapshot()`：
+如果你想直接看某个 scope 当前的 durable scheduler 状态，可以通过统一的
+`Scheduler::snapshot()` 读接口：
 
 ```rust
-use halo_spider::scheduler;
+use halo_spider::scheduler::{self, Scheduler};
 
 let scheduler = scheduler::Redis::new("redis://127.0.0.1:6379", "jobs:news")
     .with_worker_id("ops-reader");
@@ -105,16 +105,26 @@ for task in &snapshot.inflight_tasks {
 
 ## 跨 job 运维怎么读
 
-如果同一个 Redis 里跑了多个 scope，可以先按前缀发现它们，再批量读取各自概览：
+如果同一个 Redis 里跑了多个 scope，可以先按前缀发现它们，再先读聚合概览，
+再按需批量读取各自快照：
 
 ```rust
-use halo_spider::scheduler;
+use halo_spider::scheduler::{self, Scheduler};
 
 let scheduler = scheduler::Redis::new("redis://127.0.0.1:6379", "jobs:ops")
     .with_worker_id("ops-reader");
 
 let scopes = scheduler.scopes_with_prefix("jobs:").await?;
 println!("registered scopes: {:?}", scopes);
+
+let overview = scheduler.overview_with_prefix("jobs:").await?;
+println!("scope_count: {}", overview.scope_count);
+println!("pending_scope_count: {}", overview.pending_scope_count);
+println!("stale_scope_count: {}", overview.stale_scope_count);
+println!("counts: {:?}", overview.counts);
+println!("worker_count: {}", overview.worker_count);
+println!("active_lease_count: {}", overview.active_lease_count);
+println!("reclaimed_total: {}", overview.reclaimed_total);
 
 let snapshots = scheduler.snapshots_with_prefix("jobs:").await?;
 
@@ -144,8 +154,9 @@ for snapshot in snapshots {
 
 这层边界也要明确：
 
-- `scopes_with_prefix(...)` / `snapshots_with_prefix(...)` 现在属于统一的 `scheduler::Scheduler` 读能力
+- `scopes_with_prefix(...)` / `snapshots_with_prefix(...)` / `overview_with_prefix(...)` 现在属于统一的 `scheduler::Scheduler` 读能力
 - 对 `scheduler::Redis` 来说，它们会读 Redis 里共享 registry 下的多个 scope；对本地 `scheduler::Memory`，默认只会返回当前 scope
+- `overview_with_prefix(...)` 底层也是从 `snapshots_with_prefix(...)` 聚合出来的，所以它同样看到的是“这次读取后”的即时状态
 - `snapshots_with_prefix(...)` 读取时会顺带刷新各 scope 的 stale reclaim，所以它看到的是“这次读取后”的即时状态
 
 ## 怎么看 worker 运行态

@@ -3,6 +3,74 @@ use crate::scheduler::checkpoint::Counts;
 use jiff::{SignedDuration, Timestamp};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Overview {
+    /// Number of visible scheduler scopes included in this overview.
+    pub scope_count: usize,
+    /// Number of scopes that still have ready, delayed, or inflight tasks.
+    pub pending_scope_count: usize,
+    /// Number of scopes that currently report at least one stale worker.
+    pub stale_scope_count: usize,
+    /// Aggregate ready / delayed / inflight task counts across all scopes.
+    pub counts: Counts,
+    /// Total number of worker runtime entries observed across all scopes.
+    pub worker_count: usize,
+    /// Total number of stale workers observed across all scopes.
+    pub stale_worker_count: usize,
+    /// Total number of active inflight lease tokens across all scopes.
+    pub active_lease_count: usize,
+    /// Aggregate reclaimed stale inflight task count across all scopes.
+    pub reclaimed_total: u64,
+}
+
+impl Overview {
+    pub fn from_snapshots<I>(snapshots: I) -> Self
+    where
+        I: IntoIterator<Item = Snapshot>,
+    {
+        let mut scope_count = 0usize;
+        let mut pending_scope_count = 0usize;
+        let mut stale_scope_count = 0usize;
+        let mut counts = Counts::default();
+        let mut worker_count = 0usize;
+        let mut stale_worker_count = 0usize;
+        let mut active_lease_count = 0usize;
+        let mut reclaimed_total = 0u64;
+
+        for snapshot in snapshots {
+            scope_count += 1;
+            if snapshot.counts.has_pending() {
+                pending_scope_count += 1;
+            }
+            if snapshot.workers.iter().any(|worker| worker.is_stale) {
+                stale_scope_count += 1;
+            }
+            counts.ready += snapshot.counts.ready;
+            counts.delayed += snapshot.counts.delayed;
+            counts.inflight += snapshot.counts.inflight;
+            worker_count += snapshot.workers.len();
+            stale_worker_count += snapshot
+                .workers
+                .iter()
+                .filter(|worker| worker.is_stale)
+                .count();
+            active_lease_count += snapshot.active_lease_count;
+            reclaimed_total = reclaimed_total.saturating_add(snapshot.reclaimed_total);
+        }
+
+        Self {
+            scope_count,
+            pending_scope_count,
+            stale_scope_count,
+            counts,
+            worker_count,
+            stale_worker_count,
+            active_lease_count,
+            reclaimed_total,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     /// Logical scheduler scope this runtime snapshot was read from.
     pub scope: String,

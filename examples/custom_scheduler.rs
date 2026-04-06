@@ -218,6 +218,10 @@ async fn memory_scope_overview_demo() -> Result<(), SpiderError> {
         println!("counts: {:?}", snapshot.counts);
         println!("workers: {:?}", snapshot.worker_ids);
     }
+    let overview = scheduler
+        .overview_with_prefix("examples:custom-scheduler:")
+        .await?;
+    println!("overview: {:?}", overview);
 
     scheduler.close().await?;
     Ok(())
@@ -273,6 +277,10 @@ async fn redis_scope_overview_demo() -> Result<(), SpiderError> {
         println!("counts: {:?}", snapshot.counts);
         println!("workers: {:?}", snapshot.worker_ids);
     }
+    let overview = scheduler
+        .overview_with_prefix("examples:custom-scheduler:")
+        .await?;
+    println!("overview: {:?}", overview);
 
     scheduler.close().await?;
 
