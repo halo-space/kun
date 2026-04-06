@@ -893,6 +893,8 @@ where
             "engine stopped"
         );
 
+        self.scheduler.close().await?;
+
         Ok(outputs)
     }
 
@@ -1519,7 +1521,6 @@ mod tests {
         assert!(!final_checkpoint.has_pending());
 
         observer.close().await.unwrap();
-        engine.scheduler.close().await.unwrap();
         server_handle.await.unwrap().unwrap();
     }
 

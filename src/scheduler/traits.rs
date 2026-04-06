@@ -78,6 +78,12 @@ pub trait Scheduler: Send + Sync {
         None
     }
 
+    /// Closes scheduler runtime resources and performs any backend-specific
+    /// shutdown cleanup.
+    async fn close(&self) -> Result<(), SpiderError> {
+        Ok(())
+    }
+
     /// Returns whether any task still remains in the scheduler.
     async fn has_pending(&self) -> Result<bool, SpiderError>;
 }

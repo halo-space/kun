@@ -196,6 +196,7 @@ async fn memory_snapshot_demo() -> Result<(), SpiderError> {
     }
 
     scheduler.complete(&claimed.lease).await?;
+    scheduler.close().await?;
     Ok(())
 }
 
@@ -218,6 +219,7 @@ async fn memory_scope_overview_demo() -> Result<(), SpiderError> {
         println!("workers: {:?}", snapshot.worker_ids);
     }
 
+    scheduler.close().await?;
     Ok(())
 }
 

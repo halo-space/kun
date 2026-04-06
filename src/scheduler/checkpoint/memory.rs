@@ -91,6 +91,11 @@ where
         self.save_checkpoint().await
     }
 
+    async fn close(&self) -> Result<(), SpiderError> {
+        self.scheduler.close().await?;
+        self.save_checkpoint().await
+    }
+
     async fn has_pending(&self) -> Result<bool, SpiderError> {
         self.scheduler.has_pending().await
     }

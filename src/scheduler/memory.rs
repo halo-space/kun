@@ -221,6 +221,10 @@ impl Scheduler for Memory {
         Ok(())
     }
 
+    async fn close(&self) -> Result<(), SpiderError> {
+        Ok(())
+    }
+
     async fn has_pending(&self) -> Result<bool, SpiderError> {
         let state = self
             .state

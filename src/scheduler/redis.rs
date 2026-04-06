@@ -479,11 +479,7 @@ impl Redis {
     }
 
     pub async fn close(&self) -> Result<(), SpiderError> {
-        let _connection = {
-            let mut guard = self.connection.lock().await;
-            guard.take()
-        };
-        Ok(())
+        self.close_runtime().await
     }
 
     fn validate(&self) -> Result<(), SpiderError> {
@@ -608,6 +604,17 @@ impl Redis {
             snapshots.push(read_scope_snapshot(connection, &scope).await?);
         }
         Ok(snapshots)
+    }
+
+    async fn close_runtime(&self) -> Result<(), SpiderError> {
+        let mut guard = self.connection.lock().await;
+        let Some(connection) = guard.as_mut() else {
+            return Ok(());
+        };
+        let keys = self.keys();
+        clear_worker_runtime_if_idle(connection, &keys, self.worker_id.as_str()).await?;
+        guard.take();
+        Ok(())
     }
 
     fn validate_lease_worker(&self, lease: &TaskLease) -> Result<(), SpiderError> {
@@ -977,6 +984,10 @@ impl Scheduler for Redis {
         ))
     }
 
+    async fn close(&self) -> Result<(), SpiderError> {
+        self.close_runtime().await
+    }
+
     async fn has_pending(&self) -> Result<bool, SpiderError> {
         Ok(self.counts().await?.has_pending())
     }
@@ -1217,6 +1228,39 @@ async fn touch_worker_runtime(
         heartbeat_interval,
     )
     .await
+}
+
+async fn clear_worker_runtime_if_idle(
+    connection: &mut Connection,
+    keys: &Keys,
+    worker_id: &str,
+) -> Result<(), SpiderError> {
+    let inflight_workers = load_hash_entries(connection, &keys.inflight_workers).await?;
+    if inflight_workers.values().any(|value| value == worker_id) {
+        return Ok(());
+    }
+
+    let _: i64 = scheduler_query(
+        connection,
+        redis_command("SREM", [&keys.workers, worker_id]),
+    )
+    .await?;
+    let _: i64 = scheduler_query(
+        connection,
+        redis_command("HDEL", [&keys.worker_seen, worker_id]),
+    )
+    .await?;
+    let _: i64 = scheduler_query(
+        connection,
+        redis_command("HDEL", [&keys.worker_lease_timeout, worker_id]),
+    )
+    .await?;
+    let _: i64 = scheduler_query(
+        connection,
+        redis_command("HDEL", [&keys.worker_heartbeat_interval, worker_id]),
+    )
+    .await?;
+    Ok(())
 }
 
 async fn load_namespace_meta(
@@ -2051,6 +2095,71 @@ mod tests {
         second.complete(&reclaimed.lease).await.unwrap();
 
         second.close().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn redis_scheduler_close_cleans_idle_worker_runtime() {
+        let (url, _commands_rx, server_handle) = spawn_redis_server().await;
+        let namespace = "close_idle_worker";
+        let worker = Redis::new(format!("redis://{url}"), namespace).with_worker_id("worker-a");
+        worker
+            .enqueue(Task::with_delay(
+                Request::new("https://example.com/close-idle"),
+                500,
+            ))
+            .await
+            .unwrap();
+        worker.close().await.unwrap();
+
+        let observer = Redis::new(format!("redis://{url}"), namespace).with_worker_id("observer");
+        let snapshot = observer.snapshot().await.unwrap();
+
+        assert_eq!(snapshot.scope, namespace);
+        assert_eq!(
+            snapshot.counts,
+            Counts {
+                ready: 0,
+                delayed: 1,
+                inflight: 0,
+            }
+        );
+        assert!(snapshot.worker_ids.is_empty());
+        assert!(snapshot.workers.is_empty());
+
+        observer.close().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn redis_scheduler_close_keeps_worker_runtime_when_inflight_is_still_owned() {
+        let (url, _commands_rx, server_handle) = spawn_redis_server().await;
+        let namespace = "close_inflight_worker";
+        let worker = Redis::new(format!("redis://{url}"), namespace).with_worker_id("worker-a");
+        worker
+            .enqueue(Task::new(Request::new(
+                "https://example.com/close-inflight",
+            )))
+            .await
+            .unwrap();
+        let claimed = worker.take_ready().await.unwrap().unwrap();
+        worker.close().await.unwrap();
+
+        let observer = Redis::new(format!("redis://{url}"), namespace).with_worker_id("observer");
+        let snapshot = observer.snapshot().await.unwrap();
+
+        assert_eq!(snapshot.scope, namespace);
+        assert_eq!(snapshot.worker_ids, vec!["worker-a".to_string()]);
+        assert_eq!(snapshot.workers.len(), 1);
+        let worker_snapshot = &snapshot.workers[0];
+        assert_eq!(worker_snapshot.worker_id, "worker-a");
+        assert_eq!(
+            worker_snapshot.inflight_task_ids,
+            vec![claimed.task.id.clone()]
+        );
+        assert!(worker_snapshot.last_seen.is_some());
+
+        observer.close().await.unwrap();
         server_handle.await.unwrap().unwrap();
     }
 

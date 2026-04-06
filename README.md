@@ -165,6 +165,7 @@ let settings = Settings::default()
 - `scheduler.scopes()` / `scheduler.scopes_with_prefix(...)` / `scheduler.snapshots()` / `scheduler.snapshots_with_prefix(...)` 是统一的 scheduler 运维读入口；像 `scheduler::Redis` 这种共享后端可以返回多个 scope，`scheduler::Memory` 则默认只返回自己这一份 scope
 - 如果你想调整这层恢复窗口，可以用 `.with_lease_timeout(...)`；如果你想显式指定 worker 身份或 heartbeat 节奏，可以再配 `.with_worker_id(...)`、`.with_heartbeat_interval(...)`；如果你明确不想要这层自动回收，也可以用 `.without_lease_timeout()`
 - `snapshot()`、`counts()`、`checkpoint()` 这类只读/静态读取入口不会把当前调用方登记成活跃 worker；真正会刷新 worker runtime 的只有 `enqueue / take_ready / complete / requeue / heartbeat`
+- 如果你是直接管理 scheduler 生命周期，不是交给 `Engine::run(...)`，结束时也可以统一调用 `scheduler.close().await?`；`Memory / Redis / 以后其它后端` 都走同一个关闭钩子
 - 如果你想自定义 checkpoint 后端，可以用 `scheduler::checkpoint::Memory::load(scheduler::checkpoint::Redis::new(...)).await?`
 - `checkpoint` 仍然只是静态快照恢复边界；它不会替代 durable scheduler 的 runtime reclaim
 - 如果你想自定义 scheduler 或 checkpoint 后端，分别实现 `scheduler::Scheduler` 或 `scheduler::checkpoint::Persist` 即可；自定义 scheduler 也应统一实现 `checkpoint / counts / snapshot / scopes / snapshots` 这组读能力
