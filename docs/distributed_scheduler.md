@@ -2,7 +2,7 @@
 
 `scheduler::Redis` 是运行时调度器，不是 checkpoint。
 
-只要某个 `scheduler::Redis` 真正参与过 enqueue / claim / snapshot / counts 这类运行时访问，
+只要某个 `scheduler::Redis` 真正参与过 enqueue / claim / snapshot / counts 这类访问，
 它的 namespace 就会自动登记到同一个 Redis 里的 durable scheduler registry。
 
 最小可以这样理解：
@@ -72,6 +72,16 @@ println!("workers: {:?}", snapshot.worker_ids);
 println!("active leases: {}", snapshot.active_lease_count);
 println!("reclaimed total: {}", snapshot.reclaimed_total);
 println!("reclaimed in refresh: {}", snapshot.reclaimed_in_refresh);
+for worker in &snapshot.workers {
+    println!(
+        "worker={} last_seen={:?} stale={} inflight={} next_deadline={:?}",
+        worker.worker_id,
+        worker.last_seen,
+        worker.is_stale,
+        worker.inflight_count,
+        worker.next_deadline
+    );
+}
 for task in &snapshot.inflight_tasks {
     println!(
         "inflight task={} url={} worker={:?} lease={:?} deadline={:?}",
@@ -88,6 +98,8 @@ for task in &snapshot.inflight_tasks {
 
 - `snapshot()` 读的是某个 namespace 当前这一刻的运行时状态
 - `Engine::stats()` 读的是单个 engine 实例生命周期内的累计计数
+- `snapshot.workers` 是 worker 级运行态视图；`snapshot.worker_ids` 只是聚合后的 worker id 集合
+- `snapshot()` / `counts()` / `checkpoint()` 不会把当前调用方登记成活跃 worker；真正刷新 worker runtime 的只有 `enqueue / take_ready / complete / requeue / heartbeat`
 
 ## 跨 job 运维怎么读
 
@@ -108,6 +120,14 @@ for snapshot in snapshots {
     println!("counts: {:?}", snapshot.counts);
     println!("workers: {:?}", snapshot.worker_ids);
     println!("reclaimed_total: {}", snapshot.reclaimed_total);
+    for worker in &snapshot.workers {
+        println!(
+            "  worker={} stale={} inflight={}",
+            worker.worker_id,
+            worker.is_stale,
+            worker.inflight_count
+        );
+    }
     for task in &snapshot.inflight_tasks {
         println!(
             "  inflight task={} worker={:?} lease={:?}",
@@ -124,6 +144,27 @@ for snapshot in snapshots {
 - `namespaces_with_prefix(...)` / `namespace_snapshots_with_prefix(...)` 是 Redis durable scheduler 的运维读入口
 - 它们不会改变共享 `scheduler::Scheduler` trait
 - `namespace_snapshots_with_prefix(...)` 读取时会顺带刷新各 namespace 的 stale reclaim，所以它看到的是“这次读取后”的即时状态
+
+## 怎么看 worker 运行态
+
+`snapshot.workers` 里的每一项都代表一个当前 namespace 下见过的 worker：
+
+- `worker_id`
+  - 逻辑 worker 身份
+- `last_seen`
+  - 最近一次 runtime touch 时间
+- `is_stale`
+  - 是否已经超过该 worker 自己上次上报的 `lease_timeout`
+- `inflight_task_ids`
+  - 当前仍归这个 worker 持有的 task
+- `next_deadline`
+  - 这个 worker 当前最早到期的一条 inflight lease deadline
+- `lease_timeout`
+  - 该 worker 上次运行时实际上使用的 lease timeout
+- `heartbeat_interval`
+  - 该 worker 上次运行时实际上使用的 heartbeat interval
+
+这层的设计目的是让你运维时不用再自己回读多组 Redis key 去拼 ownership / heartbeat 状态。
 
 ## 崩溃恢复语义
 

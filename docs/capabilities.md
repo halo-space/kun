@@ -372,9 +372,11 @@ let engine = Engine::new().with_dedup(MethodUrlDedup {
 - `Redis` 直接实现了 `Scheduler`，把 ready / delayed / inflight 三组任务状态持久化在 Redis keyspace 里，并会按 `lease_timeout` 回收 stale inflight task
 - `Redis` 对 `enqueue / claim / complete / requeue / reclaim / heartbeat` 这些关键迁移已经收口成原子脚本，所以同一个 namespace 上的多 worker 不会再重复 claim 同一条 ready task
 - `Redis` 现在还显式校验 `worker_id + lease_id` ownership；旧 lease 或错误 worker 不能再覆盖当前 inflight owner
+- `Redis::snapshot()` 现在除了 namespace 级计数，也会带出 `snapshot.workers`，直接给出每个 worker 的 `last_seen / is_stale / inflight_task_ids / next_deadline / lease_timeout / heartbeat_interval`
+- `snapshot()`、`counts()`、`checkpoint()` 这类只读入口不会把调用方登记成活跃 worker；真正刷新 worker runtime 的只有 `enqueue / take_ready / complete / requeue / heartbeat`
 - `scheduler::checkpoint::Memory` 会在调度状态变化后自动把 checkpoint 保存到共享 `Persist`
 - `checkpoint` 恢复的仍然只是保存时那份静态 `ready / delayed / inflight` 快照，不承担 runtime reclaim
-- 当前 durable scheduler 的最小运行时语义已经完成：除了文件、Redis 两种 checkpoint 持久化，也已经提供直接基于 Redis 的 durable scheduler；当前这层已经覆盖最小 worker ownership、heartbeat、stale reclaim、namespace snapshot 与跨 namespace 运维读取入口。
+- 当前 durable scheduler 的最小运行时语义已经完成：除了文件、Redis 两种 checkpoint 持久化，也已经提供直接基于 Redis 的 durable scheduler；当前这层已经覆盖最小 worker ownership、heartbeat、stale reclaim、namespace snapshot、worker runtime snapshot 与跨 namespace 运维读取入口。
 
 后续如果补更多 scheduler / checkpoint 后端，也继续是“同一套 trait，不同存储实现”，而不是重写一套新的任务语义。
 

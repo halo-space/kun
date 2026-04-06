@@ -400,6 +400,8 @@ pub struct NamespaceSnapshot {
     pub reclaimed_in_refresh: u64,
     /// Per-task inflight runtime details for the current namespace.
     pub inflight_tasks: Vec<InflightTaskSnapshot>,
+    /// Per-worker runtime details currently observed for this namespace.
+    pub workers: Vec<WorkerSnapshot>,
     pub lease_timeout: Option<SignedDuration>,
     pub heartbeat_interval: Option<SignedDuration>,
 }
@@ -422,6 +424,28 @@ pub struct InflightTaskSnapshot {
     pub depth: u32,
     /// Delayed execution timestamp carried by this task, if any.
     pub ready_at: Option<Timestamp>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkerSnapshot {
+    /// Logical worker id currently registered under this namespace.
+    pub worker_id: String,
+    /// Most recent runtime touch observed for this worker.
+    pub last_seen: Option<Timestamp>,
+    /// Whether this worker has exceeded its configured lease timeout window.
+    pub is_stale: bool,
+    /// Number of inflight tasks currently owned by this worker.
+    pub inflight_count: usize,
+    /// Number of active lease tokens currently owned by this worker.
+    pub active_lease_count: usize,
+    /// Stable task ids currently owned by this worker.
+    pub inflight_task_ids: Vec<TaskId>,
+    /// Earliest inflight deadline currently owned by this worker.
+    pub next_deadline: Option<Timestamp>,
+    /// Lease timeout last reported by this worker.
+    pub lease_timeout: Option<SignedDuration>,
+    /// Heartbeat interval last reported by this worker.
+    pub heartbeat_interval: Option<SignedDuration>,
 }
 
 impl Redis {
@@ -678,7 +702,6 @@ impl Redis {
         &self,
         connection: &mut Connection,
     ) -> Result<(), SpiderError> {
-        let keys = self.keys();
         let _: i64 = scheduler_query(
             connection,
             redis_command(
@@ -687,6 +710,12 @@ impl Redis {
             ),
         )
         .await?;
+        Ok(())
+    }
+
+    async fn sync_runtime_metadata(&self, connection: &mut Connection) -> Result<(), SpiderError> {
+        let keys = self.keys();
+        self.sync_namespace_metadata(connection).await?;
 
         sync_namespace_meta_field(
             connection,
@@ -699,6 +728,14 @@ impl Redis {
             connection,
             &keys.meta,
             META_HEARTBEAT_INTERVAL,
+            self.heartbeat_interval_millis(),
+        )
+        .await?;
+        touch_worker_runtime(
+            connection,
+            &keys,
+            self.worker_id.as_str(),
+            self.lease_timeout,
             self.heartbeat_interval_millis(),
         )
         .await
@@ -824,14 +861,14 @@ impl Scheduler for Redis {
     async fn enqueue(&self, task: Task) -> Result<(), SpiderError> {
         let mut guard = self.connection().await?;
         let connection = self.connection_mut(&mut guard)?;
-        self.sync_namespace_metadata(connection).await?;
+        self.sync_runtime_metadata(connection).await?;
         self.enqueue_internal(connection, task).await
     }
 
     async fn take_ready(&self) -> Result<Option<ClaimedTask>, SpiderError> {
         let mut guard = self.connection().await?;
         let connection = self.connection_mut(&mut guard)?;
-        self.sync_namespace_metadata(connection).await?;
+        self.sync_runtime_metadata(connection).await?;
         let keys = self.keys();
         let now = now().to_string();
         let lease_timeout = self
@@ -885,7 +922,7 @@ impl Scheduler for Redis {
         self.validate_lease_worker(lease)?;
         let mut guard = self.connection().await?;
         let connection = self.connection_mut(&mut guard)?;
-        self.sync_namespace_metadata(connection).await?;
+        self.sync_runtime_metadata(connection).await?;
         let keys = self.keys();
         let result: i64 = scheduler_eval(
             connection,
@@ -914,7 +951,7 @@ impl Scheduler for Redis {
         self.validate_lease_worker(lease)?;
         let mut guard = self.connection().await?;
         let connection = self.connection_mut(&mut guard)?;
-        self.sync_namespace_metadata(connection).await?;
+        self.sync_runtime_metadata(connection).await?;
         let keys = self.keys();
         let now = now().to_string();
         let result: i64 = scheduler_eval(
@@ -946,7 +983,7 @@ impl Scheduler for Redis {
         self.validate_lease_worker(lease)?;
         let mut guard = self.connection().await?;
         let connection = self.connection_mut(&mut guard)?;
-        self.sync_namespace_metadata(connection).await?;
+        self.sync_runtime_metadata(connection).await?;
         self.heartbeat_internal(connection, lease).await
     }
 
@@ -975,6 +1012,10 @@ struct Keys {
     sequence: String,
     reclaimed_total: String,
     meta: String,
+    workers: String,
+    worker_seen: String,
+    worker_lease_timeout: String,
+    worker_heartbeat_interval: String,
 }
 
 impl Keys {
@@ -991,6 +1032,10 @@ impl Keys {
             sequence: format!("{namespace}:ready_sequence"),
             reclaimed_total: format!("{namespace}:reclaimed_total"),
             meta: format!("{namespace}:meta"),
+            workers: format!("{namespace}:workers"),
+            worker_seen: format!("{namespace}:worker_seen"),
+            worker_lease_timeout: format!("{namespace}:worker_lease_timeout"),
+            worker_heartbeat_interval: format!("{namespace}:worker_heartbeat_interval"),
         }
     }
 }
@@ -1134,6 +1179,61 @@ async fn sync_namespace_meta_field(
         }
     }
     Ok(())
+}
+
+async fn sync_worker_meta_field(
+    connection: &mut Connection,
+    key: &str,
+    worker_id: &str,
+    value: Option<u64>,
+) -> Result<(), SpiderError> {
+    match value {
+        Some(value) => {
+            let value = value.to_string();
+            let _: i64 =
+                scheduler_query(connection, redis_command("HSET", [key, worker_id, &value]))
+                    .await?;
+        }
+        None => {
+            let _: i64 =
+                scheduler_query(connection, redis_command("HDEL", [key, worker_id])).await?;
+        }
+    }
+    Ok(())
+}
+
+async fn touch_worker_runtime(
+    connection: &mut Connection,
+    keys: &Keys,
+    worker_id: &str,
+    lease_timeout: Option<u64>,
+    heartbeat_interval: Option<u64>,
+) -> Result<(), SpiderError> {
+    let now = now().to_string();
+    let _: i64 = scheduler_query(
+        connection,
+        redis_command("SADD", [&keys.workers, worker_id]),
+    )
+    .await?;
+    let _: i64 = scheduler_query(
+        connection,
+        redis_command("HSET", [&keys.worker_seen, worker_id, &now]),
+    )
+    .await?;
+    sync_worker_meta_field(
+        connection,
+        &keys.worker_lease_timeout,
+        worker_id,
+        lease_timeout,
+    )
+    .await?;
+    sync_worker_meta_field(
+        connection,
+        &keys.worker_heartbeat_interval,
+        worker_id,
+        heartbeat_interval,
+    )
+    .await
 }
 
 async fn load_namespace_meta(
@@ -1337,6 +1437,93 @@ async fn load_inflight_tasks(
     Ok(inflight_tasks)
 }
 
+#[derive(Debug, Default)]
+struct WorkerAggregate {
+    inflight_task_ids: Vec<TaskId>,
+    active_lease_count: usize,
+    next_deadline: Option<Timestamp>,
+}
+
+async fn load_worker_snapshots(
+    connection: &mut Connection,
+    namespace: &str,
+    keys: &Keys,
+    inflight_tasks: &[InflightTaskSnapshot],
+) -> Result<Vec<WorkerSnapshot>, SpiderError> {
+    let worker_ids: Vec<String> =
+        scheduler_query(connection, redis_command("SMEMBERS", [&keys.workers])).await?;
+    let seen = load_hash_entries(connection, &keys.worker_seen).await?;
+    let lease_timeouts = load_hash_entries(connection, &keys.worker_lease_timeout).await?;
+    let heartbeat_intervals =
+        load_hash_entries(connection, &keys.worker_heartbeat_interval).await?;
+
+    let mut workers = worker_ids.into_iter().collect::<BTreeSet<_>>();
+    let mut aggregates = BTreeMap::<String, WorkerAggregate>::new();
+
+    for task in inflight_tasks {
+        let Some(worker_id) = task.worker_id.as_ref() else {
+            continue;
+        };
+        workers.insert(worker_id.clone());
+        let aggregate = aggregates.entry(worker_id.clone()).or_default();
+        aggregate.inflight_task_ids.push(task.task_id.clone());
+        if task.lease_id.is_some() {
+            aggregate.active_lease_count += 1;
+        }
+        if let Some(deadline) = task.deadline.as_ref() {
+            let replace_deadline = aggregate
+                .next_deadline
+                .as_ref()
+                .map(|current| deadline.as_millisecond() < current.as_millisecond())
+                .unwrap_or(true);
+            if replace_deadline {
+                aggregate.next_deadline = Some(*deadline);
+            }
+        }
+    }
+
+    let now = now();
+    let mut snapshots = Vec::with_capacity(workers.len());
+    for worker_id in workers {
+        let last_seen = seen
+            .get(&worker_id)
+            .map(|value| parse_worker_timestamp(namespace, &worker_id, "last_seen", value))
+            .transpose()?;
+        let lease_timeout = lease_timeouts
+            .get(&worker_id)
+            .map(|value| parse_worker_u64(namespace, &worker_id, "lease_timeout", value))
+            .transpose()?;
+        let heartbeat_interval = heartbeat_intervals
+            .get(&worker_id)
+            .map(|value| parse_worker_u64(namespace, &worker_id, "heartbeat_interval", value))
+            .transpose()?;
+        let aggregate = aggregates.remove(&worker_id).unwrap_or_default();
+        let is_stale = match (last_seen.as_ref(), lease_timeout) {
+            (Some(last_seen), Some(lease_timeout)) => {
+                last_seen
+                    .as_millisecond()
+                    .saturating_add(i64::try_from(lease_timeout).unwrap_or(i64::MAX))
+                    < now
+            }
+            _ => false,
+        };
+
+        snapshots.push(WorkerSnapshot {
+            worker_id,
+            last_seen,
+            is_stale,
+            inflight_count: aggregate.inflight_task_ids.len(),
+            active_lease_count: aggregate.active_lease_count,
+            inflight_task_ids: aggregate.inflight_task_ids,
+            next_deadline: aggregate.next_deadline,
+            lease_timeout: lease_timeout.map(signed_duration_from_millis),
+            heartbeat_interval: heartbeat_interval.map(signed_duration_from_millis),
+        });
+    }
+
+    Ok(snapshots)
+}
+
 async fn read_namespace_snapshot(
     connection: &mut Connection,
     namespace: &str,
@@ -1359,6 +1546,7 @@ async fn read_namespace_snapshot(
     let reclaimed_total: Option<u64> =
         scheduler_query(connection, redis_command("GET", [&keys.reclaimed_total])).await?;
     let inflight_tasks = load_inflight_tasks(connection, namespace, &keys, &inflight_ids).await?;
+    let workers = load_worker_snapshots(connection, namespace, &keys, &inflight_tasks).await?;
 
     let mut worker_ids = BTreeSet::new();
     let mut active_lease_count = 0usize;
@@ -1384,6 +1572,7 @@ async fn read_namespace_snapshot(
         reclaimed_total: reclaimed_total.unwrap_or_default(),
         reclaimed_in_refresh,
         inflight_tasks,
+        workers,
         lease_timeout: meta.lease_timeout.map(signed_duration_from_millis),
         heartbeat_interval: meta.heartbeat_interval.map(signed_duration_from_millis),
     })
@@ -1414,6 +1603,37 @@ fn timestamp_from_u64(
         ))
     })?;
     timestamp_from_i64(namespace, task_id, field, millis)
+}
+
+fn parse_worker_u64(
+    namespace: &str,
+    worker_id: &str,
+    field: &str,
+    value: &str,
+) -> Result<u64, SpiderError> {
+    value.parse::<u64>().map_err(|error| {
+        SpiderError::scheduler(format!(
+            "redis scheduler worker snapshot `{field}` for namespace `{namespace}` worker `{worker_id}` is invalid: {error}"
+        ))
+    })
+}
+
+fn parse_worker_timestamp(
+    namespace: &str,
+    worker_id: &str,
+    field: &str,
+    value: &str,
+) -> Result<Timestamp, SpiderError> {
+    let millis = value.parse::<i64>().map_err(|error| {
+        SpiderError::scheduler(format!(
+            "redis scheduler worker snapshot `{field}` for namespace `{namespace}` worker `{worker_id}` is invalid: {error}"
+        ))
+    })?;
+    Timestamp::from_millisecond(millis).map_err(|error| {
+        SpiderError::scheduler(format!(
+            "redis scheduler worker snapshot `{field}` for namespace `{namespace}` worker `{worker_id}` is invalid: {error}"
+        ))
+    })
 }
 
 fn parse_timestamp_score(
@@ -1750,6 +1970,7 @@ mod tests {
             snapshot.heartbeat_interval,
             Some(SignedDuration::from_millis(25))
         );
+        assert_eq!(snapshot.workers.len(), 1);
         let inflight = &snapshot.inflight_tasks[0];
         assert_eq!(inflight.task_id, claimed.task.id);
         assert_eq!(inflight.url, "https://example.com/ready");
@@ -1759,6 +1980,22 @@ mod tests {
         assert_eq!(inflight.priority, 7);
         assert_eq!(inflight.depth, 2);
         assert_eq!(inflight.ready_at, None);
+        let worker = snapshot
+            .workers
+            .iter()
+            .find(|worker| worker.worker_id == "worker-a")
+            .unwrap();
+        assert!(worker.last_seen.is_some());
+        assert!(!worker.is_stale);
+        assert_eq!(worker.inflight_count, 1);
+        assert_eq!(worker.active_lease_count, 1);
+        assert_eq!(worker.inflight_task_ids, vec![claimed.task.id.clone()]);
+        assert!(worker.next_deadline.is_some());
+        assert_eq!(worker.lease_timeout, Some(SignedDuration::from_millis(50)));
+        assert_eq!(
+            worker.heartbeat_interval,
+            Some(SignedDuration::from_millis(25))
+        );
 
         scheduler.complete(&claimed.lease).await.unwrap();
         scheduler.close().await.unwrap();
@@ -1802,11 +2039,29 @@ mod tests {
         assert_eq!(first_snapshot.active_lease_count, 0);
         assert_eq!(first_snapshot.deadline_count, 0);
         assert!(first_snapshot.inflight_tasks.is_empty());
+        assert_eq!(first_snapshot.workers.len(), 1);
+        let stale_worker = &first_snapshot.workers[0];
+        assert_eq!(stale_worker.worker_id, "worker-a");
+        assert!(stale_worker.last_seen.is_some());
+        assert!(stale_worker.is_stale);
+        assert_eq!(stale_worker.inflight_count, 0);
+        assert_eq!(stale_worker.active_lease_count, 0);
+        assert!(stale_worker.inflight_task_ids.is_empty());
+        assert_eq!(
+            stale_worker.lease_timeout,
+            Some(SignedDuration::from_millis(20))
+        );
+        assert_eq!(
+            stale_worker.heartbeat_interval,
+            Some(SignedDuration::from_millis(10))
+        );
 
         let second_snapshot = second.snapshot().await.unwrap();
         assert_eq!(second_snapshot.reclaimed_in_refresh, 0);
         assert_eq!(second_snapshot.reclaimed_total, 1);
         assert!(second_snapshot.inflight_tasks.is_empty());
+        assert_eq!(second_snapshot.workers.len(), 1);
+        assert!(second_snapshot.workers[0].is_stale);
 
         let reclaimed = second.take_ready().await.unwrap().unwrap();
         assert_eq!(reclaimed.task.id, claimed.task.id);
@@ -1894,6 +2149,7 @@ mod tests {
             Some(SignedDuration::from_millis(25))
         );
         assert_eq!(news_snapshot.inflight_tasks.len(), 1);
+        assert_eq!(news_snapshot.workers.len(), 1);
         let news_task = &news_snapshot.inflight_tasks[0];
         assert_eq!(news_task.task_id, claimed.task.id);
         assert_eq!(news_task.url, "https://example.com/news");
@@ -1903,6 +2159,11 @@ mod tests {
             Some(claimed.lease.lease_id())
         );
         assert!(news_task.deadline.is_some());
+        let news_worker = &news_snapshot.workers[0];
+        assert_eq!(news_worker.worker_id, "news-worker");
+        assert!(!news_worker.is_stale);
+        assert_eq!(news_worker.inflight_count, 1);
+        assert_eq!(news_worker.inflight_task_ids, vec![claimed.task.id.clone()]);
 
         let blog_snapshot = snapshots
             .iter()
@@ -1926,6 +2187,20 @@ mod tests {
             Some(SignedDuration::from_millis(20))
         );
         assert!(blog_snapshot.inflight_tasks.is_empty());
+        assert_eq!(blog_snapshot.workers.len(), 1);
+        let blog_worker = &blog_snapshot.workers[0];
+        assert_eq!(blog_worker.worker_id, "blog-worker");
+        assert!(!blog_worker.is_stale);
+        assert_eq!(blog_worker.inflight_count, 0);
+        assert!(blog_worker.inflight_task_ids.is_empty());
+        assert_eq!(
+            blog_worker.lease_timeout,
+            Some(SignedDuration::from_millis(80))
+        );
+        assert_eq!(
+            blog_worker.heartbeat_interval,
+            Some(SignedDuration::from_millis(20))
+        );
 
         news.complete(&claimed.lease).await.unwrap();
         news.close().await.unwrap();
