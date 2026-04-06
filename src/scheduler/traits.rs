@@ -80,6 +80,16 @@ pub trait Scheduler: Send + Sync {
     /// Marks an inflight task as not completed and requeues it for later work.
     async fn requeue(&self, lease: &TaskLease) -> Result<(), SpiderError>;
 
+    /// Releases inflight tasks currently owned by this scheduler worker back
+    /// into the runnable buckets.
+    ///
+    /// Built-in schedulers use this for graceful worker drain. The default
+    /// implementation is a no-op for custom schedulers that do not track
+    /// per-worker ownership.
+    async fn release_inflight(&self) -> Result<usize, SpiderError> {
+        Ok(0)
+    }
+
     /// Renews the runtime lease for an inflight task when the scheduler
     /// supports explicit heartbeat semantics.
     async fn heartbeat(&self, _lease: &TaskLease) -> Result<(), SpiderError> {

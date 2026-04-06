@@ -181,6 +181,32 @@ for snapshot in snapshots {
 
 这层的设计目的是让你运维时不用再自己回读多组 Redis key 去拼 ownership / heartbeat 状态。
 
+## 优雅退出怎么做
+
+如果某个 worker 不是崩溃，而是准备发布、缩容或手动下线，
+你通常不想等 `lease_timeout` 到期后再让别的 worker 接手。
+
+这时可以显式调用统一的 `Scheduler::release_inflight()`：
+
+```rust
+use halo_spider::scheduler::{self, Scheduler};
+
+let scheduler = scheduler::Redis::new("redis://127.0.0.1:6379", "jobs:news")
+    .with_worker(scheduler::Worker::new("news-worker-a"));
+
+let released = scheduler.release_inflight().await?;
+println!("released {released} inflight tasks before shutdown");
+
+scheduler.close().await?;
+```
+
+这里的语义是：
+
+- 只释放“当前这个 scheduler 实例对应 worker”手里的 inflight task
+- 被释放的 task 会按自己的 `ready_at` 回到 `ready / delayed`
+- 它适合 graceful drain，不是日常正常完成任务的主路径
+- 如果 worker 是直接崩溃，还是靠 `lease_timeout` + reclaim 自动恢复
+
 ## 崩溃恢复语义
 
 - worker 正常运行时

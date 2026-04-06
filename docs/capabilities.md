@@ -213,6 +213,7 @@ browser 在这里的角色是“渲染型下载器”，不是另起一套通用
 - 如果需要调整恢复窗口：`scheduler::Worker::new(...).with_lease_timeout(...)`
 - 如果需要显式指定 worker 或 heartbeat：`scheduler::Worker::new(...).with_heartbeat_interval(...)`
 - 如果明确不想启用这层自动回收：`scheduler::Worker::new(...).without_lease_timeout()`
+- 如果需要优雅下线当前 worker、主动交回自己手里的 inflight task：`scheduler.release_inflight().await?`
 - 如果需要链式挂 checkpoint：`Engine::new().with_checkpoint(...)`
 - 如果需要链式从 checkpoint 恢复：`Engine::new().load_checkpoint(...).await?`
 - 更完整的分布式用法说明见 `docs/distributed_scheduler.md`
@@ -378,6 +379,7 @@ let engine = Engine::new().with_dedup(MethodUrlDedup {
 - `Redis` 现在还显式校验 `worker_id + lease_id` ownership；旧 lease 或错误 worker 不能再覆盖当前 inflight owner
 - `Scheduler` 现在统一还承担最小读接口：`checkpoint() / counts() / snapshot() / scopes() / snapshots() / overview()`；`Memory`、`Redis` 以及后续其它后端都走同一套能力形状
 - `Redis::snapshot()` 现在除了 scope 级计数，也会带出 `snapshot.workers`，直接给出每个 worker 的 `last_seen / is_stale / inflight_task_ids / next_deadline / lease_timeout / heartbeat_interval`
+- `Scheduler::release_inflight()` 现在也属于统一 worker 运维语义：当前 worker 如果准备优雅退出，可以主动把自己手里的 inflight task 放回 `ready / delayed`
 - `snapshot()`、`counts()`、`checkpoint()` 这类只读入口不会把调用方登记成活跃 worker；真正刷新 worker runtime 的只有 `enqueue / take_ready / complete / requeue / heartbeat`
 - `scheduler::checkpoint::Memory` 会在调度状态变化后自动把 checkpoint 保存到共享 `Persist`
 - `checkpoint` 恢复的仍然只是保存时那份静态 `ready / delayed / inflight` 快照，不承担 runtime reclaim

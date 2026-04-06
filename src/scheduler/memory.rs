@@ -344,6 +344,31 @@ impl Scheduler for Memory {
         Ok(())
     }
 
+    async fn release_inflight(&self) -> Result<usize, SpiderError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let worker_id = self.worker_id().to_string();
+        let mut released_tasks = Vec::new();
+        let mut kept_inflight = Vec::with_capacity(state.inflight.len());
+
+        for entry in std::mem::take(&mut state.inflight) {
+            match entry.lease.as_ref() {
+                Some(lease) if lease.worker_id() == worker_id => released_tasks.push(entry.task),
+                _ => kept_inflight.push(entry),
+            }
+        }
+
+        let released = released_tasks.len();
+        state.inflight = kept_inflight;
+        for task in released_tasks {
+            state.push_task(task);
+        }
+        state.reset_worker_if_idle();
+        Ok(released)
+    }
+
     async fn heartbeat(&self, lease: &TaskLease) -> Result<(), SpiderError> {
         let mut state = self
             .state
@@ -885,6 +910,33 @@ mod tests {
                 task_id: claimed.task.id.as_str().to_string(),
             })
         );
+    }
+
+    #[test]
+    fn memory_scheduler_release_inflight_requeues_current_worker_tasks() {
+        let scheduler = Memory::default().with_worker(Worker::new("memory-worker-a"));
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/release"))))
+            .unwrap();
+
+        let claimed = block_on(scheduler.take_ready()).unwrap().unwrap();
+        let released = block_on(scheduler.release_inflight()).unwrap();
+
+        assert_eq!(released, 1);
+        assert_eq!(
+            scheduler.counts(),
+            Counts {
+                ready: 1,
+                delayed: 0,
+                inflight: 0,
+            }
+        );
+
+        let snapshot = block_on(scheduler.snapshot()).unwrap();
+        assert!(snapshot.worker_ids.is_empty());
+        assert!(snapshot.workers.is_empty());
+
+        let reclaimed = block_on(scheduler.take_ready()).unwrap().unwrap();
+        assert_eq!(reclaimed.task.id, claimed.task.id);
     }
 
     #[test]

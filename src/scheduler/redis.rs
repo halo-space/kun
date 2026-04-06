@@ -366,6 +366,61 @@ redis.call('SADD', inflight, task_id)
 redis.call('ZADD', inflight_deadlines, deadline, task_id)
 return 1
 "#;
+const SCHEDULER_RELEASE_INFLIGHT_SCRIPT: &str = r#"
+-- kun:scheduler:release_inflight_v1
+local tasks = KEYS[1]
+local ready = KEYS[2]
+local ready_order = KEYS[3]
+local delayed = KEYS[4]
+local inflight = KEYS[5]
+local inflight_deadlines = KEYS[6]
+local inflight_workers = KEYS[7]
+local inflight_leases = KEYS[8]
+local sequence = KEYS[9]
+
+local now = tonumber(ARGV[1])
+local worker_id = ARGV[2]
+local released = 0
+
+local function push_ready(id)
+    local next_ready_order = redis.call('INCR', sequence)
+    redis.call('SADD', ready, id)
+    redis.call('HSET', ready_order, id, tostring(next_ready_order))
+end
+
+local function route_task(id, task_json)
+    local ok, task = pcall(cjson.decode, task_json)
+    if not ok then
+        return
+    end
+
+    local ready_at = task['ready_at']
+    if (not ready_at) or tonumber(ready_at) <= now then
+        push_ready(id)
+    else
+        redis.call('ZADD', delayed, tostring(ready_at), id)
+    end
+end
+
+local worker_entries = redis.call('HGETALL', inflight_workers)
+for index = 1, #worker_entries, 2 do
+    local task_id = worker_entries[index]
+    local owner = worker_entries[index + 1]
+    if owner == worker_id then
+        local task_json = redis.call('HGET', tasks, task_id)
+        local removed = redis.call('SREM', inflight, task_id)
+        redis.call('ZREM', inflight_deadlines, task_id)
+        redis.call('HDEL', inflight_workers, task_id)
+        redis.call('HDEL', inflight_leases, task_id)
+        if removed > 0 and task_json then
+            route_task(task_id, task_json)
+            released = released + 1
+        end
+    end
+end
+
+return released
+"#;
 
 #[derive(Debug, Clone)]
 /// Redis-backed durable scheduler.
@@ -956,6 +1011,33 @@ impl Scheduler for Redis {
         )
         .await?;
         ensure_lease_transition("requeue", lease, result)
+    }
+
+    async fn release_inflight(&self) -> Result<usize, SpiderError> {
+        let mut guard = self.connection().await?;
+        let connection = self.connection_mut(&mut guard)?;
+        self.sync_runtime_metadata(connection).await?;
+        let keys = self.keys();
+        let now = now().to_string();
+        let released: i64 = scheduler_eval(
+            connection,
+            SCHEDULER_RELEASE_INFLIGHT_SCRIPT,
+            &[
+                keys.tasks.as_str(),
+                keys.ready.as_str(),
+                keys.ready_order.as_str(),
+                keys.delayed.as_str(),
+                keys.inflight.as_str(),
+                keys.inflight_deadlines.as_str(),
+                keys.inflight_workers.as_str(),
+                keys.inflight_leases.as_str(),
+                keys.sequence.as_str(),
+            ],
+            &[now.as_str(), self.worker_id()],
+        )
+        .await?;
+        clear_worker_runtime_if_idle(connection, &keys, self.worker_id()).await?;
+        Ok(usize::try_from(released).unwrap_or_default())
     }
 
     async fn heartbeat(&self, lease: &TaskLease) -> Result<(), SpiderError> {
@@ -2121,6 +2203,48 @@ mod tests {
         assert!(snapshot.worker_ids.is_empty());
         assert!(snapshot.workers.is_empty());
 
+        observer.close().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn redis_scheduler_release_inflight_requeues_current_worker_tasks() {
+        let (url, _commands_rx, server_handle) = spawn_redis_server().await;
+        let namespace = "release_inflight";
+        let worker_a =
+            Redis::new(format!("redis://{url}"), namespace).with_worker(Worker::new("worker-a"));
+        worker_a
+            .enqueue(Task::new(Request::new(
+                "https://example.com/release-inflight",
+            )))
+            .await
+            .unwrap();
+        let claimed = worker_a.take_ready().await.unwrap().unwrap();
+
+        assert_eq!(worker_a.release_inflight().await.unwrap(), 1);
+
+        let observer =
+            Redis::new(format!("redis://{url}"), namespace).with_worker(Worker::new("observer"));
+        let snapshot = observer.snapshot().await.unwrap();
+        assert_eq!(
+            snapshot.counts,
+            Counts {
+                ready: 1,
+                delayed: 0,
+                inflight: 0,
+            }
+        );
+        assert!(snapshot.worker_ids.is_empty());
+        assert!(snapshot.workers.is_empty());
+
+        let worker_b =
+            Redis::new(format!("redis://{url}"), namespace).with_worker(Worker::new("worker-b"));
+        let reclaimed = worker_b.take_ready().await.unwrap().unwrap();
+        assert_eq!(reclaimed.task.id, claimed.task.id);
+
+        worker_b.complete(&reclaimed.lease).await.unwrap();
+        worker_a.close().await.unwrap();
+        worker_b.close().await.unwrap();
         observer.close().await.unwrap();
         server_handle.await.unwrap().unwrap();
     }

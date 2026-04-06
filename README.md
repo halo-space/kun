@@ -167,8 +167,9 @@ let settings = Settings::default()
 - 如果你想给 scheduler 指定稳定的逻辑 worker 身份，或者统一配置 lease / heartbeat 策略，显式传 `scheduler::Worker::new(...)` 给 `.with_worker(...)` 即可；`Memory`、`Redis`、以后其它后端都走同一入口
 - 如果你只想先看聚合后的跨 scope 摘要，优先用 `scheduler.overview()` 或 `scheduler.overview_with_prefix(...)`；它会汇总 `scope_count / pending_scope_count / stale_scope_count / counts / worker_count / active_lease_count / reclaimed_total`
 - 如果你想调整这层恢复窗口、显式指定 worker 身份或 heartbeat 节奏，统一改 `scheduler::Worker::new(...).with_lease_timeout(...).with_heartbeat_interval(...)`；如果你明确不想要这层自动回收，也可以在 `Worker` 上调用 `.without_lease_timeout()`
+- 如果某个 worker 准备优雅下线，不想等 lease timeout 再让别的 worker 接手，可以显式调用 `scheduler.release_inflight().await?`，把当前 worker 手里的 inflight task 主动放回 `ready / delayed`
 - `snapshot()`、`counts()`、`checkpoint()` 这类只读/静态读取入口不会把当前调用方登记成活跃 worker；真正会刷新 worker runtime 的只有 `enqueue / take_ready / complete / requeue / heartbeat`
-- 如果你是直接管理 scheduler 生命周期，不是交给 `Engine::run(...)`，结束时也可以统一调用 `scheduler.close().await?`；`Memory / Redis / 以后其它后端` 都走同一个关闭钩子
+- 如果你是直接管理 scheduler 生命周期，不是交给 `Engine::run(...)`，结束时也可以统一调用 `scheduler.close().await?`；如果是优雅下线 worker，通常是先 `release_inflight()`，再 `close()`
 - 如果你想自定义 checkpoint 后端，可以用 `scheduler::checkpoint::Memory::load(scheduler::checkpoint::Redis::new(...)).await?`
 - `checkpoint` 仍然只是静态快照恢复边界；它不会替代 durable scheduler 的 runtime reclaim
 - 如果你想自定义 scheduler 或 checkpoint 后端，分别实现 `scheduler::Scheduler` 或 `scheduler::checkpoint::Persist` 即可；自定义 scheduler 也应统一实现 `checkpoint / counts / snapshot / scopes / snapshots / overview` 这组读能力

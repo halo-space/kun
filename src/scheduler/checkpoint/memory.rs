@@ -91,6 +91,12 @@ where
         self.save_checkpoint().await
     }
 
+    async fn release_inflight(&self) -> Result<usize, SpiderError> {
+        let released = self.scheduler.release_inflight().await?;
+        self.save_checkpoint().await?;
+        Ok(released)
+    }
+
     async fn close(&self) -> Result<(), SpiderError> {
         self.scheduler.close().await?;
         self.save_checkpoint().await
@@ -153,6 +159,29 @@ mod tests {
         assert!(checkpoint.ready.is_empty());
         assert!(checkpoint.delayed.is_empty());
         assert!(checkpoint.inflight.is_empty());
+
+        tokio::fs::remove_file(path).await.ok();
+    }
+
+    #[tokio::test]
+    async fn checkpoint_memory_persists_release_inflight() {
+        let path = unique_path("release_inflight");
+        let scheduler = Memory::load(File::new(path.clone())).await.unwrap();
+
+        scheduler
+            .enqueue(Task::new(Request::new(
+                "https://example.com/release-inflight",
+            )))
+            .await
+            .unwrap();
+        let taken = scheduler.take_ready().await.unwrap().unwrap();
+
+        assert_eq!(scheduler.release_inflight().await.unwrap(), 1);
+
+        let checkpoint = File::new(path.clone()).load().await.unwrap();
+        assert_eq!(checkpoint.ready.len(), 1);
+        assert!(checkpoint.inflight.is_empty());
+        assert_eq!(checkpoint.ready[0].id, taken.task.id);
 
         tokio::fs::remove_file(path).await.ok();
     }

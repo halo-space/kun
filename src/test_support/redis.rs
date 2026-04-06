@@ -389,6 +389,9 @@ fn handle_eval_command(
     {
         return eval_scheduler_heartbeat(state, keys, args);
     }
+    if script.contains("kun:scheduler:release_inflight_v1") {
+        return eval_scheduler_release_inflight(state, keys, args);
+    }
 
     Ok(error_reply("ERR unsupported test script"))
 }
@@ -560,6 +563,69 @@ fn eval_scheduler_heartbeat(
     set_insert(state, &keys[0], task_id);
     sorted_set_insert(state, &keys[1], task_id, deadline);
     Ok(integer_reply(1))
+}
+
+fn eval_scheduler_release_inflight(
+    state: &mut TestRedisState,
+    keys: &[String],
+    args: &[String],
+) -> Result<Vec<u8>, std::io::Error> {
+    if keys.len() != 9 || args.len() != 2 {
+        return Ok(error_reply("ERR invalid release inflight script args"));
+    }
+
+    let now = args[0].parse::<i64>().map_err(int_error)?;
+    let worker_id = args[1].as_str();
+    let task_ids = state
+        .hashes
+        .get(&keys[6])
+        .map(|workers| {
+            workers
+                .iter()
+                .filter_map(|(task_id, owner)| {
+                    if owner == worker_id {
+                        Some(task_id.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let mut released = 0usize;
+    for task_id in task_ids {
+        let task_json = state
+            .hashes
+            .get(&keys[0])
+            .and_then(|tasks| tasks.get(task_id.as_str()))
+            .cloned();
+        let removed = set_remove(state, &keys[4], task_id.as_str());
+        sorted_set_remove(state, &keys[5], task_id.as_str());
+        hash_delete(state, &keys[6], task_id.as_str());
+        hash_delete(state, &keys[7], task_id.as_str());
+
+        let Some(task_json) = task_json else {
+            continue;
+        };
+        if !removed {
+            continue;
+        }
+
+        route_task(
+            state,
+            &keys[1],
+            &keys[2],
+            &keys[3],
+            &keys[8],
+            task_id.as_str(),
+            &task_json,
+            now,
+        )?;
+        released += 1;
+    }
+
+    Ok(integer_reply(i64::try_from(released).unwrap_or_default()))
 }
 
 fn reclaim_expired_inflight(
