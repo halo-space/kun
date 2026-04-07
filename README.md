@@ -34,28 +34,28 @@ README 这里只保留总览；模块级细节统一放到 [docs/capabilities.md
 - `Response.body` 与 `Response.text` 的语义已经明确并统一解码
 - Spider 现在除了 `start_urls()` / `build_start_urls()`，也可以直接覆写 `build_start_requests()` 返回完整 `Request`；默认仍然是把 URL 自动包成 `Request::new(...)`
 - `scheduler::Memory`、`scheduler::Sqlite` 与 `scheduler::Redis` 已把任务状态收口为 `ready / delayed / inflight`，并支持 `priority / depth` 排序；其中 `scheduler::Memory` 仍支持 `scheduler::checkpoint::Checkpoint` 导出/恢复，`scheduler::Sqlite` 提供单机 durable scheduler，`scheduler::Redis` 提供共享 durable scheduler；现在所有 scheduler 后端统一通过 `Scheduler` 暴露 `checkpoint() / counts() / snapshot() / scopes() / snapshots() / overview()` 这组读能力，并通过 `scheduler::Control` 暴露 `pause_scope() / resume_scope() / release_scope() / purge_scope()` 这组运维控制入口；`Sqlite / Redis` 这类可见多 scope 的 durable backend 可以返回/控制多个 scope，本地 `Memory` 则返回/控制当前 scope
-- 已提供 `scheduler::checkpoint::File`、`scheduler::checkpoint::Redis` 与 `scheduler::checkpoint::Memory`，用于文件、Redis 的 scheduler checkpoint 持久化；也已提供直接基于 Redis 的 durable scheduler
+- `scheduler::checkpoint::File`、`scheduler::checkpoint::Redis` 与 `scheduler::checkpoint::Memory` 用于文件、Redis 的 scheduler checkpoint 持久化；也支持直接基于 Redis 的 durable scheduler
 - `dedup` 已从默认 middleware 收口为显式 engine 组件；当前默认使用精确 `dedup::Memory`，也内置可选 `dedup::Bloom`，并可以通过 `Engine::with_dedup(...)` 切换为其它实现
 - `robots` 已提升为显式 engine 组件；当前默认使用 `robots::Memory`，也可以通过 `Engine::with_robots(...)` 切换为其它实现
 - `pipeline` 只负责 item 处理与过滤；最终持久化/投递走独立 `store` 边界，当前内置 `store::Memory`、`store::File`、`store::Sqlite`、`store::Webhook`、`store::Redis` 与 `store::Kafka`
 - `Engine::new()` 默认使用 `store::File::default()`，结果会写到 `output/<spider_name>.jsonl`
 - `Engine::default()` 等价于 `Engine::new()`
-- `Engine::stats()` 已提供累计运行时计数快照：除了 `request_count`、`response_count`、`error_count`、`retry_count`、`item_count`、`pipeline_drop_count`，现在也包含 `dedup_reject_count`、`robots_disallow_count`、`robots_delay_count`、`http_cache_hit_count`、`http_cache_revalidate_count`、`http_cache_store_count`、`http_cache_miss_count`、`store_error_count`，以及 `scheduler_claim_count / scheduler_complete_count / scheduler_requeue_count / scheduler_heartbeat_count / scheduler_lease_lost_count`
-- 已提供最小 `signals / extensions`：可以通过 `Engine::with_signal_listener(...)` 监听 `spider_opened`、`spider_closed`、`request_scheduled`、`response_received`、`item_scraped`、`spider_error`，以及统一的 `scheduler_event` runtime 事件；如果只关心部分事件，也可以用 `Engine::with_signal_listener_for([...], ...)` 做 signal kind 过滤订阅；扩展侧同理可以用 `Engine::with_extension(...)` / `Engine::with_extension_for([...], ...)`，内置 `extensions::Summary`
-- 已提供统一 `telemetry` 导出边界：`Engine::with_telemetry(...)` 会同时接入 engine stats 与 scheduler runtime 事件；内置 `telemetry::Collector`、`telemetry::File`、`telemetry::Prometheus`、`telemetry::OpenTelemetry` 和 `telemetry::Fanout`
-- 已提供更完整一版 `robots.txt` 策略：`Settings::with_robots_obey(true)` 开启后，会按 origin 缓存 `robots.txt`，并在下载前处理 `Allow` / `Disallow`、`Crawl-delay`、`Request-rate`、更完整的 `User-agent group` 匹配，以及 `* / $` wildcard 规则；其中 `Request-rate` 当前按 `window / requests` 的均匀间隔最小 delay 解释，如果同时声明 `Crawl-delay` 与 `Request-rate`，则取更严格的 delay；`robots::Robot::sitemaps(...)` 也可读取声明的 sitemap URL；默认 cache backend 是 `robots::cache::Memory`，也可以通过 `robots::Memory::with_cache(...)` 替换为 `robots::cache::File` 或自定义实现；`robots::cache::File::default()` 的路径是 `output/robots-cache.json`；`robots::Memory` 当前默认按 `24h` 的 `cache_ttl` 复用 policy，过期后会尝试刷新，刷新失败时优先回退旧缓存；如果当前 origin 没有可用缓存且 `robots.txt` 临时不可用，默认按 `robots::UnavailablePolicy::AllowAll` 继续 fail-open，并对这类临时不可用结果按默认 `60s` 的 retry delay 做短暂退避，避免每个请求都重复抓取 `robots.txt`；调用方也可以显式切到 `DisallowAll`、覆盖 retry delay，或关闭这层退避；现在也可以通过 `robots::Memory::with_site_policy(robots::Site::..., ...)` 给指定站点 matcher 叠加站点策略，内置支持 `origin / host / pattern`，其中 `access` 与 `unavailable_policy` 由更具体 matcher 决定，同一 specificity 下后注册规则优先，`delay` 取更严格值，`sitemap` 做去重合并；如果再打开 `Settings::with_robots_sitemap_seeds(true)`，引擎启动时会把 robots 里声明的 sitemap / sitemapindex，包括常见的 `.xml.gz` 压缩 sitemap，一并解析成新的种子请求，并继承 start request 的共享请求能力；默认 `priority / depth` 仍是 `0 / 0`，但现在也可以通过 `with_robots_sitemap_seed_priority(...)` 和 `with_robots_sitemap_seed_depth(...)` 显式覆盖
+- `Engine::stats()` 返回累计运行时计数快照：除了 `request_count`、`response_count`、`error_count`、`retry_count`、`item_count`、`pipeline_drop_count`，现在也包含 `dedup_reject_count`、`robots_disallow_count`、`robots_delay_count`、`http_cache_hit_count`、`http_cache_revalidate_count`、`http_cache_store_count`、`http_cache_miss_count`、`store_error_count`，以及 `scheduler_claim_count / scheduler_complete_count / scheduler_requeue_count / scheduler_heartbeat_count / scheduler_lease_lost_count`
+- `signals / extensions` 已接到引擎运行时：可以通过 `Engine::with_signal_listener(...)` 监听 `spider_opened`、`spider_closed`、`request_scheduled`、`response_received`、`item_scraped`、`spider_error`，以及统一的 `scheduler_event` runtime 事件；如果只关心部分事件，也可以用 `Engine::with_signal_listener_for([...], ...)` 做 signal kind 过滤订阅；扩展侧同理可以用 `Engine::with_extension(...)` / `Engine::with_extension_for([...], ...)`，内置 `extensions::Summary`
+- `telemetry` 是统一导出边界：`Engine::with_telemetry(...)` 会同时接入 engine stats 与 scheduler runtime 事件；内置 `telemetry::Collector`、`telemetry::File`、`telemetry::Prometheus`、`telemetry::OpenTelemetry` 和 `telemetry::Fanout`
+- `robots.txt` 策略支持 `Allow` / `Disallow`、`Crawl-delay`、`Request-rate`、`User-agent group` 匹配，以及 `* / $` wildcard 规则；`Request-rate` 当前按 `window / requests` 的均匀间隔最小 delay 解释，如果同时声明 `Crawl-delay` 与 `Request-rate`，则取更严格的 delay；`robots::Robot::sitemaps(...)` 也可读取声明的 sitemap URL；默认 cache backend 是 `robots::cache::Memory`，也可以通过 `robots::Memory::with_cache(...)` 替换为 `robots::cache::File` 或自定义实现；`robots::cache::File::default()` 的路径是 `output/robots-cache.json`；`robots::Memory` 默认按 `24h` 的 `cache_ttl` 复用 policy，过期后会尝试刷新，刷新失败时优先回退旧缓存；如果当前 origin 没有可用缓存且 `robots.txt` 临时不可用，默认按 `robots::UnavailablePolicy::AllowAll` 继续 fail-open，并对这类临时不可用结果按默认 `60s` 的 retry delay 做短暂退避，避免每个请求都重复抓取 `robots.txt`；调用方也可以显式切到 `DisallowAll`、覆盖 retry delay，或关闭这层退避；现在也可以通过 `robots::Memory::with_site_policy(robots::Site::..., ...)` 给指定站点 matcher 叠加站点策略，内置支持 `origin / host / pattern`，其中 `access` 与 `unavailable_policy` 由更具体 matcher 决定，同一 specificity 下后注册规则优先，`delay` 取更严格值，`sitemap` 做去重合并；如果再打开 `Settings::with_robots_sitemap_seeds(true)`，引擎启动时会把 robots 里声明的 sitemap / sitemapindex，包括常见的 `.xml.gz` 压缩 sitemap，一并解析成新的种子请求，并继承 start request 的共享请求能力；默认 `priority / depth` 仍是 `0 / 0`，但现在也可以通过 `with_robots_sitemap_seed_priority(...)` 和 `with_robots_sitemap_seed_depth(...)` 显式覆盖
 - `robots` 这块如果想直接看 `Site::pattern / host / origin` 的接法，可以运行 `examples/robots_site_policy.rs`
-- 已提供最小 `AutoThrottle`：`Settings::with_auto_throttle(true)` 开启后，会按 origin 基于延迟、错误和目标并发动态调整下一次下载间隔；此时 `download_delay` 表示初始/最小 delay，`with_auto_throttle_max_delay(...)` 表示最大 delay
-- 已提供一版更完整的 `HTTP cache / conditional request`：默认还是内存 backend，也已支持内置 `middleware::http_cache::File` 持久化 backend；`Settings::with_http_cache(true)` 开启后，同一 HTTP `GET` 请求会基于已缓存的 `ETag / Last-Modified` 自动补 `If-None-Match / If-Modified-Since`；命中 `304 Not Modified` 时，在 `response` 策略下会回填缓存 body，并给 `Response.flags` 增加 `http_cache`；当前也支持 `ttl` 和 `validators / response` 两种缓存策略
+- `AutoThrottle` 支持按 origin 基于延迟、错误和目标并发动态调整下一次下载间隔；`Settings::with_auto_throttle(true)` 开启后，`download_delay` 表示初始/最小 delay，`with_auto_throttle_max_delay(...)` 表示最大 delay
+- `HTTP cache / conditional request` 支持内存 backend 和内置 `middleware::http_cache::File` 持久化 backend；`Settings::with_http_cache(true)` 开启后，同一 HTTP `GET` 请求会基于已缓存的 `ETag / Last-Modified` 自动补 `If-None-Match / If-Modified-Since`；命中 `304 Not Modified` 时，在 `response` 策略下会回填缓存 body，并给 `Response.flags` 增加 `http_cache`；当前也支持 `ttl` 和 `validators / response` 两种缓存策略
 - plugin 自动装载当前只支持 `middleware` kind；当前已知但暂未自动装载的 kind 统一收口为 `store`、`scheduler`、`dedup`、`robots`、`http`、`browser`
 - DSL 当前定位已经明确为“共享底层能力的配置化入口”，不是另一套独立运行时
 
 当前仍待补齐的底层能力：
 
-- 观测主链路其实已经有了：`stats`、`signals / extensions`、`trace`、`Engine::with_stats_reporter(...)` 和统一 `telemetry` exporter 都已接好；当前真正还缺的是更完整的持久化事件总线聚合层、跨 job 仪表盘/巡检视图，以及更高阶的运维自动化。
-- durable scheduler 的核心语义已经基本收口：`Memory / Sqlite / Redis`、worker ownership、heartbeat、stale reclaim、batch、scope `snapshot / overview`、统一 `scheduler::Control`、`store -> scheduler resolve` 显式提交边界都已经到位；当前主要剩的是更强的分布式协调后端、更完整的后台运维服务层，以及更丰富的 exporter / 自动化接线。
-- browser 的核心抓取能力也已经不是空白：内置 preset、结构化 `fingerprint_profile`、最小 stealth bootstrap、稳定 session 目录、显式 `keep_alive` 与 `keep_alive_scope` 都已具备；当前剩余主要是更高阶第三方 stealth 套件，以及更细粒度的 session/context/page 复用策略。
-- validation 规则层和 report API 已经比较完整；当前真正还没完全收口的是“校验失败映射成什么 runtime 行为”这层策略，而不是校验能力本身。
+- 观测剩余缺口：持久化事件总线聚合层、跨 job 仪表盘/巡检视图，以及更系统的运维自动化。
+- durable scheduler 剩余缺口：更强的分布式协调后端、后台运维服务层，以及更丰富的 exporter / 自动化接线。
+- browser 剩余缺口：第三方 stealth 套件接入、更高阶浏览器指纹伪装，以及更细粒度的 session/context/page 复用策略。
+- validation 剩余缺口：校验失败如何统一映射到 runtime 行为。
 - plugin 自动装载这条线当前仍只自动接 `middleware`；`store`、`scheduler`、`dedup`、`robots`、`http`、`browser` 这些 kind 还没有完成真正的 engine 自动接线。
 - DSL 继续后置；当前它已经共享底层 `Request / parse / scheduler / validation` 模型，但整体能力面仍然没有完全追平代码爬虫主线。
 
@@ -622,7 +622,7 @@ Spider / rules
 - structured `fingerprint_profile`
 - explicit `keep_alive = isolated | context | page`
 - optional `keep_alive_scope = session | origin`
-- richer `stealth = true` bootstrap
+- `stealth = true` bootstrap
 - browser response status / headers
 - 页面渲染后的 HTML 抓取
 
@@ -651,7 +651,7 @@ browser 执行路径，`ip_address` 与 `certificate` 由于 Playwright 当前�
 - `fingerprint_preset` 当前只支持内置 preset：`desktop_zh_cn`、`desktop_en_us`、`desktop_en_gb`、`desktop_ja_jp`、`desktop_de_de`、`desktop_fr_fr`
 - `fingerprint_profile` 可以直接传结构化 profile，不必先注册新的内置 preset 名称
 - `fingerprint_preset` 会稳定映射 `locale`、`timezone`、`accept-language`、`languages`，同时按当前 `engine` 选择对应浏览器族的 `user_agent / platform / vendor`
-- `stealth = true` 当前会注入一版更完整但仍然克制的 bootstrap，覆盖 `navigator.webdriver`、`navigator.language(s)`、`navigator.platform`、`navigator.vendor`、`hardwareConcurrency`、`deviceMemory`、`maxTouchPoints`、`plugins`、`mimeTypes`、`pdfViewerEnabled`、screen depth、notifications permissions 查询补丁，以及 Chromium 路线上的最小 `window.chrome` / `navigator.userAgentData`
+- `stealth = true` 当前会注入 bootstrap，覆盖 `navigator.webdriver`、`navigator.language(s)`、`navigator.platform`、`navigator.vendor`、`hardwareConcurrency`、`deviceMemory`、`maxTouchPoints`、`plugins`、`mimeTypes`、`pdfViewerEnabled`、screen depth、notifications permissions 查询补丁，以及 Chromium 路线上的最小 `window.chrome` / `navigator.userAgentData`
 - 这组 preset 和 stealth 现在已经会跟随 `engine` 切到 Chromium / Firefox / WebKit 对应的浏览器族，但仍然不追求完整第三方 stealth 套件或更高阶的品牌级伪装能力
 
 当前仍未实现、并且会继续显式报错的能力：
