@@ -2,7 +2,9 @@ use crate::download::traits::Downloader;
 use crate::error::SpiderError;
 #[cfg(any(feature = "browser", test))]
 use crate::request::Headers;
-use crate::request::browser::{Config as BrowserConfig, FingerprintProfile, SessionReuse};
+use crate::request::browser::{
+    Config as BrowserConfig, Engine as BrowserEngine, FingerprintProfile, SessionReuse,
+};
 use crate::request::{Request, RequestMode};
 use crate::response::Response;
 #[cfg(feature = "browser")]
@@ -137,7 +139,6 @@ fn validate_fingerprint_profile(profile: &FingerprintProfile) -> Result<(), Spid
     validate_non_empty_browser_profile_field("timezone", &profile.timezone)?;
     validate_non_empty_browser_profile_field("accept_language", &profile.accept_language)?;
     validate_non_empty_browser_profile_field("platform", &profile.platform)?;
-    validate_non_empty_browser_profile_field("vendor", &profile.vendor)?;
 
     if profile.languages.is_empty() {
         return Err(SpiderError::download(
@@ -178,13 +179,17 @@ fn validate_non_empty_browser_profile_field(field: &str, value: &str) -> Result<
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct BuiltinBrowserFingerprintProfile {
+struct BuiltinBrowserFingerprintPreset {
     name: &'static str,
-    user_agent: &'static str,
     locale: &'static str,
     timezone: &'static str,
     accept_language: &'static str,
     languages: &'static [&'static str],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BuiltinBrowserFingerprintFamily {
+    user_agent: &'static str,
     platform: &'static str,
     vendor: &'static str,
     hardware_concurrency: u8,
@@ -192,113 +197,106 @@ struct BuiltinBrowserFingerprintProfile {
     max_touch_points: u8,
 }
 
-impl BuiltinBrowserFingerprintProfile {
-    fn to_profile(self) -> FingerprintProfile {
+impl BuiltinBrowserFingerprintPreset {
+    fn to_profile(self, family: BuiltinBrowserFingerprintFamily) -> FingerprintProfile {
         FingerprintProfile::new()
-            .with_user_agent(self.user_agent)
+            .with_user_agent(family.user_agent)
             .with_locale(self.locale)
             .with_timezone(self.timezone)
             .with_accept_language(self.accept_language)
             .with_languages(self.languages.iter().copied())
-            .with_platform(self.platform)
-            .with_vendor(self.vendor)
-            .with_hardware_concurrency(self.hardware_concurrency)
-            .with_device_memory(self.device_memory)
-            .with_max_touch_points(self.max_touch_points)
+            .with_platform(family.platform)
+            .with_vendor(family.vendor)
+            .with_hardware_concurrency(family.hardware_concurrency)
+            .with_device_memory(family.device_memory)
+            .with_max_touch_points(family.max_touch_points)
     }
 }
 
-const BROWSER_FINGERPRINT_PROFILES: [BuiltinBrowserFingerprintProfile; 6] = [
-    BuiltinBrowserFingerprintProfile {
+const BROWSER_FINGERPRINT_PRESETS: [BuiltinBrowserFingerprintPreset; 6] = [
+    BuiltinBrowserFingerprintPreset {
         name: "desktop_zh_cn",
-        user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
         locale: "zh-CN",
         timezone: "Asia/Shanghai",
         accept_language: "zh-CN,zh;q=0.9,en;q=0.8",
         languages: &["zh-CN", "zh", "en"],
-        platform: "Win32",
-        vendor: "Google Inc.",
-        hardware_concurrency: 8,
-        device_memory: 8,
-        max_touch_points: 0,
     },
-    BuiltinBrowserFingerprintProfile {
+    BuiltinBrowserFingerprintPreset {
         name: "desktop_en_us",
-        user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
         locale: "en-US",
         timezone: "America/New_York",
         accept_language: "en-US,en;q=0.9",
         languages: &["en-US", "en"],
-        platform: "Win32",
-        vendor: "Google Inc.",
-        hardware_concurrency: 8,
-        device_memory: 8,
-        max_touch_points: 0,
     },
-    BuiltinBrowserFingerprintProfile {
+    BuiltinBrowserFingerprintPreset {
         name: "desktop_en_gb",
-        user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
         locale: "en-GB",
         timezone: "Europe/London",
         accept_language: "en-GB,en;q=0.9",
         languages: &["en-GB", "en"],
-        platform: "Win32",
-        vendor: "Google Inc.",
-        hardware_concurrency: 8,
-        device_memory: 8,
-        max_touch_points: 0,
     },
-    BuiltinBrowserFingerprintProfile {
+    BuiltinBrowserFingerprintPreset {
         name: "desktop_ja_jp",
-        user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
         locale: "ja-JP",
         timezone: "Asia/Tokyo",
         accept_language: "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
         languages: &["ja-JP", "ja", "en-US", "en"],
-        platform: "Win32",
-        vendor: "Google Inc.",
-        hardware_concurrency: 8,
-        device_memory: 8,
-        max_touch_points: 0,
     },
-    BuiltinBrowserFingerprintProfile {
+    BuiltinBrowserFingerprintPreset {
         name: "desktop_de_de",
-        user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
         locale: "de-DE",
         timezone: "Europe/Berlin",
         accept_language: "de-DE,de;q=0.9,en;q=0.8",
         languages: &["de-DE", "de", "en"],
-        platform: "Win32",
-        vendor: "Google Inc.",
-        hardware_concurrency: 8,
-        device_memory: 8,
-        max_touch_points: 0,
     },
-    BuiltinBrowserFingerprintProfile {
+    BuiltinBrowserFingerprintPreset {
         name: "desktop_fr_fr",
-        user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
         locale: "fr-FR",
         timezone: "Europe/Paris",
         accept_language: "fr-FR,fr;q=0.9,en;q=0.8",
         languages: &["fr-FR", "fr", "en"],
-        platform: "Win32",
-        vendor: "Google Inc.",
-        hardware_concurrency: 8,
-        device_memory: 8,
-        max_touch_points: 0,
     },
 ];
 
-fn builtin_browser_fingerprint_profiles() -> &'static [BuiltinBrowserFingerprintProfile] {
-    &BROWSER_FINGERPRINT_PROFILES
+fn builtin_browser_fingerprint_presets() -> &'static [BuiltinBrowserFingerprintPreset] {
+    &BROWSER_FINGERPRINT_PRESETS
 }
 
-fn builtin_browser_fingerprint_profile_names() -> String {
-    builtin_browser_fingerprint_profiles()
+fn builtin_browser_fingerprint_preset_names() -> String {
+    builtin_browser_fingerprint_presets()
         .iter()
-        .map(|profile| profile.name)
+        .map(|preset| preset.name)
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn builtin_browser_fingerprint_family(engine: BrowserEngine) -> BuiltinBrowserFingerprintFamily {
+    match engine {
+        BrowserEngine::Chromium => BuiltinBrowserFingerprintFamily {
+            user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+            platform: "Win32",
+            vendor: "Google Inc.",
+            hardware_concurrency: 8,
+            device_memory: 8,
+            max_touch_points: 0,
+        },
+        BrowserEngine::Firefox => BuiltinBrowserFingerprintFamily {
+            user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:137.0) Gecko/20100101 Firefox/137.0",
+            platform: "Win32",
+            vendor: "",
+            hardware_concurrency: 8,
+            device_memory: 8,
+            max_touch_points: 0,
+        },
+        BrowserEngine::Webkit => BuiltinBrowserFingerprintFamily {
+            user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+            platform: "MacIntel",
+            vendor: "Apple Computer, Inc.",
+            hardware_concurrency: 8,
+            device_memory: 8,
+            max_touch_points: 0,
+        },
+    }
 }
 
 #[cfg(any(feature = "browser", test))]
@@ -343,15 +341,16 @@ fn resolve_fingerprint_profile(
         return Ok(None);
     };
 
-    if let Some(profile) = builtin_browser_fingerprint_profiles()
+    if let Some(preset) = builtin_browser_fingerprint_presets()
         .iter()
         .copied()
-        .find(|profile| profile.name == profile_name)
+        .find(|preset| preset.name == profile_name)
     {
-        return Ok(Some(profile.to_profile()));
+        let family = builtin_browser_fingerprint_family(config.engine);
+        return Ok(Some(preset.to_profile(family)));
     }
 
-    let supported = builtin_browser_fingerprint_profile_names();
+    let supported = builtin_browser_fingerprint_preset_names();
     Err(SpiderError::download(format!(
         "browser fingerprint_preset is not supported on the Playwright route: {profile_name}; supported presets: {supported}"
     )))
@@ -1297,7 +1296,9 @@ impl TemporaryUserDataDir {
 mod tests {
     use super::*;
     use crate::download::traits::Downloader;
-    use crate::request::browser::{Config as BrowserConfig, FingerprintProfile, SessionReuse};
+    use crate::request::browser::{
+        Config as BrowserConfig, Engine as BrowserEngine, FingerprintProfile, SessionReuse,
+    };
     use std::sync::Arc;
 
     #[test]
@@ -1351,6 +1352,30 @@ mod tests {
                     .with_timezone("Asia/Tokyo")
                     .with_accept_language("ja-JP,ja;q=0.9")
                     .with_languages(["ja-JP", "ja"]),
+            ),
+        );
+
+        let result = validate_browser_request_contract(
+            &request,
+            request
+                .browser
+                .as_ref()
+                .expect("browser config should exist"),
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn browser_request_contract_allows_empty_vendor_for_firefox_style_profile() {
+        let request = Request::browser("https://example.com").with_browser(
+            BrowserConfig::default().with_fingerprint_profile(
+                FingerprintProfile::new()
+                    .with_vendor("")
+                    .with_locale("en-US")
+                    .with_timezone("America/New_York")
+                    .with_accept_language("en-US,en;q=0.9")
+                    .with_languages(["en-US", "en"]),
             ),
         );
 
@@ -1650,6 +1675,48 @@ mod tests {
     }
 
     #[test]
+    fn resolve_fingerprint_profile_returns_firefox_builtin_profile_for_selected_engine() {
+        let config = BrowserConfig::default()
+            .with_engine(BrowserEngine::Firefox)
+            .with_fingerprint_preset("desktop_en_us");
+
+        let profile = resolve_fingerprint_profile(&config)
+            .unwrap()
+            .expect("profile should resolve");
+
+        assert_eq!(
+            profile.user_agent,
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:137.0) Gecko/20100101 Firefox/137.0"
+        );
+        assert_eq!(profile.platform, "Win32");
+        assert_eq!(profile.vendor, "");
+        assert_eq!(profile.locale, "en-US");
+        assert_eq!(profile.timezone, "America/New_York");
+        assert_eq!(profile.languages, vec!["en-US", "en"]);
+    }
+
+    #[test]
+    fn resolve_fingerprint_profile_returns_webkit_builtin_profile_for_selected_engine() {
+        let config = BrowserConfig::default()
+            .with_engine(BrowserEngine::Webkit)
+            .with_fingerprint_preset("desktop_ja_jp");
+
+        let profile = resolve_fingerprint_profile(&config)
+            .unwrap()
+            .expect("profile should resolve");
+
+        assert_eq!(
+            profile.user_agent,
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
+        );
+        assert_eq!(profile.platform, "MacIntel");
+        assert_eq!(profile.vendor, "Apple Computer, Inc.");
+        assert_eq!(profile.locale, "ja-JP");
+        assert_eq!(profile.timezone, "Asia/Tokyo");
+        assert_eq!(profile.languages, vec!["ja-JP", "ja", "en-US", "en"]);
+    }
+
+    #[test]
     fn resolve_fingerprint_profile_returns_structured_profile() {
         let config = BrowserConfig::default().with_fingerprint_profile(
             FingerprintProfile::new()
@@ -1672,9 +1739,9 @@ mod tests {
 
     #[test]
     fn resolve_fingerprint_profile_exposes_expanded_builtin_set() {
-        let names = builtin_browser_fingerprint_profiles()
+        let names = builtin_browser_fingerprint_presets()
             .iter()
-            .map(|profile| profile.name)
+            .map(|preset| preset.name)
             .collect::<Vec<_>>();
 
         assert_eq!(

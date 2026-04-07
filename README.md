@@ -54,7 +54,7 @@ README 这里只保留总览；模块级细节统一放到 [docs/capabilities.md
 
 - 观测主链路其实已经有了：`stats`、`signals / extensions`、`trace`、`Engine::with_stats_reporter(...)` 和统一 `telemetry` exporter 都已接好；当前真正还缺的是更完整的持久化事件总线聚合层、跨 job 仪表盘/巡检视图，以及更高阶的运维自动化。
 - durable scheduler 的核心语义已经基本收口：`Memory / Sqlite / Redis`、worker ownership、heartbeat、stale reclaim、batch、scope `snapshot / overview`、统一 `scheduler::Control`、`store -> scheduler resolve` 显式提交边界都已经到位；当前主要剩的是更强的分布式协调后端、更完整的后台运维服务层，以及更丰富的 exporter / 自动化接线。
-- browser 的核心抓取能力也已经不是空白：内置 profile、结构化 custom profile、最小 stealth bootstrap、`session_reuse` 与稳定 session 目录都已具备；当前剩余主要是更高阶第三方 stealth 套件、更强的品牌级指纹伪装，以及跨 engine 更完整的 session/context 复用策略。
+- browser 的核心抓取能力也已经不是空白：内置 preset、结构化 `fingerprint_profile`、最小 stealth bootstrap、`session_reuse` 与稳定 session 目录都已具备；当前剩余主要是更高阶第三方 stealth 套件，以及更细粒度的 session/context/page 复用策略。
 - validation 规则层和 report API 已经比较完整；当前真正还没完全收口的是“校验失败映射成什么 runtime 行为”这层策略，而不是校验能力本身。
 - plugin 自动装载这条线当前仍只自动接 `middleware`；`store`、`scheduler`、`dedup`、`robots`、`http`、`browser` 这些 kind 还没有完成真正的 engine 自动接线。
 - DSL 继续后置；当前它已经共享底层 `Request / parse / scheduler / validation` 模型，但整体能力面仍然没有完全追平代码爬虫主线。
@@ -644,9 +644,9 @@ browser 执行路径，`ip_address` 与 `certificate` 由于 Playwright 当前�
 
 - `fingerprint_preset` 当前只支持内置 preset：`desktop_zh_cn`、`desktop_en_us`、`desktop_en_gb`、`desktop_ja_jp`、`desktop_de_de`、`desktop_fr_fr`
 - `fingerprint_profile` 可以直接传结构化 profile，不必先注册新的内置 preset 名称
-- 这些 profile 会稳定映射 `user_agent`、`locale`、`timezone`、`accept-language`、`languages`、`platform`
+- `fingerprint_preset` 会稳定映射 `locale`、`timezone`、`accept-language`、`languages`，同时按当前 `engine` 选择对应浏览器族的 `user_agent / platform / vendor`
 - `stealth = true` 当前会注入一版更完整但仍然克制的 bootstrap，覆盖 `navigator.webdriver`、`navigator.language(s)`、`navigator.platform`、`navigator.vendor`、`hardwareConcurrency`、`deviceMemory`、`maxTouchPoints`、`plugins`、`mimeTypes`、`pdfViewerEnabled`、screen depth、notifications permissions 查询补丁，以及 Chromium 路线上的最小 `window.chrome` / `navigator.userAgentData`
-- 这组 profile 和 stealth 仍然只是稳定内置 preset，不追求跨所有 Playwright engine 的“完全品牌一致”高阶伪装能力
+- 这组 preset 和 stealth 现在已经会跟随 `engine` 切到 Chromium / Firefox / WebKit 对应的浏览器族，但仍然不追求完整第三方 stealth 套件或更高阶的品牌级伪装能力
 
 当前仍未实现、并且会继续显式报错的能力：
 

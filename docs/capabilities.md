@@ -17,7 +17,7 @@ README 负责总览，这里负责把每个模块现在到底能做什么、还�
 
 - 观测主链路已经基本具备：`stats`、`signals / extensions`、`trace`、`telemetry` exporter 都已接通；当前真正还缺的是更完整的持久化事件总线聚合层、跨 job 运维自动化，以及更高阶的统一看板/巡检视图
 - durable scheduler 的基础语义已经基本收口：ownership、heartbeat、stale reclaim、batch、snapshot/overview、统一 `Control`、显式提交边界都已经有；当前剩余重点主要是更强的分布式协调后端和更完整的后台运维服务层
-- browser 已支持结构化 custom profile、最小 stealth bootstrap 与显式 `session_reuse`；当前剩余缺口主要是更高阶 stealth 套件和跨 engine 更完整的品牌级指纹伪装
+- browser 已支持结构化 `fingerprint_profile`、最小 stealth bootstrap、显式 `session_reuse`，以及按 `engine` 选择浏览器族的内置 `fingerprint_preset`；当前剩余缺口主要是更高阶 stealth 套件和更细粒度的 session/context/page 复用策略
 - validation 本身已经不弱；当前更缺的是“校验失败后如何统一映射到 runtime 行为”这层策略
 - plugin 自动装载与 DSL 对齐仍明显落后于底层 runtime 能力
 
@@ -64,14 +64,20 @@ README 负责总览，这里负责把每个模块现在到底能做什么、还�
 
 内置 `fingerprint_preset` 的稳定映射：
 
-| profile | user_agent family | locale | timezone | languages | platform |
-| --- | --- | --- | --- | --- | --- |
-| `desktop_zh_cn` | Chrome 136 / Windows 10 x64 | `zh-CN` | `Asia/Shanghai` | `["zh-CN", "zh", "en"]` | `Win32` |
-| `desktop_en_us` | Chrome 136 / Windows 10 x64 | `en-US` | `America/New_York` | `["en-US", "en"]` | `Win32` |
-| `desktop_en_gb` | Chrome 136 / Windows 10 x64 | `en-GB` | `Europe/London` | `["en-GB", "en"]` | `Win32` |
-| `desktop_ja_jp` | Chrome 136 / Windows 10 x64 | `ja-JP` | `Asia/Tokyo` | `["ja-JP", "ja", "en-US", "en"]` | `Win32` |
-| `desktop_de_de` | Chrome 136 / Windows 10 x64 | `de-DE` | `Europe/Berlin` | `["de-DE", "de", "en"]` | `Win32` |
-| `desktop_fr_fr` | Chrome 136 / Windows 10 x64 | `fr-FR` | `Europe/Paris` | `["fr-FR", "fr", "en"]` | `Win32` |
+- preset 会稳定提供 `locale / timezone / accept-language / languages`
+- 其中 `user_agent / platform / vendor` 现在会按 `engine` 切到对应浏览器族：
+  `chromium -> Chrome / Win32 / Google Inc.`
+  `firefox -> Firefox / Win32 / ""`
+  `webkit -> Safari / MacIntel / Apple Computer, Inc.`
+
+| preset | locale | timezone | languages |
+| --- | --- | --- | --- |
+| `desktop_zh_cn` | `zh-CN` | `Asia/Shanghai` | `["zh-CN", "zh", "en"]` |
+| `desktop_en_us` | `en-US` | `America/New_York` | `["en-US", "en"]` |
+| `desktop_en_gb` | `en-GB` | `Europe/London` | `["en-GB", "en"]` |
+| `desktop_ja_jp` | `ja-JP` | `Asia/Tokyo` | `["ja-JP", "ja", "en-US", "en"]` |
+| `desktop_de_de` | `de-DE` | `Europe/Berlin` | `["de-DE", "de", "en"]` |
+| `desktop_fr_fr` | `fr-FR` | `Europe/Paris` | `["fr-FR", "fr", "en"]` |
 
 当前仍未收敛、并会继续显式报错或保留空白的部分：
 
@@ -82,7 +88,7 @@ README 负责总览，这里负责把每个模块现在到底能做什么、还�
 这里刻意保持一个边界：
 
 - browser 仍然只是渲染型下载器，不扩成通用自动化框架
-- fingerprint profile 目前只提供稳定内置 preset，不承诺“跨所有 engine 的品牌级完美伪装”
+- fingerprint preset 现在会跟随 `engine` 切到对应浏览器族，但仍不承诺完整第三方 stealth 套件或“品牌级完美伪装”
 
 这部分的设计目标是：HTTP 和 browser 只是两种下载方式，最终都回到统一请求语义。
 browser 在这里的角色是“渲染型下载器”，不是另起一套通用浏览器自动化 runtime；当前只保留导航、等待页面就绪和返回最终 HTML 这类爬虫抓取直接需要的能力。
