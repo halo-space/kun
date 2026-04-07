@@ -25,12 +25,12 @@ impl Extension for Summary {
                     "summary",
                     vec![
                         crate::trace::prop("spider", closed.spider_name.as_str()),
-                        crate::trace::prop("request_count", closed.stats.request_count),
-                        crate::trace::prop("response_count", closed.stats.response_count),
-                        crate::trace::prop("error_count", closed.stats.error_count),
-                        crate::trace::prop("retry_count", closed.stats.retry_count),
-                        crate::trace::prop("item_count", closed.stats.item_count),
-                        crate::trace::prop("pipeline_drop_count", closed.stats.pipeline_drop_count),
+                        crate::trace::prop("requests", closed.stats.request_count),
+                        crate::trace::prop("responses", closed.stats.response_count),
+                        crate::trace::prop("errors", closed.stats.error_count),
+                        crate::trace::prop("retries", closed.stats.retry_count),
+                        crate::trace::prop("items", closed.stats.item_count),
+                        crate::trace::prop("dropped", closed.stats.pipeline_drop_count),
                     ],
                 );
             }

@@ -463,7 +463,7 @@ impl<C: Cache> Memory<C> {
                     "robots.fallback_policy",
                     vec![
                         crate::trace::prop("origin", origin.as_str()),
-                        crate::trace::prop("unavailable_policy", format!("{unavailable_policy:?}")),
+                        crate::trace::prop("policy", format!("{unavailable_policy:?}")),
                     ],
                 );
                 Ok(Arc::new(unavailable_policy.policy()))
@@ -944,7 +944,7 @@ async fn fetch_policy_entry(
             crate::trace::warn(
                 "robots.fetch_fail",
                 vec![
-                    crate::trace::prop("robots_url", robots_url.as_str()),
+                    crate::trace::prop("url", robots_url.as_str()),
                     crate::trace::prop("error", error),
                 ],
             );
@@ -960,7 +960,7 @@ async fn fetch_policy_entry(
                     crate::trace::warn(
                         "robots.read_fail",
                         vec![
-                            crate::trace::prop("robots_url", robots_url.as_str()),
+                            crate::trace::prop("url", robots_url.as_str()),
                             crate::trace::prop("error", error),
                         ],
                     );
@@ -987,7 +987,7 @@ async fn fetch_policy_entry(
             crate::trace::warn(
                 "robots.bad_status",
                 vec![
-                    crate::trace::prop("robots_url", robots_url.as_str()),
+                    crate::trace::prop("url", robots_url.as_str()),
                     crate::trace::prop("status", status),
                 ],
             );

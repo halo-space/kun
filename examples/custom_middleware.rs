@@ -91,7 +91,7 @@ impl Middleware for RequestLoggerMiddleware {
                     vec![
                         halo_spider::trace::prop("url", context.request.url.as_str()),
                         halo_spider::trace::prop("status", resp.status),
-                        halo_spider::trace::prop("body_len", resp.body.len()),
+                        halo_spider::trace::prop("bytes", resp.body.len()),
                     ],
                 );
             }
@@ -135,7 +135,7 @@ impl Middleware for StatsMiddleware {
                 "stats.request",
                 vec![
                     halo_spider::trace::prop("label", self.label.as_str()),
-                    halo_spider::trace::prop("count", n),
+                    halo_spider::trace::prop("requests", n),
                 ],
             );
             Ok(Flow::Continue)
@@ -152,7 +152,7 @@ impl Middleware for StatsMiddleware {
                 "stats.response",
                 vec![
                     halo_spider::trace::prop("label", self.label.as_str()),
-                    halo_spider::trace::prop("count", n),
+                    halo_spider::trace::prop("responses", n),
                 ],
             );
             Ok(Flow::Continue)

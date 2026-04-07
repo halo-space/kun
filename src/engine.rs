@@ -864,12 +864,12 @@ where
             vec![
                 crate::trace::prop("spider", spider_name),
                 crate::trace::prop("rounds", round),
-                crate::trace::prop("total_items", total_items),
-                crate::trace::prop("request_count", snapshot.request_count),
-                crate::trace::prop("response_count", snapshot.response_count),
-                crate::trace::prop("error_count", snapshot.error_count),
-                crate::trace::prop("retry_count", snapshot.retry_count),
-                crate::trace::prop("pipeline_drop_count", snapshot.pipeline_drop_count),
+                crate::trace::prop("items", total_items),
+                crate::trace::prop("requests", snapshot.request_count),
+                crate::trace::prop("responses", snapshot.response_count),
+                crate::trace::prop("errors", snapshot.error_count),
+                crate::trace::prop("retries", snapshot.retry_count),
+                crate::trace::prop("dropped", snapshot.pipeline_drop_count),
             ],
         );
 

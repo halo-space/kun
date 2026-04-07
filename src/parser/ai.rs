@@ -110,7 +110,7 @@ impl AiQuery {
                         "ai.fail",
                         vec![
                             crate::trace::prop("attempt", attempt),
-                            crate::trace::prop("max_attempts", self.max_retries + 1),
+                            crate::trace::prop("max", self.max_retries + 1),
                             crate::trace::prop("error", e),
                         ],
                     );
@@ -129,7 +129,7 @@ impl AiQuery {
                         "ai.timeout",
                         vec![
                             crate::trace::prop("attempt", attempt),
-                            crate::trace::prop("max_attempts", self.max_retries + 1),
+                            crate::trace::prop("max", self.max_retries + 1),
                         ],
                     );
                     sleep(

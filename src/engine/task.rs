@@ -224,8 +224,8 @@ where
                 "task.lease_lost",
                 vec![
                     crate::trace::prop("spider", spider_name),
-                    crate::trace::prop("task_id", lease.task_id().as_str()),
-                    crate::trace::prop("worker_id", lease.worker_id()),
+                    crate::trace::prop("task", lease.task_id().as_str()),
+                    crate::trace::prop("worker", lease.worker_id()),
                     crate::trace::prop("url", url.as_str()),
                     crate::trace::prop("error", &error),
                 ],
@@ -275,8 +275,8 @@ async fn resolve_scheduler_transition(
                 "task.lease_resolve_fail",
                 vec![
                     crate::trace::prop("spider", spider_name),
-                    crate::trace::prop("task_id", lease.task_id().as_str()),
-                    crate::trace::prop("worker_id", lease.worker_id()),
+                    crate::trace::prop("task", lease.task_id().as_str()),
+                    crate::trace::prop("worker", lease.worker_id()),
                     crate::trace::prop("action", scheduler_event_name(event)),
                     crate::trace::prop("url", url),
                     crate::trace::prop("error", &error),
@@ -602,7 +602,7 @@ where
                         crate::trace::prop("spider", self.spider_name),
                         crate::trace::prop("url", context.request.url.as_str()),
                         crate::trace::prop("status", response.status),
-                        crate::trace::prop("body_len", response.body.len()),
+                        crate::trace::prop("bytes", response.body.len()),
                     ],
                 );
                 response
