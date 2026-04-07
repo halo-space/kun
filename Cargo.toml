@@ -42,3 +42,6 @@ flate2 = "1.1.9"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "json"] }
 rdkafka = { version = "0.39", features = ["cmake-build"] }
 redis = { version = "1", default-features = false, features = ["aio", "tokio-comp"] }
+opentelemetry = { version = "0.31", default-features = false, features = ["metrics"] }
+opentelemetry_sdk = { version = "0.31", default-features = false, features = ["metrics"] }
+opentelemetry-otlp = { version = "0.31.1", default-features = false, features = ["metrics", "http-proto", "reqwest-blocking-client"] }

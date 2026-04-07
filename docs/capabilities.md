@@ -533,8 +533,8 @@ let engine = Engine::new().with_dedup(MethodUrlDedup {
 当前边界也需要明确：
 
 - 这还是最小内存内计数，不是完整 metrics backend
-- 现在已经有统一 `telemetry` exporter 边界，以及内置 `telemetry::Collector`、`telemetry::File`、`telemetry::Prometheus`、`telemetry::Fanout`
-- 当前已经有内置 Prometheus text exporter；还没有内置 OpenTelemetry 或其它远端 exporter
+- 现在已经有统一 `telemetry` exporter 边界，以及内置 `telemetry::Collector`、`telemetry::File`、`telemetry::Prometheus`、`telemetry::OpenTelemetry`、`telemetry::Fanout`
+- 当前已经有内置 Prometheus text exporter和 OTLP/OpenTelemetry HTTP exporter
 - `Engine::stats()` 仍然是主读取 API；`with_stats_reporter(...)` 和 `with_telemetry(...)` 是流式导出接线点
 - 如果需要 durable scheduler 的运行时观测，优先读 `scheduler.snapshot()`、`scheduler.snapshots_with_prefix(...)` 或 `scheduler.overview_with_prefix(...)`；如果需要单个 engine 生命周期累计计数，再读 `Engine::stats()`
 

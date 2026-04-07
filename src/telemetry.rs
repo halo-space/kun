@@ -1,6 +1,11 @@
 use crate::scheduler::{MetricsReporter, MetricsSnapshot, RuntimeEvent, RuntimeReporter};
 use crate::stats::{self, Snapshot as StatsSnapshot};
 use jiff::Timestamp;
+use opentelemetry::KeyValue;
+use opentelemetry::metrics::{Counter, MeterProvider as _};
+use opentelemetry_otlp::{MetricExporter, Protocol, WithExportConfig};
+use opentelemetry_sdk::Resource;
+use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use serde_json::{Value, json};
 use std::collections::VecDeque;
 use std::fmt::Write as _;
@@ -8,6 +13,8 @@ use std::fs::{File as FsFile, OpenOptions, create_dir_all};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+use thiserror::Error;
 
 const DEFAULT_RECENT_EVENT_LIMIT: usize = 256;
 
@@ -236,6 +243,114 @@ impl Exporter for File {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum OpenTelemetryError {
+    #[error("open telemetry exporter setup failed: {0}")]
+    Setup(String),
+    #[error("open telemetry exporter shutdown failed: {0}")]
+    Shutdown(String),
+}
+
+/// OTLP/OpenTelemetry exporter that reuses the unified telemetry event stream.
+///
+/// It keeps local telemetry state for inspection, and in parallel records
+/// counters into an OpenTelemetry meter provider that can periodically export
+/// to an OTLP collector over HTTP/protobuf.
+#[derive(Clone)]
+pub struct OpenTelemetry {
+    collector: Collector,
+    meter_provider: Arc<SdkMeterProvider>,
+    stats: Arc<OpenTelemetryStats>,
+    scheduler: Arc<OpenTelemetryScheduler>,
+}
+
+impl OpenTelemetry {
+    pub fn new(endpoint: impl Into<String>) -> Result<Self, OpenTelemetryError> {
+        OpenTelemetryBuilder::new(endpoint).build()
+    }
+
+    pub fn builder(endpoint: impl Into<String>) -> OpenTelemetryBuilder {
+        OpenTelemetryBuilder::new(endpoint)
+    }
+
+    pub fn snapshot(&self) -> CollectorSnapshot {
+        self.collector.snapshot()
+    }
+
+    pub fn shutdown(&self) -> Result<(), OpenTelemetryError> {
+        self.meter_provider
+            .shutdown()
+            .map_err(|error| OpenTelemetryError::Shutdown(error.to_string()))
+    }
+}
+
+impl Exporter for OpenTelemetry {
+    fn export(&self, event: Event) {
+        self.collector.export(event.clone());
+
+        match event {
+            Event::Stats { kind, .. } => self.stats.record(kind),
+            Event::Scheduler(event) => self.scheduler.record(&event),
+        }
+    }
+}
+
+pub struct OpenTelemetryBuilder {
+    endpoint: String,
+    service_name: String,
+    export_interval: Duration,
+}
+
+impl OpenTelemetryBuilder {
+    pub fn new(endpoint: impl Into<String>) -> Self {
+        Self {
+            endpoint: endpoint.into(),
+            service_name: "halo-spider".to_string(),
+            export_interval: Duration::from_secs(60),
+        }
+    }
+
+    pub fn with_service_name(mut self, service_name: impl Into<String>) -> Self {
+        self.service_name = service_name.into();
+        self
+    }
+
+    pub fn with_export_interval(mut self, export_interval: Duration) -> Self {
+        self.export_interval = export_interval;
+        self
+    }
+
+    pub fn build(self) -> Result<OpenTelemetry, OpenTelemetryError> {
+        let exporter = MetricExporter::builder()
+            .with_http()
+            .with_protocol(Protocol::HttpBinary)
+            .with_endpoint(self.endpoint)
+            .build()
+            .map_err(|error| OpenTelemetryError::Setup(error.to_string()))?;
+
+        let reader = PeriodicReader::builder(exporter)
+            .with_interval(self.export_interval)
+            .build();
+
+        let meter_provider = SdkMeterProvider::builder()
+            .with_resource(
+                Resource::builder()
+                    .with_service_name(self.service_name)
+                    .build(),
+            )
+            .with_reader(reader)
+            .build();
+        let meter = meter_provider.meter("halo_spider.telemetry");
+
+        Ok(OpenTelemetry {
+            collector: Collector::default(),
+            stats: Arc::new(OpenTelemetryStats::new(&meter)),
+            scheduler: Arc::new(OpenTelemetryScheduler::new(&meter)),
+            meter_provider: Arc::new(meter_provider),
+        })
+    }
+}
+
 /// In-memory Prometheus exporter for engine stats and scheduler runtime
 /// metrics.
 ///
@@ -292,6 +407,242 @@ impl Exporter for Prometheus {
     }
 }
 
+struct OpenTelemetryStats {
+    request: Counter<u64>,
+    response: Counter<u64>,
+    error: Counter<u64>,
+    retry: Counter<u64>,
+    item: Counter<u64>,
+    pipeline_drop: Counter<u64>,
+    dedup_reject: Counter<u64>,
+    robots_disallow: Counter<u64>,
+    robots_delay: Counter<u64>,
+    http_cache_hit: Counter<u64>,
+    http_cache_revalidate: Counter<u64>,
+    http_cache_store: Counter<u64>,
+    http_cache_miss: Counter<u64>,
+    store_error: Counter<u64>,
+    scheduler_claim: Counter<u64>,
+    scheduler_complete: Counter<u64>,
+    scheduler_requeue: Counter<u64>,
+    scheduler_heartbeat: Counter<u64>,
+    scheduler_lease_lost: Counter<u64>,
+}
+
+impl OpenTelemetryStats {
+    fn new(meter: &opentelemetry::metrics::Meter) -> Self {
+        Self {
+            request: build_counter(
+                meter,
+                "request_total",
+                "Total engine requests handled by this engine instance.",
+            ),
+            response: build_counter(
+                meter,
+                "response_total",
+                "Total engine responses handled by this engine instance.",
+            ),
+            error: build_counter(
+                meter,
+                "error_total",
+                "Total engine errors observed by this engine instance.",
+            ),
+            retry: build_counter(
+                meter,
+                "retry_total",
+                "Total task retries scheduled by this engine instance.",
+            ),
+            item: build_counter(
+                meter,
+                "item_total",
+                "Total items persisted by this engine instance.",
+            ),
+            pipeline_drop: build_counter(
+                meter,
+                "pipeline_drop_total",
+                "Total items dropped by pipelines in this engine instance.",
+            ),
+            dedup_reject: build_counter(
+                meter,
+                "dedup_reject_total",
+                "Total requests rejected by dedup in this engine instance.",
+            ),
+            robots_disallow: build_counter(
+                meter,
+                "robots_disallow_total",
+                "Total requests rejected by robots in this engine instance.",
+            ),
+            robots_delay: build_counter(
+                meter,
+                "robots_delay_total",
+                "Total requests delayed by robots in this engine instance.",
+            ),
+            http_cache_hit: build_counter(
+                meter,
+                "http_cache_hit_total",
+                "Total HTTP cache hits in this engine instance.",
+            ),
+            http_cache_revalidate: build_counter(
+                meter,
+                "http_cache_revalidate_total",
+                "Total HTTP cache revalidations in this engine instance.",
+            ),
+            http_cache_store: build_counter(
+                meter,
+                "http_cache_store_total",
+                "Total HTTP cache stores in this engine instance.",
+            ),
+            http_cache_miss: build_counter(
+                meter,
+                "http_cache_miss_total",
+                "Total HTTP cache misses in this engine instance.",
+            ),
+            store_error: build_counter(
+                meter,
+                "store_error_total",
+                "Total final store write errors in this engine instance.",
+            ),
+            scheduler_claim: build_counter(
+                meter,
+                "scheduler_claim_total",
+                "Total scheduler claims observed by this engine instance.",
+            ),
+            scheduler_complete: build_counter(
+                meter,
+                "scheduler_complete_total",
+                "Total scheduler completes observed by this engine instance.",
+            ),
+            scheduler_requeue: build_counter(
+                meter,
+                "scheduler_requeue_total",
+                "Total scheduler requeues observed by this engine instance.",
+            ),
+            scheduler_heartbeat: build_counter(
+                meter,
+                "scheduler_heartbeat_total",
+                "Total scheduler heartbeats observed by this engine instance.",
+            ),
+            scheduler_lease_lost: build_counter(
+                meter,
+                "scheduler_lease_lost_total",
+                "Total scheduler lease-lost events observed by this engine instance.",
+            ),
+        }
+    }
+
+    fn record(&self, kind: stats::Event) {
+        match kind {
+            stats::Event::Request => self.request.add(1, &[]),
+            stats::Event::Response => self.response.add(1, &[]),
+            stats::Event::Error => self.error.add(1, &[]),
+            stats::Event::Retry => self.retry.add(1, &[]),
+            stats::Event::Item => self.item.add(1, &[]),
+            stats::Event::PipelineDrop => self.pipeline_drop.add(1, &[]),
+            stats::Event::DedupReject => self.dedup_reject.add(1, &[]),
+            stats::Event::RobotsDisallow => self.robots_disallow.add(1, &[]),
+            stats::Event::RobotsDelay => self.robots_delay.add(1, &[]),
+            stats::Event::HttpCacheHit => self.http_cache_hit.add(1, &[]),
+            stats::Event::HttpCacheRevalidate => self.http_cache_revalidate.add(1, &[]),
+            stats::Event::HttpCacheStore => self.http_cache_store.add(1, &[]),
+            stats::Event::HttpCacheMiss => self.http_cache_miss.add(1, &[]),
+            stats::Event::StoreError => self.store_error.add(1, &[]),
+            stats::Event::SchedulerClaim => self.scheduler_claim.add(1, &[]),
+            stats::Event::SchedulerComplete => self.scheduler_complete.add(1, &[]),
+            stats::Event::SchedulerRequeue => self.scheduler_requeue.add(1, &[]),
+            stats::Event::SchedulerHeartbeat => self.scheduler_heartbeat.add(1, &[]),
+            stats::Event::SchedulerLeaseLost => self.scheduler_lease_lost.add(1, &[]),
+        }
+    }
+}
+
+struct OpenTelemetryScheduler {
+    claimed: Counter<u64>,
+    completed: Counter<u64>,
+    requeued: Counter<u64>,
+    heartbeat: Counter<u64>,
+    lease_lost: Counter<u64>,
+    reclaimed: Counter<u64>,
+    released: Counter<u64>,
+    closed: Counter<u64>,
+}
+
+impl OpenTelemetryScheduler {
+    fn new(meter: &opentelemetry::metrics::Meter) -> Self {
+        Self {
+            claimed: build_counter(
+                meter,
+                "scheduler_runtime_claim_total",
+                "Total scheduler claim runtime events.",
+            ),
+            completed: build_counter(
+                meter,
+                "scheduler_runtime_complete_total",
+                "Total scheduler complete runtime events.",
+            ),
+            requeued: build_counter(
+                meter,
+                "scheduler_runtime_requeue_total",
+                "Total scheduler requeue runtime events.",
+            ),
+            heartbeat: build_counter(
+                meter,
+                "scheduler_runtime_heartbeat_total",
+                "Total scheduler heartbeat runtime events.",
+            ),
+            lease_lost: build_counter(
+                meter,
+                "scheduler_runtime_lease_lost_total",
+                "Total scheduler lease-lost runtime events.",
+            ),
+            reclaimed: build_counter(
+                meter,
+                "scheduler_runtime_reclaimed_total",
+                "Total scheduler reclaimed runtime events.",
+            ),
+            released: build_counter(
+                meter,
+                "scheduler_runtime_released_total",
+                "Total scheduler released runtime events.",
+            ),
+            closed: build_counter(
+                meter,
+                "scheduler_runtime_closed_total",
+                "Total scheduler closed runtime events.",
+            ),
+        }
+    }
+
+    fn record(&self, event: &RuntimeEvent) {
+        let value = u64::try_from(event.count.max(1)).unwrap_or(u64::MAX);
+        let attrs = scheduler_attributes(event);
+
+        match event.kind {
+            crate::scheduler::RuntimeEventKind::Claimed => {
+                self.claimed.add(value, attrs.as_slice())
+            }
+            crate::scheduler::RuntimeEventKind::Completed => {
+                self.completed.add(value, attrs.as_slice())
+            }
+            crate::scheduler::RuntimeEventKind::Requeued => {
+                self.requeued.add(value, attrs.as_slice())
+            }
+            crate::scheduler::RuntimeEventKind::Heartbeat => {
+                self.heartbeat.add(value, attrs.as_slice())
+            }
+            crate::scheduler::RuntimeEventKind::LeaseLost => {
+                self.lease_lost.add(value, attrs.as_slice())
+            }
+            crate::scheduler::RuntimeEventKind::Reclaimed => {
+                self.reclaimed.add(value, attrs.as_slice())
+            }
+            crate::scheduler::RuntimeEventKind::Released => {
+                self.released.add(value, attrs.as_slice())
+            }
+            crate::scheduler::RuntimeEventKind::Closed => self.closed.add(value, attrs.as_slice()),
+        }
+    }
+}
+
 fn ensure_parent_dir(path: &Path) -> std::io::Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
@@ -343,6 +694,31 @@ fn stats_snapshot_json(snapshot: &StatsSnapshot) -> Value {
         "scheduler_heartbeat_count": snapshot.scheduler_heartbeat_count,
         "scheduler_lease_lost_count": snapshot.scheduler_lease_lost_count,
     })
+}
+
+fn build_counter(
+    meter: &opentelemetry::metrics::Meter,
+    name: &'static str,
+    description: &'static str,
+) -> Counter<u64> {
+    meter
+        .u64_counter(name)
+        .with_description(description)
+        .build()
+}
+
+fn scheduler_attributes(event: &RuntimeEvent) -> Vec<KeyValue> {
+    let mut attrs = Vec::new();
+
+    if let Some(scope) = &event.scope {
+        attrs.push(KeyValue::new("scope", scope.clone()));
+    }
+
+    if let Some(worker_id) = &event.worker_id {
+        attrs.push(KeyValue::new("worker_id", worker_id.clone()));
+    }
+
+    attrs
 }
 
 fn render_stats_metrics(output: &mut String, prefix: &str, snapshot: &StatsSnapshot) {
@@ -602,6 +978,9 @@ fn normalize_metric_prefix(prefix: &str) -> String {
 mod tests {
     use super::*;
     use crate::scheduler::{MetricCounts, RuntimeEvent, RuntimeEventKind, WorkerMetricsKey};
+    use std::io::{Read, Write as IoWrite};
+    use std::net::TcpListener;
+    use std::thread;
 
     fn unique_path(name: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now()
@@ -779,5 +1158,108 @@ mod tests {
         let rendered = prometheus.render();
         assert!(rendered.contains("# HELP halo_spider_demo_response_total"));
         assert!(rendered.contains("halo_spider_demo_response_total 1"));
+    }
+
+    #[test]
+    fn open_telemetry_exports_to_local_collector() {
+        let (endpoint, server) = spawn_http_sink();
+        let exporter = OpenTelemetry::builder(endpoint)
+            .with_service_name("halo-spider-test")
+            .with_export_interval(Duration::from_secs(3600))
+            .build()
+            .expect("open telemetry exporter should build");
+
+        crate::stats::Reporter::report(
+            &exporter,
+            stats::Event::Request,
+            StatsSnapshot {
+                request_count: 1,
+                ..StatsSnapshot::default()
+            },
+        );
+        RuntimeReporter::report(
+            &exporter,
+            RuntimeEvent::released(
+                Some("jobs:otel".to_string()),
+                Some("worker-otel".to_string()),
+                2,
+            ),
+        );
+
+        let snapshot = exporter.snapshot();
+        assert_eq!(snapshot.stats.request_count, 1);
+        assert_eq!(snapshot.scheduler.totals.released_total, 2);
+
+        exporter
+            .shutdown()
+            .expect("open telemetry exporter should flush and shutdown");
+        let request_line = server.join().expect("http sink thread should join");
+        assert_eq!(request_line, "POST /v1/metrics HTTP/1.1");
+    }
+
+    fn spawn_http_sink() -> (String, thread::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("listener should have local addr");
+
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("collector should accept");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("collector stream should set timeout");
+
+            let mut bytes = Vec::new();
+            let mut chunk = [0u8; 2048];
+            let header_end = loop {
+                let read = stream
+                    .read(&mut chunk)
+                    .expect("collector should read request");
+                assert!(read > 0, "collector request should not be empty");
+                bytes.extend_from_slice(&chunk[..read]);
+
+                if let Some(position) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break position + 4;
+                }
+            };
+
+            let headers = String::from_utf8_lossy(&bytes[..header_end]).to_string();
+            let content_length = parse_content_length(headers.as_str());
+            while bytes.len().saturating_sub(header_end) < content_length {
+                let read = stream
+                    .read(&mut chunk)
+                    .expect("collector should read request body");
+                if read == 0 {
+                    break;
+                }
+                bytes.extend_from_slice(&chunk[..read]);
+            }
+
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+                .expect("collector should respond");
+
+            headers
+                .lines()
+                .next()
+                .expect("collector request should have request line")
+                .to_string()
+        });
+
+        (format!("http://{address}/v1/metrics"), handle)
+    }
+
+    fn parse_content_length(headers: &str) -> usize {
+        headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                if name.eq_ignore_ascii_case("content-length") {
+                    value.trim().parse::<usize>().ok()
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_default()
     }
 }
