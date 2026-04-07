@@ -57,7 +57,7 @@ fn format_span_line(span: &SpanRecord) -> String {
 
 fn format_span_line_with_tz(span: &SpanRecord, time_zone: TimeZone) -> String {
     let timestamp = format_timestamp(span.begin_time_unix_ns, time_zone);
-    let level = property(span.properties.as_slice(), "level").unwrap_or("info");
+    let level = format_level(property(span.properties.as_slice(), "level").unwrap_or("info"));
     let fields = format_properties(span.properties.as_slice());
     if fields.is_empty() {
         format!("{timestamp} {level} {}", span.name)
@@ -75,6 +75,11 @@ fn format_timestamp(nanoseconds: u64, time_zone: TimeZone) -> String {
                 .to_string()
         })
         .unwrap_or_else(|_| format!("ts={nanoseconds}"))
+}
+
+fn format_level(level: &str) -> String {
+    let normalized = level.to_ascii_uppercase();
+    format!("{normalized:<5}")
 }
 
 fn format_properties(properties: &[(Cow<'static, str>, Cow<'static, str>)]) -> String {
@@ -145,7 +150,7 @@ mod tests {
         );
         assert_eq!(
             line,
-            "1970-01-01 00:00:00.000 info request.ok url=https://example.com status=200"
+            "1970-01-01 00:00:00.000 INFO  request.ok url=https://example.com status=200"
         );
     }
 
@@ -160,8 +165,7 @@ mod tests {
         );
         assert_eq!(
             line,
-            "1970-01-01 00:00:00.000 warn request.fail error=\"connection reset by peer\""
+            "1970-01-01 00:00:00.000 WARN  request.fail error=\"connection reset by peer\""
         );
     }
-
 }
