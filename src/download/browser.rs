@@ -3,8 +3,10 @@ use crate::error::SpiderError;
 #[cfg(any(feature = "browser", test))]
 use crate::request::Headers;
 use crate::request::browser::{
-    Config as BrowserConfig, Engine as BrowserEngine, FingerprintProfile, RuntimeReuse,
+    Config as BrowserConfig, Engine as BrowserEngine, FingerprintProfile, KeepAlive,
 };
+#[cfg(any(feature = "browser", test))]
+use crate::request::browser::KeepAliveScope;
 use crate::request::{Request, RequestMode};
 use crate::response::Response;
 #[cfg(feature = "browser")]
@@ -103,7 +105,7 @@ fn validate_browser_request_contract(
 ) -> Result<(), SpiderError> {
     resolve_fingerprint_profile(config).map(|_| ())?;
     validate_browser_wait_for_selector(config)?;
-    validate_browser_runtime_reuse(request, config)?;
+    validate_browser_keep_alive(request, config)?;
 
     Ok(())
 }
@@ -120,13 +122,13 @@ fn validate_browser_wait_for_selector(config: &BrowserConfig) -> Result<(), Spid
     Ok(())
 }
 
-fn validate_browser_runtime_reuse(
+fn validate_browser_keep_alive(
     request: &Request,
     config: &BrowserConfig,
 ) -> Result<(), SpiderError> {
-    if config.runtime_reuse != RuntimeReuse::Isolated && request.session.is_none() {
+    if config.keep_alive != KeepAlive::Isolated && request.session.is_none() {
         return Err(SpiderError::download(
-            "browser runtime_reuse=context/page requires request.session",
+            "browser keep_alive=context/page requires request.session",
         ));
     }
 
@@ -305,7 +307,8 @@ fn builtin_browser_fingerprint_family(engine: BrowserEngine) -> BuiltinBrowserFi
 struct BrowserExecutionPlan {
     profile: Option<FingerprintProfile>,
     init_script: Option<String>,
-    runtime_reuse: RuntimeReuse,
+    keep_alive: KeepAlive,
+    keep_alive_scope: KeepAliveScope,
 }
 
 #[cfg(any(feature = "browser", test))]
@@ -318,7 +321,8 @@ impl BrowserExecutionPlan {
         Ok(Self {
             profile,
             init_script,
-            runtime_reuse: config.runtime_reuse,
+            keep_alive: config.keep_alive,
+            keep_alive_scope: config.keep_alive_scope,
         })
     }
 }
@@ -607,7 +611,8 @@ struct BrowserSessionSignature {
     headless: bool,
     viewport: crate::request::browser::Viewport,
     stealth: bool,
-    runtime_reuse: RuntimeReuse,
+    keep_alive: KeepAlive,
+    keep_alive_scope: KeepAliveScope,
     profile: Option<FingerprintProfile>,
     proxy: Option<String>,
 }
@@ -624,7 +629,8 @@ impl BrowserSessionSignature {
             headless: config.headless,
             viewport: config.viewport.clone(),
             stealth: config.stealth,
-            runtime_reuse: execution_plan.runtime_reuse,
+            keep_alive: execution_plan.keep_alive,
+            keep_alive_scope: execution_plan.keep_alive_scope,
             profile: execution_plan.profile.clone(),
             proxy: request.proxy.as_ref().map(|proxy| proxy.url.clone()),
         }
@@ -649,7 +655,7 @@ async fn fetch_with_playwright_inner(
     let _session_execution_guard = acquire_browser_session_execution_guard(request).await;
     let execution_plan = BrowserExecutionPlan::from_config(config)?;
 
-    if request.session.is_some() && execution_plan.runtime_reuse != RuntimeReuse::Isolated {
+    if request.session.is_some() && execution_plan.keep_alive != KeepAlive::Isolated {
         return fetch_with_playwright_live_session(request, config, &execution_plan).await;
     }
 
@@ -706,11 +712,12 @@ async fn fetch_with_playwright_live_session(
         .as_ref()
         .map(|session| session.id.clone())
         .ok_or_else(|| SpiderError::download("browser live session requires request.session"))?;
+    let cache_key = browser_live_session_cache_key(request, execution_plan)?;
     let signature = BrowserSessionSignature::for_request(request, config, execution_plan);
-    let mut session = match take_browser_live_session(&session_id).await {
+    let mut session = match take_browser_live_session(&cache_key).await {
         Some(session) => {
             if session.signature != signature {
-                store_browser_live_session(&session_id, session).await;
+                store_browser_live_session(&cache_key, session).await;
                 return Err(browser_live_session_mismatch_error(&session_id));
             }
             session
@@ -727,7 +734,7 @@ async fn fetch_with_playwright_live_session(
         }
     };
 
-    let keep_page = execution_plan.runtime_reuse == RuntimeReuse::Page;
+    let keep_page = execution_plan.keep_alive == KeepAlive::Page;
     let existing_page = if keep_page { session.page.take() } else { None };
     let outcome = run_browser_request_in_context(
         &session.context,
@@ -742,12 +749,12 @@ async fn fetch_with_playwright_live_session(
     match outcome {
         Ok((result, page)) => {
             session.page = page;
-            store_browser_live_session(&session_id, session).await;
+            store_browser_live_session(&cache_key, session).await;
             Ok(result)
         }
         Err(error) => {
             session.page = None;
-            store_browser_live_session(&session_id, session).await;
+            store_browser_live_session(&cache_key, session).await;
             Err(error)
         }
     }
@@ -756,7 +763,7 @@ async fn fetch_with_playwright_live_session(
 #[cfg(feature = "browser")]
 fn browser_live_session_mismatch_error(session_id: &str) -> SpiderError {
     SpiderError::download(format!(
-        "browser live session `{session_id}` requires stable engine/headless/viewport/stealth/fingerprint_preset/fingerprint_profile/proxy/runtime_reuse across requests"
+        "browser live session `{session_id}` requires stable engine/headless/viewport/stealth/fingerprint_preset/fingerprint_profile/proxy/keep_alive/keep_alive_scope across requests"
     ))
 }
 
@@ -1179,18 +1186,54 @@ fn browser_live_session_cache() -> &'static tokio::sync::Mutex<BTreeMap<String, 
     LIVE_SESSIONS.get_or_init(|| tokio::sync::Mutex::new(BTreeMap::new()))
 }
 
-#[cfg(feature = "browser")]
-async fn take_browser_live_session(session_id: &str) -> Option<BrowserLiveSession> {
-    let cache = browser_live_session_cache();
-    let mut cache = cache.lock().await;
-    cache.remove(session_id)
+#[cfg(any(feature = "browser", test))]
+fn browser_live_session_scope_origin(url: &str) -> Result<String, SpiderError> {
+    let parsed = Url::parse(url).map_err(|error| {
+        SpiderError::download(format!(
+            "invalid browser URL for keep_alive_scope=origin: {error}"
+        ))
+    })?;
+    let origin = parsed.origin().ascii_serialization();
+
+    if origin == "null" {
+        Ok(url.to_string())
+    } else {
+        Ok(origin)
+    }
+}
+
+#[cfg(any(feature = "browser", test))]
+fn browser_live_session_cache_key(
+    request: &Request,
+    execution_plan: &BrowserExecutionPlan,
+) -> Result<String, SpiderError> {
+    let session_id = request
+        .session
+        .as_ref()
+        .map(|session| session.id.as_str())
+        .ok_or_else(|| SpiderError::download("browser live session requires request.session"))?;
+
+    match execution_plan.keep_alive_scope {
+        KeepAliveScope::Session => Ok(session_id.to_string()),
+        KeepAliveScope::Origin => {
+            let origin = browser_live_session_scope_origin(&request.url)?;
+            Ok(format!("{session_id}::{origin}"))
+        }
+    }
 }
 
 #[cfg(feature = "browser")]
-async fn store_browser_live_session(session_id: &str, session: BrowserLiveSession) {
+async fn take_browser_live_session(cache_key: &str) -> Option<BrowserLiveSession> {
     let cache = browser_live_session_cache();
     let mut cache = cache.lock().await;
-    cache.insert(session_id.to_string(), session);
+    cache.remove(cache_key)
+}
+
+#[cfg(feature = "browser")]
+async fn store_browser_live_session(cache_key: &str, session: BrowserLiveSession) {
+    let cache = browser_live_session_cache();
+    let mut cache = cache.lock().await;
+    cache.insert(cache_key.to_string(), session);
 }
 
 #[cfg(any(feature = "browser", test))]
@@ -1297,7 +1340,8 @@ mod tests {
     use super::*;
     use crate::download::traits::Downloader;
     use crate::request::browser::{
-        Config as BrowserConfig, Engine as BrowserEngine, FingerprintProfile, RuntimeReuse,
+        Config as BrowserConfig, Engine as BrowserEngine, FingerprintProfile, KeepAlive,
+        KeepAliveScope,
     };
     use std::sync::Arc;
 
@@ -1415,7 +1459,7 @@ mod tests {
     #[test]
     fn browser_request_contract_rejects_live_reuse_without_session() {
         let request = Request::browser("https://example.com")
-            .with_browser(BrowserConfig::default().with_runtime_reuse(RuntimeReuse::Context));
+            .with_browser(BrowserConfig::default().with_keep_alive(KeepAlive::Context));
 
         let error = validate_browser_request_contract(
             &request,
@@ -1428,7 +1472,7 @@ mod tests {
 
         assert_eq!(
             error,
-            SpiderError::download("browser runtime_reuse=context/page requires request.session")
+            SpiderError::download("browser keep_alive=context/page requires request.session")
         );
     }
 
@@ -1436,7 +1480,7 @@ mod tests {
     fn browser_request_contract_allows_live_reuse_with_session() {
         let request = Request::browser("https://example.com")
             .with_session("shared-browser")
-            .with_browser(BrowserConfig::default().with_runtime_reuse(RuntimeReuse::Page));
+            .with_browser(BrowserConfig::default().with_keep_alive(KeepAlive::Page));
 
         let result = validate_browser_request_contract(
             &request,
@@ -1447,6 +1491,37 @@ mod tests {
         );
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn browser_live_session_cache_key_uses_session_scope_by_default() {
+        let request = Request::browser("https://news.example.com/list").with_session("shared");
+        let execution_plan = BrowserExecutionPlan::from_config(
+            &BrowserConfig::default().with_keep_alive(KeepAlive::Context),
+        )
+        .expect("execution plan should build");
+
+        let key = browser_live_session_cache_key(&request, &execution_plan)
+            .expect("cache key should build");
+
+        assert_eq!(key, "shared");
+    }
+
+    #[test]
+    fn browser_live_session_cache_key_can_scope_by_origin() {
+        let request =
+            Request::browser("https://news.example.com/list?page=1").with_session("shared");
+        let execution_plan = BrowserExecutionPlan::from_config(
+            &BrowserConfig::default()
+                .with_keep_alive(KeepAlive::Context)
+                .with_keep_alive_scope(KeepAliveScope::Origin),
+        )
+        .expect("execution plan should build");
+
+        let key = browser_live_session_cache_key(&request, &execution_plan)
+            .expect("cache key should build");
+
+        assert_eq!(key, "shared::https://news.example.com");
     }
 
     #[test]

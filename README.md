@@ -54,7 +54,7 @@ README 这里只保留总览；模块级细节统一放到 [docs/capabilities.md
 
 - 观测主链路其实已经有了：`stats`、`signals / extensions`、`trace`、`Engine::with_stats_reporter(...)` 和统一 `telemetry` exporter 都已接好；当前真正还缺的是更完整的持久化事件总线聚合层、跨 job 仪表盘/巡检视图，以及更高阶的运维自动化。
 - durable scheduler 的核心语义已经基本收口：`Memory / Sqlite / Redis`、worker ownership、heartbeat、stale reclaim、batch、scope `snapshot / overview`、统一 `scheduler::Control`、`store -> scheduler resolve` 显式提交边界都已经到位；当前主要剩的是更强的分布式协调后端、更完整的后台运维服务层，以及更丰富的 exporter / 自动化接线。
-- browser 的核心抓取能力也已经不是空白：内置 preset、结构化 `fingerprint_profile`、最小 stealth bootstrap、稳定 session 目录与显式 `runtime_reuse` 都已具备；当前剩余主要是更高阶第三方 stealth 套件，以及更细粒度的 session/context/page 复用策略。
+- browser 的核心抓取能力也已经不是空白：内置 preset、结构化 `fingerprint_profile`、最小 stealth bootstrap、稳定 session 目录、显式 `keep_alive` 与 `keep_alive_scope` 都已具备；当前剩余主要是更高阶第三方 stealth 套件，以及更细粒度的 session/context/page 复用策略。
 - validation 规则层和 report API 已经比较完整；当前真正还没完全收口的是“校验失败映射成什么 runtime 行为”这层策略，而不是校验能力本身。
 - plugin 自动装载这条线当前仍只自动接 `middleware`；`store`、`scheduler`、`dedup`、`robots`、`http`、`browser` 这些 kind 还没有完成真正的 engine 自动接线。
 - DSL 继续后置；当前它已经共享底层 `Request / parse / scheduler / validation` 模型，但整体能力面仍然没有完全追平代码爬虫主线。
@@ -620,17 +620,23 @@ Spider / rules
 - request session
 - built-in `fingerprint_preset = desktop_zh_cn | desktop_en_us | desktop_en_gb | desktop_ja_jp | desktop_de_de | desktop_fr_fr`
 - structured `fingerprint_profile`
-- explicit `runtime_reuse = isolated | context | page`
+- explicit `keep_alive = isolated | context | page`
+- optional `keep_alive_scope = session | origin`
 - richer `stealth = true` bootstrap
 - browser response status / headers
 - 页面渲染后的 HTML 抓取
 
 其中 browser `session` 当前会把同一个 session id 映射到稳定的 Playwright user data dir，
-用于复用 cookies 和 local storage 这类浏览器态数据；live runtime 是否进一步复用，则由 `runtime_reuse` 显式控制：
+用于复用 cookies 和 local storage 这类浏览器态数据；live runtime 是否进一步保留，则由 `keep_alive` 显式控制：
 
 - `isolated`：只复用稳定 user data dir，每次请求仍新建并关闭 context/page
 - `context`：同一 session 复用 live context，但每次请求新建 page
 - `page`：同一 session 复用 live context 和同一张 live page
+
+如果你希望把 live runtime 再按更小范围隔离，还可以显式设置：
+
+- `keep_alive_scope = session`：同一个 session 共用一份 live runtime
+- `keep_alive_scope = origin`：同一个 session 下，按 URL origin 分开维护 live runtime
 
 user data dir、临时 profile 目录和会话锁这条实现路径也已经收口到更适合 async runtime 的处理方式；相同 session id 的实际浏览器执行仍会按 session 串行化，避免共享 profile 目录或 live runtime 时出现竞态。
 
@@ -687,7 +693,8 @@ let request = Request::browser("https://example.com/app")
                     .with_accept_language("ja-JP,ja;q=0.9")
                     .with_languages(["ja-JP", "ja", "en-US", "en"]),
             )
-            .with_runtime_reuse(browser::RuntimeReuse::Context)
+            .with_keep_alive(browser::KeepAlive::Context)
+            .with_keep_alive_scope(browser::KeepAliveScope::Origin)
             .with_stealth(true),
     );
 ```

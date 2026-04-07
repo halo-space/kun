@@ -179,14 +179,14 @@ impl FingerprintProfile {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RuntimeReuse {
+pub enum KeepAlive {
     #[default]
     Isolated,
     Context,
     Page,
 }
 
-impl RuntimeReuse {
+impl KeepAlive {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Isolated => "isolated",
@@ -196,13 +196,13 @@ impl RuntimeReuse {
     }
 }
 
-impl Display for RuntimeReuse {
+impl Display for KeepAlive {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
 }
 
-impl TryFrom<&str> for RuntimeReuse {
+impl TryFrom<&str> for KeepAlive {
     type Error = String;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
@@ -210,7 +210,42 @@ impl TryFrom<&str> for RuntimeReuse {
             "isolated" => Ok(Self::Isolated),
             "context" => Ok(Self::Context),
             "page" => Ok(Self::Page),
-            other => Err(format!("unsupported browser runtime reuse: {other}")),
+            other => Err(format!("unsupported browser keep_alive: {other}")),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeepAliveScope {
+    #[default]
+    Session,
+    Origin,
+}
+
+impl KeepAliveScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Session => "session",
+            Self::Origin => "origin",
+        }
+    }
+}
+
+impl Display for KeepAliveScope {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl TryFrom<&str> for KeepAliveScope {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "session" => Ok(Self::Session),
+            "origin" => Ok(Self::Origin),
+            other => Err(format!("unsupported browser keep_alive_scope: {other}")),
         }
     }
 }
@@ -227,7 +262,9 @@ pub struct Config {
     pub wait_for_selector: Option<String>,
     pub viewport: Viewport,
     #[serde(default)]
-    pub runtime_reuse: RuntimeReuse,
+    pub keep_alive: KeepAlive,
+    #[serde(default)]
+    pub keep_alive_scope: KeepAliveScope,
 }
 
 impl Default for Config {
@@ -241,7 +278,8 @@ impl Default for Config {
             fingerprint_profile: None,
             wait_for_selector: None,
             viewport: Viewport::default(),
-            runtime_reuse: RuntimeReuse::default(),
+            keep_alive: KeepAlive::default(),
+            keep_alive_scope: KeepAliveScope::default(),
         }
     }
 }
@@ -289,8 +327,13 @@ impl Config {
         self
     }
 
-    pub fn with_runtime_reuse(mut self, runtime_reuse: RuntimeReuse) -> Self {
-        self.runtime_reuse = runtime_reuse;
+    pub fn with_keep_alive(mut self, keep_alive: KeepAlive) -> Self {
+        self.keep_alive = keep_alive;
+        self
+    }
+
+    pub fn with_keep_alive_scope(mut self, keep_alive_scope: KeepAliveScope) -> Self {
+        self.keep_alive_scope = keep_alive_scope;
         self
     }
 }
@@ -310,7 +353,8 @@ mod tests {
         assert_eq!(config.fingerprint_preset, None);
         assert_eq!(config.fingerprint_profile, None);
         assert_eq!(config.wait_for_selector, None);
-        assert_eq!(config.runtime_reuse, RuntimeReuse::Isolated);
+        assert_eq!(config.keep_alive, KeepAlive::Isolated);
+        assert_eq!(config.keep_alive_scope, KeepAliveScope::Session);
     }
 
     #[test]
@@ -320,14 +364,16 @@ mod tests {
             .with_stealth(true)
             .with_fingerprint_preset("desktop_zh_cn")
             .with_wait_for_selector("#app")
-            .with_runtime_reuse(RuntimeReuse::Context);
+            .with_keep_alive(KeepAlive::Context)
+            .with_keep_alive_scope(KeepAliveScope::Origin);
 
         assert_eq!(config.engine, Engine::Firefox);
         assert!(config.stealth);
         assert_eq!(config.fingerprint_preset.as_deref(), Some("desktop_zh_cn"));
         assert_eq!(config.fingerprint_profile, None);
         assert_eq!(config.wait_for_selector.as_deref(), Some("#app"));
-        assert_eq!(config.runtime_reuse, RuntimeReuse::Context);
+        assert_eq!(config.keep_alive, KeepAlive::Context);
+        assert_eq!(config.keep_alive_scope, KeepAliveScope::Origin);
     }
 
     #[test]
@@ -346,13 +392,29 @@ mod tests {
     }
 
     #[test]
-    fn runtime_reuse_try_from_string_supports_explicit_policies() {
-        assert_eq!(RuntimeReuse::try_from("isolated"), Ok(RuntimeReuse::Isolated));
-        assert_eq!(RuntimeReuse::try_from("context"), Ok(RuntimeReuse::Context));
-        assert_eq!(RuntimeReuse::try_from("page"), Ok(RuntimeReuse::Page));
+    fn keep_alive_try_from_string_supports_explicit_policies() {
+        assert_eq!(KeepAlive::try_from("isolated"), Ok(KeepAlive::Isolated));
+        assert_eq!(KeepAlive::try_from("context"), Ok(KeepAlive::Context));
+        assert_eq!(KeepAlive::try_from("page"), Ok(KeepAlive::Page));
         assert_eq!(
-            RuntimeReuse::try_from("other"),
-            Err("unsupported browser runtime reuse: other".to_string())
+            KeepAlive::try_from("other"),
+            Err("unsupported browser keep_alive: other".to_string())
+        );
+    }
+
+    #[test]
+    fn keep_alive_scope_try_from_string_supports_explicit_policies() {
+        assert_eq!(
+            KeepAliveScope::try_from("session"),
+            Ok(KeepAliveScope::Session)
+        );
+        assert_eq!(
+            KeepAliveScope::try_from("origin"),
+            Ok(KeepAliveScope::Origin)
+        );
+        assert_eq!(
+            KeepAliveScope::try_from("other"),
+            Err("unsupported browser keep_alive_scope: other".to_string())
         );
     }
 }

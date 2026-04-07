@@ -3,8 +3,8 @@
 //! Shows:
 //! - built-in browser request path
 //! - structured fingerprint profile
-//! - explicit live runtime reuse policy
-//! - stable session id for live context/page reuse boundaries
+//! - explicit live runtime keep-alive policy
+//! - stable session id plus optional origin-scoped live reuse boundaries
 //!
 //! Run:
 //!   cargo run --example browser_advanced
@@ -31,7 +31,8 @@ fn main() {
                         .with_device_memory(8)
                         .with_max_touch_points(0),
                 )
-                .with_runtime_reuse(browser::RuntimeReuse::Context)
+                .with_keep_alive(browser::KeepAlive::Context)
+                .with_keep_alive_scope(browser::KeepAliveScope::Origin)
                 .with_wait_for_selector("#app"),
         );
 

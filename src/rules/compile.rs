@@ -1,7 +1,8 @@
 use crate::error::SpiderError;
 use crate::middleware::{Config as MiddlewareConfig, Map as MiddlewareMap, Stage};
 use crate::request::browser::{
-    Config as BrowserConfig, Driver, Engine, FingerprintProfile, RuntimeReuse, Viewport,
+    Config as BrowserConfig, Driver, Engine, FingerprintProfile, KeepAlive, KeepAliveScope,
+    Viewport,
 };
 use crate::request::http::Config as HttpConfig;
 use crate::request::{Headers, ProxyConfig, RequestMode, SessionConfig};
@@ -559,9 +560,14 @@ fn parse_browser_config(
     if let Some(wait_for_selector) = value.get("wait_for_selector").and_then(Value::as_str) {
         config = config.with_wait_for_selector(wait_for_selector.to_string());
     }
-    if let Some(runtime_reuse) = value.get("runtime_reuse").and_then(Value::as_str) {
-        config = config
-            .with_runtime_reuse(RuntimeReuse::try_from(runtime_reuse).map_err(SpiderError::rules)?);
+    if let Some(keep_alive) = value.get("keep_alive").and_then(Value::as_str) {
+        config =
+            config.with_keep_alive(KeepAlive::try_from(keep_alive).map_err(SpiderError::rules)?);
+    }
+    if let Some(keep_alive_scope) = value.get("keep_alive_scope").and_then(Value::as_str) {
+        config = config.with_keep_alive_scope(
+            KeepAliveScope::try_from(keep_alive_scope).map_err(SpiderError::rules)?,
+        );
     }
     if let Some(viewport) = value.get("viewport") {
         let viewport = expect_object(viewport, "fetch.browser.viewport")?;
