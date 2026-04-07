@@ -51,6 +51,32 @@ pub enum Event {
     SchedulerLeaseLost,
 }
 
+impl Event {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Request => "request",
+            Self::Response => "response",
+            Self::Error => "error",
+            Self::Retry => "retry",
+            Self::Item => "item",
+            Self::PipelineDrop => "pipeline_drop",
+            Self::DedupReject => "dedup_reject",
+            Self::RobotsDisallow => "robots_disallow",
+            Self::RobotsDelay => "robots_delay",
+            Self::HttpCacheHit => "http_cache_hit",
+            Self::HttpCacheRevalidate => "http_cache_revalidate",
+            Self::HttpCacheStore => "http_cache_store",
+            Self::HttpCacheMiss => "http_cache_miss",
+            Self::StoreError => "store_error",
+            Self::SchedulerClaim => "scheduler_claim",
+            Self::SchedulerComplete => "scheduler_complete",
+            Self::SchedulerRequeue => "scheduler_requeue",
+            Self::SchedulerHeartbeat => "scheduler_heartbeat",
+            Self::SchedulerLeaseLost => "scheduler_lease_lost",
+        }
+    }
+}
+
 /// Lightweight hook for custom stats reporters or exporters.
 ///
 /// `engine.stats()` remains the primary read API. Reporters are a minimal

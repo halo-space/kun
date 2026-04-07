@@ -528,13 +528,14 @@ let engine = Engine::new().with_dedup(MethodUrlDedup {
 - `http_cache_store_count` 表示引擎把可缓存响应写入 http cache backend 的次数
 - `http_cache_miss_count` 表示可缓存请求在进入下载前没有命中可复用缓存条目的次数
 - `store_error_count` 表示最终写入 store 失败的次数
-- 如果需要流式观测，也可以通过 `Engine::with_stats_reporter(...)` 注册最小 reporter 钩子
+- 如果需要流式观测，也可以通过 `Engine::with_stats_reporter(...)` 注册最小 reporter 钩子；如果想把 engine stats 和 scheduler runtime 一起导出，优先用 `Engine::with_telemetry(...)`
 
 当前边界也需要明确：
 
 - 这还是最小内存内计数，不是完整 metrics backend
-- 还没有内置 Prometheus、OpenTelemetry 或其它 exporter
-- `Engine::stats()` 仍然是主读取 API；`with_stats_reporter(...)` 只是为后续 exporter 预留的最小接线点
+- 现在已经有统一 `telemetry` exporter 边界，以及内置 `telemetry::Collector`、`telemetry::File`、`telemetry::Prometheus`、`telemetry::Fanout`
+- 当前已经有内置 Prometheus text exporter；还没有内置 OpenTelemetry 或其它远端 exporter
+- `Engine::stats()` 仍然是主读取 API；`with_stats_reporter(...)` 和 `with_telemetry(...)` 是流式导出接线点
 - 如果需要 durable scheduler 的运行时观测，优先读 `scheduler.snapshot()`、`scheduler.snapshots_with_prefix(...)` 或 `scheduler.overview_with_prefix(...)`；如果需要单个 engine 生命周期累计计数，再读 `Engine::stats()`
 
 ## Signals / Extensions

@@ -367,6 +367,50 @@ where
         self
     }
 
+    /// Attach one unified telemetry exporter to both engine stats updates and
+    /// scheduler runtime events.
+    ///
+    /// This automatically wraps the current scheduler in
+    /// `scheduler::Observed`, so one exporter can observe:
+    ///
+    /// - `Engine::stats()` counter updates
+    /// - scheduler claim / complete / requeue / heartbeat / reclaim events
+    ///
+    /// ```ignore
+    /// let telemetry = halo_spider::telemetry::Collector::default();
+    /// let engine = halo_spider::engine::Engine::new().with_telemetry(telemetry.clone());
+    /// ```
+    pub fn with_telemetry<T>(
+        self,
+        exporter: T,
+    ) -> Engine<crate::scheduler::Observed<S>, H, B, D, P, St>
+    where
+        T: crate::telemetry::Exporter + 'static,
+    {
+        let exporter = Arc::new(exporter);
+        self.stats.add_reporter(exporter.clone());
+
+        let scheduler = crate::scheduler::Observed::new(self.scheduler);
+        scheduler.add_reporter(exporter.clone());
+
+        Engine {
+            scheduler,
+            http: self.http,
+            browser: self.browser,
+            dedup: self.dedup,
+            pipeline: self.pipeline,
+            store: self.store,
+            robots: self.robots,
+            stats: self.stats,
+            signals: self.signals,
+            settings: self.settings,
+            middleware: self.middleware,
+            plugins: self.plugins,
+            prepared: self.prepared,
+            shutdown: self.shutdown,
+        }
+    }
+
     /// Register an async signal listener for engine lifecycle and runtime
     /// events.
     pub fn with_signal_listener(self, listener: impl crate::signals::Listener + 'static) -> Self {
@@ -2413,6 +2457,41 @@ mod tests {
                     },
                 ),
             ]
+        );
+    }
+
+    #[test]
+    fn engine_with_telemetry_collects_stats_and_scheduler_runtime() {
+        let scheduler = Memory::default();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/item")))).unwrap();
+
+        let telemetry = crate::telemetry::Collector::default();
+        let mut engine = Engine::from_parts(scheduler, StubHttp, StubBrowser)
+            .with_store(MemoryStore::default())
+            .with_telemetry(telemetry.clone());
+        let mut step_chains = BTreeMap::new();
+
+        block_on(engine.execute_spider_once(&ItemSpider, None, &mut step_chains)).unwrap();
+
+        let snapshot = telemetry.snapshot();
+        assert_eq!(
+            snapshot.stats,
+            StatsSnapshot {
+                request_count: 1,
+                response_count: 1,
+                item_count: 1,
+                scheduler_claim_count: 1,
+                scheduler_complete_count: 1,
+                ..StatsSnapshot::default()
+            }
+        );
+        assert_eq!(snapshot.scheduler.totals.claimed_total, 1);
+        assert_eq!(snapshot.scheduler.totals.completed_total, 1);
+        assert!(
+            snapshot
+                .recent_events
+                .iter()
+                .any(|event| matches!(event, crate::telemetry::Event::Scheduler(_)))
         );
     }
 

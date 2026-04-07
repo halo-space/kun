@@ -15,6 +15,21 @@ pub enum RuntimeEventKind {
     Closed,
 }
 
+impl RuntimeEventKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Claimed => "claimed",
+            Self::Completed => "completed",
+            Self::Requeued => "requeued",
+            Self::Heartbeat => "heartbeat",
+            Self::LeaseLost => "lease_lost",
+            Self::Reclaimed => "reclaimed",
+            Self::Released => "released",
+            Self::Closed => "closed",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeEvent {
     pub scope: Option<String>,
@@ -224,6 +239,10 @@ impl<S> Observed<S> {
     pub fn with_reporter(self, reporter: impl RuntimeReporter + 'static) -> Self {
         self.add_reporter(Arc::new(reporter));
         self
+    }
+
+    pub fn with_exporter(self, exporter: impl crate::telemetry::Exporter + 'static) -> Self {
+        self.with_reporter(exporter)
     }
 
     pub fn add_reporter(&self, reporter: Arc<dyn RuntimeReporter>) {

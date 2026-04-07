@@ -21,6 +21,7 @@ pub mod signals;
 pub mod spider;
 pub mod stats;
 pub mod store;
+pub mod telemetry;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod trace;

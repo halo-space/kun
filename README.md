@@ -42,6 +42,7 @@ README 这里只保留总览；模块级细节统一放到 [docs/capabilities.md
 - `Engine::default()` 等价于 `Engine::new()`
 - `Engine::stats()` 已提供累计运行时计数快照：除了 `request_count`、`response_count`、`error_count`、`retry_count`、`item_count`、`pipeline_drop_count`，现在也包含 `dedup_reject_count`、`robots_disallow_count`、`robots_delay_count`、`http_cache_hit_count`、`http_cache_revalidate_count`、`http_cache_store_count`、`http_cache_miss_count`、`store_error_count`，以及 `scheduler_claim_count / scheduler_complete_count / scheduler_requeue_count / scheduler_heartbeat_count / scheduler_lease_lost_count`
 - 已提供最小 `signals / extensions`：可以通过 `Engine::with_signal_listener(...)` 监听 `spider_opened`、`spider_closed`、`request_scheduled`、`response_received`、`item_scraped`、`spider_error`，以及统一的 `scheduler_event` runtime 事件；如果只关心部分事件，也可以用 `Engine::with_signal_listener_for([...], ...)` 做 signal kind 过滤订阅；扩展侧同理可以用 `Engine::with_extension(...)` / `Engine::with_extension_for([...], ...)`，内置 `extensions::Summary`
+- 已提供统一 `telemetry` 导出边界：`Engine::with_telemetry(...)` 会同时接入 engine stats 与 scheduler runtime 事件；内置 `telemetry::Collector`、`telemetry::File`、`telemetry::Prometheus` 和 `telemetry::Fanout`
 - 已提供更完整一版 `robots.txt` 策略：`Settings::with_robots_obey(true)` 开启后，会按 origin 缓存 `robots.txt`，并在下载前处理 `Allow` / `Disallow`、`Crawl-delay`、`Request-rate`、更完整的 `User-agent group` 匹配，以及 `* / $` wildcard 规则；其中 `Request-rate` 当前按 `window / requests` 的均匀间隔最小 delay 解释，如果同时声明 `Crawl-delay` 与 `Request-rate`，则取更严格的 delay；`robots::Robot::sitemaps(...)` 也可读取声明的 sitemap URL；默认 cache backend 是 `robots::cache::Memory`，也可以通过 `robots::Memory::with_cache(...)` 替换为 `robots::cache::File` 或自定义实现；`robots::cache::File::default()` 的路径是 `output/robots-cache.json`；`robots::Memory` 当前默认按 `24h` 的 `cache_ttl` 复用 policy，过期后会尝试刷新，刷新失败时优先回退旧缓存；如果当前 origin 没有可用缓存且 `robots.txt` 临时不可用，默认按 `robots::UnavailablePolicy::AllowAll` 继续 fail-open，并对这类临时不可用结果按默认 `60s` 的 retry delay 做短暂退避，避免每个请求都重复抓取 `robots.txt`；调用方也可以显式切到 `DisallowAll`、覆盖 retry delay，或关闭这层退避；现在也可以通过 `robots::Memory::with_site_policy(robots::Site::..., ...)` 给指定站点 matcher 叠加站点策略，内置支持 `origin / host / pattern`，其中 `access` 与 `unavailable_policy` 由更具体 matcher 决定，同一 specificity 下后注册规则优先，`delay` 取更严格值，`sitemap` 做去重合并；如果再打开 `Settings::with_robots_sitemap_seeds(true)`，引擎启动时会把 robots 里声明的 sitemap / sitemapindex，包括常见的 `.xml.gz` 压缩 sitemap，一并解析成新的种子请求，并继承 start request 的共享请求能力；默认 `priority / depth` 仍是 `0 / 0`，但现在也可以通过 `with_robots_sitemap_seed_priority(...)` 和 `with_robots_sitemap_seed_depth(...)` 显式覆盖
 - `robots` 这块如果想直接看 `Site::pattern / host / origin` 的接法，可以运行 `examples/robots_site_policy.rs`
 - 已提供最小 `AutoThrottle`：`Settings::with_auto_throttle(true)` 开启后，会按 origin 基于延迟、错误和目标并发动态调整下一次下载间隔；此时 `download_delay` 表示初始/最小 delay，`with_auto_throttle_max_delay(...)` 表示最大 delay
@@ -51,7 +52,7 @@ README 这里只保留总览；模块级细节统一放到 [docs/capabilities.md
 
 当前仍待补齐的底层能力：
 
-- 观测能力还不完整：虽然已经有细粒度 `stats`、`signals / extensions` 和 `Engine::with_stats_reporter(...)`，但还没有内置 Prometheus / OpenTelemetry exporter、trace 链路、持久化事件总线或跨 job 运维视角。
+- 观测能力还不完整：虽然已经有细粒度 `stats`、`signals / extensions`、`Engine::with_stats_reporter(...)` 和统一 `telemetry` exporter 边界，也内置了 `telemetry::File` 与 `telemetry::Prometheus`，但还没有内置 OpenTelemetry exporter、持久化事件总线聚合层，以及更完整的跨 job 运维控制面。
 - durable scheduler 已经覆盖 worker ownership、heartbeat、stale reclaim、scope snapshot、跨 scope `overview()` 与 worker 运行态运维视图；当前剩余缺口主要是更强的分布式协调、事务边界，以及更完整的 exporter / 事件总线 / 自动化运维能力。
 - `store` 边界已经建立，但更丰富的文件格式、更高阶消息语义和更多内置外部系统适配还没有继续铺开。
 - browser 已经支持内置 profile、结构化自定义 profile 与显式 `session_reuse`；当前剩余缺口主要是更高阶第三方 stealth 套件与跨 engine 更完整的品牌级指纹伪装。
@@ -153,8 +154,11 @@ let settings = Settings::default()
 - 如果你只关心部分 signal kind，可以用 `.with_signal_listener_for([...], ...)`
 - 如果你只关心 scheduler runtime 流转，可以直接过滤 `signals::Kind::SchedulerEvent`；事件体里会带 `Claimed / Completed / Requeued / Heartbeat / LeaseLost`、`task_id / worker_id / lease_id / url`
 - 如果你想挂语义更清楚的运行时扩展，可以显式用 `.with_extension(...)` 或 `.with_extension_for([...], ...)`；它底层复用同一条 signal bus
+- 如果你想把 engine stats 和 scheduler runtime 统一导出，优先用 `Engine::with_telemetry(...)`；单个 exporter 就能同时收到两条流
+- 如果你想直接给 Prometheus scrape，直接挂 `telemetry::Prometheus::default()`，运行后读 `prometheus.render()`
 - 如果你想观测 scheduler 后端自己触发的 runtime 事件，比如 `reclaim / release_inflight / close`，可以用 `scheduler::Observed::new(...)` 包一层，再挂 `scheduler::RuntimeReporter`；这层事件统一收口为 `Claimed / Completed / Requeued / Heartbeat / LeaseLost / Reclaimed / Released / Closed`
 - 如果你想先拿内置计数版 scheduler metrics，不急着上 Prometheus，也可以直接用 `scheduler::MetricsReporter::new()`；它会按 `totals / scopes / workers` 聚合 `claimed / completed / requeued / heartbeat / lease_lost / reclaimed / released / closed`
+- 如果你想同时挂多个 telemetry sink，比如一边留内存快照、一边落文件，用 `telemetry::Fanout::new().with_exporter(...).with_exporter(...)`
 - `checkpoint` 本身没有单独的 runtime 默认值；只有你显式启用 checkpoint 时，默认内置后端才是 `scheduler::checkpoint::File::default()`，路径是 `output/scheduler-checkpoint.json`
 - 如果你想要“内存调度 + 文件 checkpoint”的便捷组合，可以直接用 `scheduler::checkpoint::Memory::default()`
 - 如果你要从默认 checkpoint 文件恢复到 memory scheduler，使用 `scheduler::checkpoint::Memory::load_default().await?`
@@ -282,7 +286,25 @@ let scheduler = scheduler::Observed::new(
 .with_reporter(metrics.clone());
 let snapshot = metrics.snapshot();
 
-// 18. 如果要自定义全部底层组件，用 from_parts(...)
+// 18. 如果想统一导出 engine stats + scheduler runtime，可以直接挂 telemetry
+let telemetry = halo_spider::telemetry::Collector::default();
+let engine = Engine::new().with_telemetry(telemetry.clone());
+
+// 19. 如果想同时挂多个 telemetry sink，可以用 Fanout
+let telemetry = halo_spider::telemetry::Fanout::new()
+    .with_exporter(halo_spider::telemetry::Collector::default())
+    .with_exporter(halo_spider::telemetry::Prometheus::default())
+    .with_exporter(halo_spider::telemetry::File::new(
+        "output/runtime.jsonl",
+    )?);
+let engine = Engine::new().with_telemetry(telemetry);
+
+// 20. 如果想直接拿 Prometheus text，也可以单独挂 Prometheus exporter
+let prometheus = halo_spider::telemetry::Prometheus::default();
+let engine = Engine::new().with_telemetry(prometheus.clone());
+let metrics_text = prometheus.render();
+
+// 21. 如果要自定义全部底层组件，用 from_parts(...)
 let engine = Engine::from_parts(
     scheduler::Redis::new("redis://127.0.0.1:6379", "kun:scheduler"),
     Http::default(),
@@ -307,6 +329,7 @@ HALO_SPIDER_KAFKA_BROKERS=127.0.0.1:9092 cargo run --example kafka
 cargo run --example custom_dedup
 cargo run --example custom_middleware
 cargo run --example custom_scheduler
+cargo run --example telemetry
 cargo run --example plugins_demo
 
 # AI 选择器示例（需要 OPENAI_API_KEY 环境变量）
