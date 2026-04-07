@@ -2,7 +2,7 @@
 //!
 //! Shows:
 //! - built-in browser request path
-//! - structured custom fingerprint profile
+//! - structured fingerprint profile
 //! - explicit session reuse policy
 //! - stable session id for live context/page reuse boundaries
 //!
@@ -18,7 +18,7 @@ fn main() {
             browser::Config::default()
                 .with_engine(browser::Engine::Chromium)
                 .with_stealth(true)
-                .with_custom_fingerprint_profile(
+                .with_fingerprint_profile(
                     browser::FingerprintProfile::new()
                         .with_user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36")
                         .with_locale("en-US")

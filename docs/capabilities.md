@@ -55,14 +55,14 @@ README 负责总览，这里负责把每个模块现在到底能做什么、还�
 - 用于打开页面、执行浏览器导航、拿渲染后的 HTML
 - 已支持最小的 `method`、`body`、`headers`、`timeout`、`proxy`、request cookies、session
 - 已支持 `wait_for_selector` 这类页面就绪等待配置，用于在取 HTML 前等待目标内容出现
-- 已支持内置 `fingerprint_profile = desktop_zh_cn | desktop_en_us | desktop_en_gb | desktop_ja_jp | desktop_de_de | desktop_fr_fr`
-- 已支持结构化 `custom_fingerprint_profile`
+- 已支持内置 `fingerprint_preset = desktop_zh_cn | desktop_en_us | desktop_en_gb | desktop_ja_jp | desktop_de_de | desktop_fr_fr`
+- 已支持结构化 `fingerprint_profile`
 - 已支持显式 `session_reuse = storage | context | page`
 - 已支持更完整但仍然克制的 `stealth = true` bootstrap，覆盖 `navigator.webdriver`、`navigator.language(s)`、`navigator.platform`、`navigator.vendor`、`hardwareConcurrency`、`deviceMemory`、`maxTouchPoints`、`plugins`、`mimeTypes`、`pdfViewerEnabled`、screen depth、notifications permissions 查询补丁，以及 Chromium 路线的最小 `window.chrome` / `navigator.userAgentData`
 - 同一个 browser session 会复用稳定的 user data dir，并做最小串行化；如果显式启用 `session_reuse`，还可以进一步复用 live context 或 live page
 - user data dir、临时 profile 目录与会话锁这条路径已经改成 async runtime 更友好的实现，不再依赖明显的同步文件 I/O 热路径
 
-内置 `fingerprint_profile` 的稳定映射：
+内置 `fingerprint_preset` 的稳定映射：
 
 | profile | user_agent family | locale | timezone | languages | platform |
 | --- | --- | --- | --- | --- | --- |
@@ -75,7 +75,7 @@ README 负责总览，这里负责把每个模块现在到底能做什么、还�
 
 当前仍未收敛、并会继续显式报错或保留空白的部分：
 
-- 自定义 `fingerprint_profile` 名称注册机制
+- 自定义 `fingerprint_preset` 名称注册机制
 - 更完整的第三方 stealth 套件或更高阶浏览器指纹伪装能力
 - `ip_address`、`certificate` 这类 Playwright 当前接口拿不到的响应侧字段
 

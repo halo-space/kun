@@ -618,8 +618,8 @@ Spider / rules
 - request headers
 - request proxy
 - request session
-- built-in `fingerprint_profile = desktop_zh_cn | desktop_en_us | desktop_en_gb | desktop_ja_jp | desktop_de_de | desktop_fr_fr`
-- structured `custom_fingerprint_profile`
+- built-in `fingerprint_preset = desktop_zh_cn | desktop_en_us | desktop_en_gb | desktop_ja_jp | desktop_de_de | desktop_fr_fr`
+- structured `fingerprint_profile`
 - explicit `session_reuse = storage | context | page`
 - richer `stealth = true` bootstrap
 - browser response status / headers
@@ -642,15 +642,15 @@ browser 执行路径，`ip_address` 与 `certificate` 由于 Playwright 当前�
 
 当前已经支持的 browser 指纹能力边界：
 
-- `fingerprint_profile` 当前只支持内置 profile：`desktop_zh_cn`、`desktop_en_us`、`desktop_en_gb`、`desktop_ja_jp`、`desktop_de_de`、`desktop_fr_fr`
-- `custom_fingerprint_profile` 可以直接传结构化 profile，不必先注册新的内置 preset 名称
+- `fingerprint_preset` 当前只支持内置 preset：`desktop_zh_cn`、`desktop_en_us`、`desktop_en_gb`、`desktop_ja_jp`、`desktop_de_de`、`desktop_fr_fr`
+- `fingerprint_profile` 可以直接传结构化 profile，不必先注册新的内置 preset 名称
 - 这些 profile 会稳定映射 `user_agent`、`locale`、`timezone`、`accept-language`、`languages`、`platform`
 - `stealth = true` 当前会注入一版更完整但仍然克制的 bootstrap，覆盖 `navigator.webdriver`、`navigator.language(s)`、`navigator.platform`、`navigator.vendor`、`hardwareConcurrency`、`deviceMemory`、`maxTouchPoints`、`plugins`、`mimeTypes`、`pdfViewerEnabled`、screen depth、notifications permissions 查询补丁，以及 Chromium 路线上的最小 `window.chrome` / `navigator.userAgentData`
 - 这组 profile 和 stealth 仍然只是稳定内置 preset，不追求跨所有 Playwright engine 的“完全品牌一致”高阶伪装能力
 
 当前仍未实现、并且会继续显式报错的能力：
 
-- 自定义 `fingerprint_profile` 名称注册机制
+- 自定义 `fingerprint_preset` 名称注册机制
 - 更完整的第三方 stealth 套件或更高阶浏览器指纹伪装能力
 
 如果当前构建没有启用 `browser` feature，browser request 会直接返回显式错误，不会再返回 stub response。
@@ -680,7 +680,7 @@ let request = Request::browser("https://example.com/app")
         browser::Config::default()
             .with_engine(browser::Engine::Chromium)
             .with_wait_for_selector("#app")
-            .with_custom_fingerprint_profile(
+            .with_fingerprint_profile(
                 browser::FingerprintProfile::new()
                     .with_locale("ja-JP")
                     .with_timezone("Asia/Tokyo")

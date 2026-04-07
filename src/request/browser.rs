@@ -221,9 +221,9 @@ pub struct Config {
     pub engine: Engine,
     pub headless: bool,
     pub stealth: bool,
-    pub fingerprint_profile: Option<String>,
+    pub fingerprint_preset: Option<String>,
     #[serde(default)]
-    pub custom_fingerprint_profile: Option<FingerprintProfile>,
+    pub fingerprint_profile: Option<FingerprintProfile>,
     pub wait_for_selector: Option<String>,
     pub viewport: Viewport,
     #[serde(default)]
@@ -237,8 +237,8 @@ impl Default for Config {
             engine: Engine::default(),
             headless: true,
             stealth: false,
+            fingerprint_preset: None,
             fingerprint_profile: None,
-            custom_fingerprint_profile: None,
             wait_for_selector: None,
             viewport: Viewport::default(),
             session_reuse: SessionReuse::default(),
@@ -267,15 +267,15 @@ impl Config {
         self
     }
 
-    pub fn with_fingerprint_profile(mut self, profile: impl Into<String>) -> Self {
-        self.fingerprint_profile = Some(profile.into());
-        self.custom_fingerprint_profile = None;
+    pub fn with_fingerprint_preset(mut self, preset: impl Into<String>) -> Self {
+        self.fingerprint_preset = Some(preset.into());
+        self.fingerprint_profile = None;
         self
     }
 
-    pub fn with_custom_fingerprint_profile(mut self, profile: FingerprintProfile) -> Self {
-        self.custom_fingerprint_profile = Some(profile);
-        self.fingerprint_profile = None;
+    pub fn with_fingerprint_profile(mut self, profile: FingerprintProfile) -> Self {
+        self.fingerprint_profile = Some(profile);
+        self.fingerprint_preset = None;
         self
     }
 
@@ -307,8 +307,8 @@ mod tests {
         assert_eq!(config.engine, Engine::Chromium);
         assert!(config.headless);
         assert!(!config.stealth);
+        assert_eq!(config.fingerprint_preset, None);
         assert_eq!(config.fingerprint_profile, None);
-        assert_eq!(config.custom_fingerprint_profile, None);
         assert_eq!(config.wait_for_selector, None);
         assert_eq!(config.session_reuse, SessionReuse::Storage);
     }
@@ -318,31 +318,31 @@ mod tests {
         let config = Config::default()
             .with_engine(Engine::Firefox)
             .with_stealth(true)
-            .with_fingerprint_profile("desktop_zh_cn")
+            .with_fingerprint_preset("desktop_zh_cn")
             .with_wait_for_selector("#app")
             .with_session_reuse(SessionReuse::Context);
 
         assert_eq!(config.engine, Engine::Firefox);
         assert!(config.stealth);
-        assert_eq!(config.fingerprint_profile.as_deref(), Some("desktop_zh_cn"));
-        assert_eq!(config.custom_fingerprint_profile, None);
+        assert_eq!(config.fingerprint_preset.as_deref(), Some("desktop_zh_cn"));
+        assert_eq!(config.fingerprint_profile, None);
         assert_eq!(config.wait_for_selector.as_deref(), Some("#app"));
         assert_eq!(config.session_reuse, SessionReuse::Context);
     }
 
     #[test]
-    fn config_can_switch_to_custom_fingerprint_profile() {
-        let custom = FingerprintProfile::new()
+    fn config_can_switch_to_structured_fingerprint_profile() {
+        let profile = FingerprintProfile::new()
             .with_locale("ja-JP")
             .with_timezone("Asia/Tokyo")
             .with_accept_language("ja-JP,ja;q=0.9")
             .with_languages(["ja-JP", "ja"]);
         let config = Config::default()
-            .with_fingerprint_profile("desktop_en_us")
-            .with_custom_fingerprint_profile(custom.clone());
+            .with_fingerprint_preset("desktop_en_us")
+            .with_fingerprint_profile(profile.clone());
 
-        assert_eq!(config.fingerprint_profile, None);
-        assert_eq!(config.custom_fingerprint_profile, Some(custom));
+        assert_eq!(config.fingerprint_preset, None);
+        assert_eq!(config.fingerprint_profile, Some(profile));
     }
 
     #[test]

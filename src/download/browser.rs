@@ -131,7 +131,7 @@ fn validate_browser_session_reuse(
     Ok(())
 }
 
-fn validate_custom_fingerprint_profile(profile: &FingerprintProfile) -> Result<(), SpiderError> {
+fn validate_fingerprint_profile(profile: &FingerprintProfile) -> Result<(), SpiderError> {
     validate_non_empty_browser_profile_field("user_agent", &profile.user_agent)?;
     validate_non_empty_browser_profile_field("locale", &profile.locale)?;
     validate_non_empty_browser_profile_field("timezone", &profile.timezone)?;
@@ -141,7 +141,7 @@ fn validate_custom_fingerprint_profile(profile: &FingerprintProfile) -> Result<(
 
     if profile.languages.is_empty() {
         return Err(SpiderError::download(
-            "browser custom_fingerprint_profile.languages must not be empty",
+            "browser fingerprint_profile.languages must not be empty",
         ));
     }
     if profile
@@ -150,17 +150,17 @@ fn validate_custom_fingerprint_profile(profile: &FingerprintProfile) -> Result<(
         .any(|value| value.trim().is_empty())
     {
         return Err(SpiderError::download(
-            "browser custom_fingerprint_profile.languages must not contain empty values",
+            "browser fingerprint_profile.languages must not contain empty values",
         ));
     }
     if profile.hardware_concurrency == 0 {
         return Err(SpiderError::download(
-            "browser custom_fingerprint_profile.hardware_concurrency must be greater than 0",
+            "browser fingerprint_profile.hardware_concurrency must be greater than 0",
         ));
     }
     if profile.device_memory == 0 {
         return Err(SpiderError::download(
-            "browser custom_fingerprint_profile.device_memory must be greater than 0",
+            "browser fingerprint_profile.device_memory must be greater than 0",
         ));
     }
 
@@ -170,7 +170,7 @@ fn validate_custom_fingerprint_profile(profile: &FingerprintProfile) -> Result<(
 fn validate_non_empty_browser_profile_field(field: &str, value: &str) -> Result<(), SpiderError> {
     if value.trim().is_empty() {
         return Err(SpiderError::download(format!(
-            "browser custom_fingerprint_profile.{field} must not be empty"
+            "browser fingerprint_profile.{field} must not be empty"
         )));
     }
 
@@ -328,18 +328,18 @@ impl BrowserExecutionPlan {
 fn resolve_fingerprint_profile(
     config: &BrowserConfig,
 ) -> Result<Option<FingerprintProfile>, SpiderError> {
-    if config.fingerprint_profile.is_some() && config.custom_fingerprint_profile.is_some() {
+    if config.fingerprint_preset.is_some() && config.fingerprint_profile.is_some() {
         return Err(SpiderError::download(
-            "browser request cannot set both fingerprint_profile and custom_fingerprint_profile",
+            "browser request cannot set both fingerprint_preset and fingerprint_profile",
         ));
     }
 
-    if let Some(profile) = config.custom_fingerprint_profile.as_ref() {
-        validate_custom_fingerprint_profile(profile)?;
+    if let Some(profile) = config.fingerprint_profile.as_ref() {
+        validate_fingerprint_profile(profile)?;
         return Ok(Some(profile.clone()));
     }
 
-    let Some(profile_name) = config.fingerprint_profile.as_deref() else {
+    let Some(profile_name) = config.fingerprint_preset.as_deref() else {
         return Ok(None);
     };
 
@@ -353,7 +353,7 @@ fn resolve_fingerprint_profile(
 
     let supported = builtin_browser_fingerprint_profile_names();
     Err(SpiderError::download(format!(
-        "browser fingerprint_profile is not supported on the Playwright route: {profile_name}; supported profiles: {supported}"
+        "browser fingerprint_preset is not supported on the Playwright route: {profile_name}; supported presets: {supported}"
     )))
 }
 
@@ -757,7 +757,7 @@ async fn fetch_with_playwright_live_session(
 #[cfg(feature = "browser")]
 fn browser_live_session_mismatch_error(session_id: &str) -> SpiderError {
     SpiderError::download(format!(
-        "browser live session `{session_id}` requires stable engine/headless/viewport/stealth/fingerprint_profile/proxy/session_reuse across requests"
+        "browser live session `{session_id}` requires stable engine/headless/viewport/stealth/fingerprint_preset/fingerprint_profile/proxy/session_reuse across requests"
     ))
 }
 
@@ -1329,7 +1329,7 @@ mod tests {
     #[test]
     fn browser_request_contract_allows_supported_fingerprint_profile() {
         let request = Request::browser("https://example.com")
-            .with_browser(BrowserConfig::default().with_fingerprint_profile("desktop_zh_cn"));
+            .with_browser(BrowserConfig::default().with_fingerprint_preset("desktop_zh_cn"));
 
         let result = validate_browser_request_contract(
             &request,
@@ -1343,9 +1343,9 @@ mod tests {
     }
 
     #[test]
-    fn browser_request_contract_allows_custom_fingerprint_profile() {
+    fn browser_request_contract_allows_structured_fingerprint_profile() {
         let request = Request::browser("https://example.com").with_browser(
-            BrowserConfig::default().with_custom_fingerprint_profile(
+            BrowserConfig::default().with_fingerprint_profile(
                 FingerprintProfile::new()
                     .with_locale("ja-JP")
                     .with_timezone("Asia/Tokyo")
@@ -1368,7 +1368,7 @@ mod tests {
     #[test]
     fn browser_request_contract_rejects_unsupported_fingerprint_profile() {
         let request = Request::browser("https://example.com")
-            .with_browser(BrowserConfig::default().with_fingerprint_profile("desktop_unknown"));
+            .with_browser(BrowserConfig::default().with_fingerprint_preset("desktop_unknown"));
 
         let error = validate_browser_request_contract(
             &request,
@@ -1382,7 +1382,7 @@ mod tests {
         assert_eq!(
             error,
             SpiderError::download(
-                "browser fingerprint_profile is not supported on the Playwright route: desktop_unknown; supported profiles: desktop_zh_cn, desktop_en_us, desktop_en_gb, desktop_ja_jp, desktop_de_de, desktop_fr_fr",
+                "browser fingerprint_preset is not supported on the Playwright route: desktop_unknown; supported presets: desktop_zh_cn, desktop_en_us, desktop_en_gb, desktop_ja_jp, desktop_de_de, desktop_fr_fr",
             )
         );
     }
@@ -1634,7 +1634,7 @@ mod tests {
 
     #[test]
     fn resolve_fingerprint_profile_returns_builtin_profile() {
-        let config = BrowserConfig::default().with_fingerprint_profile("desktop_zh_cn");
+        let config = BrowserConfig::default().with_fingerprint_preset("desktop_zh_cn");
 
         let profile = resolve_fingerprint_profile(&config)
             .unwrap()
@@ -1650,8 +1650,8 @@ mod tests {
     }
 
     #[test]
-    fn resolve_fingerprint_profile_returns_custom_profile() {
-        let config = BrowserConfig::default().with_custom_fingerprint_profile(
+    fn resolve_fingerprint_profile_returns_structured_profile() {
+        let config = BrowserConfig::default().with_fingerprint_profile(
             FingerprintProfile::new()
                 .with_user_agent("custom-agent")
                 .with_locale("fr-FR")
@@ -1694,7 +1694,7 @@ mod tests {
     fn build_browser_init_script_supports_profile_and_stealth() {
         let config = BrowserConfig::default()
             .with_stealth(true)
-            .with_fingerprint_profile("desktop_en_us");
+            .with_fingerprint_preset("desktop_en_us");
         let profile = resolve_fingerprint_profile(&config)
             .unwrap()
             .expect("profile should resolve");
@@ -1717,7 +1717,7 @@ mod tests {
             .with_header("Accept-Language", "fr-FR,fr;q=0.9")
             .with_header("x-token", "abc");
         let profile = resolve_fingerprint_profile(
-            &BrowserConfig::default().with_fingerprint_profile("desktop_zh_cn"),
+            &BrowserConfig::default().with_fingerprint_preset("desktop_zh_cn"),
         )
         .unwrap()
         .expect("profile should resolve");
@@ -1784,14 +1784,14 @@ mod tests {
     fn browser_downloader_rejects_unsupported_config_before_launch() {
         let downloader = Browser;
         let request = Request::browser("https://example.com")
-            .with_browser(BrowserConfig::default().with_fingerprint_profile("desktop_unknown"));
+            .with_browser(BrowserConfig::default().with_fingerprint_preset("desktop_unknown"));
 
         let error = block_on(downloader.fetch(&request)).unwrap_err();
 
         assert_eq!(
             error,
             SpiderError::download(
-                "browser fingerprint_profile is not supported on the Playwright route: desktop_unknown; supported profiles: desktop_zh_cn, desktop_en_us, desktop_en_gb, desktop_ja_jp, desktop_de_de, desktop_fr_fr",
+                "browser fingerprint_preset is not supported on the Playwright route: desktop_unknown; supported presets: desktop_zh_cn, desktop_en_us, desktop_en_gb, desktop_ja_jp, desktop_de_de, desktop_fr_fr",
             )
         );
     }
@@ -1802,7 +1802,7 @@ mod tests {
         let config = BrowserConfig::default()
             .with_headless(false)
             .with_viewport(1440, 900)
-            .with_fingerprint_profile("desktop_zh_cn");
+            .with_fingerprint_preset("desktop_zh_cn");
         let request = Request::browser("https://example.com")
             .with_header("Accept-Language", "fr-FR,fr;q=0.9")
             .with_header("x-token", "abc")

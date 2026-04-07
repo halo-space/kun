@@ -498,63 +498,63 @@ fn parse_browser_config(
     if let Some(stealth) = value.get("stealth").and_then(Value::as_bool) {
         config = config.with_stealth(stealth);
     }
-    if let Some(profile) = value.get("fingerprint_profile").and_then(Value::as_str) {
-        config = config.with_fingerprint_profile(profile.to_string());
+    if let Some(preset) = value.get("fingerprint_preset").and_then(Value::as_str) {
+        config = config.with_fingerprint_preset(preset.to_string());
     }
-    if let Some(profile) = value.get("custom_fingerprint_profile") {
-        let profile = expect_object(profile, "fetch.browser.custom_fingerprint_profile")?;
-        let mut custom = FingerprintProfile::new();
+    if let Some(profile) = value.get("fingerprint_profile") {
+        let profile = expect_object(profile, "fetch.browser.fingerprint_profile")?;
+        let mut fingerprint = FingerprintProfile::new();
 
         if let Some(user_agent) = profile.get("user_agent").and_then(Value::as_str) {
-            custom = custom.with_user_agent(user_agent.to_string());
+            fingerprint = fingerprint.with_user_agent(user_agent.to_string());
         }
         if let Some(locale) = profile.get("locale").and_then(Value::as_str) {
-            custom = custom.with_locale(locale.to_string());
+            fingerprint = fingerprint.with_locale(locale.to_string());
         }
         if let Some(timezone) = profile.get("timezone").and_then(Value::as_str) {
-            custom = custom.with_timezone(timezone.to_string());
+            fingerprint = fingerprint.with_timezone(timezone.to_string());
         }
         if let Some(accept_language) = profile.get("accept_language").and_then(Value::as_str) {
-            custom = custom.with_accept_language(accept_language.to_string());
+            fingerprint = fingerprint.with_accept_language(accept_language.to_string());
         }
         if let Some(languages) = profile.get("languages") {
             let values = languages
                 .as_array()
                 .ok_or_else(|| {
                     SpiderError::rules(
-                        "fetch.browser.custom_fingerprint_profile.languages must be an array",
+                        "fetch.browser.fingerprint_profile.languages must be an array",
                     )
                 })?
                 .iter()
                 .map(|value| {
                     value.as_str().map(str::to_string).ok_or_else(|| {
                         SpiderError::rules(
-                            "fetch.browser.custom_fingerprint_profile.languages must be string[]",
+                            "fetch.browser.fingerprint_profile.languages must be string[]",
                         )
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            custom = custom.with_languages(values);
+            fingerprint = fingerprint.with_languages(values);
         }
         if let Some(platform) = profile.get("platform").and_then(Value::as_str) {
-            custom = custom.with_platform(platform.to_string());
+            fingerprint = fingerprint.with_platform(platform.to_string());
         }
         if let Some(vendor) = profile.get("vendor").and_then(Value::as_str) {
-            custom = custom.with_vendor(vendor.to_string());
+            fingerprint = fingerprint.with_vendor(vendor.to_string());
         }
         if let Some(hardware_concurrency) =
             profile.get("hardware_concurrency").and_then(Value::as_f64)
         {
-            custom = custom.with_hardware_concurrency(hardware_concurrency as u8);
+            fingerprint = fingerprint.with_hardware_concurrency(hardware_concurrency as u8);
         }
         if let Some(device_memory) = profile.get("device_memory").and_then(Value::as_f64) {
-            custom = custom.with_device_memory(device_memory as u8);
+            fingerprint = fingerprint.with_device_memory(device_memory as u8);
         }
         if let Some(max_touch_points) = profile.get("max_touch_points").and_then(Value::as_f64) {
-            custom = custom.with_max_touch_points(max_touch_points as u8);
+            fingerprint = fingerprint.with_max_touch_points(max_touch_points as u8);
         }
 
-        config = config.with_custom_fingerprint_profile(custom);
+        config = config.with_fingerprint_profile(fingerprint);
     }
     if let Some(wait_for_selector) = value.get("wait_for_selector").and_then(Value::as_str) {
         config = config.with_wait_for_selector(wait_for_selector.to_string());

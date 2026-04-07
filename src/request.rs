@@ -393,7 +393,7 @@ mod tests {
                 .with_driver(Driver::Playwright)
                 .with_engine(Engine::Firefox)
                 .with_stealth(true)
-                .with_fingerprint_profile("desktop_en_us"),
+                .with_fingerprint_preset("desktop_en_us"),
         );
 
         assert_eq!(request.mode, RequestMode::Browser);
@@ -410,7 +410,7 @@ mod tests {
             request
                 .browser
                 .as_ref()
-                .and_then(|config| config.fingerprint_profile.as_deref()),
+                .and_then(|config| config.fingerprint_preset.as_deref()),
             Some("desktop_en_us")
         );
     }
@@ -505,7 +505,7 @@ mod tests {
                     .with_driver(Driver::Playwright)
                     .with_engine(Engine::Chromium)
                     .with_stealth(true)
-                    .with_custom_fingerprint_profile(
+                    .with_fingerprint_profile(
                         FingerprintProfile::new()
                             .with_locale("zh-CN")
                             .with_timezone("Asia/Shanghai")
@@ -564,7 +564,7 @@ mod tests {
             decoded
                 .browser
                 .as_ref()
-                .and_then(|config| config.custom_fingerprint_profile.as_ref())
+                .and_then(|config| config.fingerprint_profile.as_ref())
                 .map(|profile| profile.timezone.as_str()),
             Some("Asia/Shanghai")
         );
