@@ -513,7 +513,7 @@ mod tests {
                             .with_languages(["zh-CN", "zh", "en"]),
                     )
                     .with_session_reuse(SessionReuse::Context)
-                    .with_wait_for("#app"),
+                    .with_wait_for_selector("#app"),
             );
 
         let encoded = serde_json::to_vec(&request).expect("request should serialize");
@@ -553,7 +553,7 @@ mod tests {
             decoded
                 .browser
                 .as_ref()
-                .and_then(|config| config.wait_for.as_deref()),
+                .and_then(|config| config.wait_for_selector.as_deref()),
             Some("#app")
         );
         assert_eq!(

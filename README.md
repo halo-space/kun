@@ -610,7 +610,7 @@ Spider / rules
 - `engine = chromium | firefox | webkit`
 - `headless`
 - `viewport`
-- `wait_for`
+- `wait_for_selector`
 - request method
 - request body
 - request cookies
@@ -638,7 +638,7 @@ user data dir、临时 profile 目录和会话锁这条实现路径也已经收�
 browser 执行路径，`ip_address` 与 `certificate` 由于 Playwright 当前接口限制仍保持为空。
 
 这里的 browser 定位仍然是“浏览器渲染型下载器”，不是通用自动化框架。
-当前只保留导航、`wait_for`、统一 request 语义和最终 HTML 获取，不再继续暴露点击、滚动、脚本执行这类页面动作配置。
+当前只保留导航、`wait_for_selector`、统一 request 语义和最终 HTML 获取，不再继续暴露点击、滚动、脚本执行这类页面动作配置。
 
 当前已经支持的 browser 指纹能力边界：
 
@@ -679,7 +679,7 @@ let request = Request::browser("https://example.com/app")
     .with_browser(
         browser::Config::default()
             .with_engine(browser::Engine::Chromium)
-            .with_wait_for("#app")
+            .with_wait_for_selector("#app")
             .with_custom_fingerprint_profile(
                 browser::FingerprintProfile::new()
                     .with_locale("ja-JP")

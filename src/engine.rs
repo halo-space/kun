@@ -3146,7 +3146,7 @@ mod tests {
             request
                 .browser
                 .as_ref()
-                .and_then(|browser| browser.wait_for.as_deref())
+                .and_then(|browser| browser.wait_for_selector.as_deref())
                 == Some("#app")
         );
         assert!(request.http.is_none());
@@ -3703,7 +3703,7 @@ mod tests {
                                 "session": "shared-session"
                             },
                             "browser": {
-                                "wait_for": "#app"
+                                "wait_for_selector": "#app"
                             }
                         },
                         "parse": {}

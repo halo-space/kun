@@ -54,7 +54,7 @@ README 负责总览，这里负责把每个模块现在到底能做什么、还�
 - 当前走 `playwright-rs`
 - 用于打开页面、执行浏览器导航、拿渲染后的 HTML
 - 已支持最小的 `method`、`body`、`headers`、`timeout`、`proxy`、request cookies、session
-- 已支持 `wait_for` 这类页面就绪等待配置，用于在取 HTML 前等待目标内容出现
+- 已支持 `wait_for_selector` 这类页面就绪等待配置，用于在取 HTML 前等待目标内容出现
 - 已支持内置 `fingerprint_profile = desktop_zh_cn | desktop_en_us | desktop_en_gb | desktop_ja_jp | desktop_de_de | desktop_fr_fr`
 - 已支持结构化 `custom_fingerprint_profile`
 - 已支持显式 `session_reuse = storage | context | page`

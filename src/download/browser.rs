@@ -100,18 +100,18 @@ fn validate_browser_request_contract(
     config: &BrowserConfig,
 ) -> Result<(), SpiderError> {
     resolve_fingerprint_profile(config).map(|_| ())?;
-    validate_browser_wait_for(config)?;
+    validate_browser_wait_for_selector(config)?;
     validate_browser_session_reuse(request, config)?;
 
     Ok(())
 }
 
-fn validate_browser_wait_for(config: &BrowserConfig) -> Result<(), SpiderError> {
-    if let Some(selector) = &config.wait_for
+fn validate_browser_wait_for_selector(config: &BrowserConfig) -> Result<(), SpiderError> {
+    if let Some(selector) = &config.wait_for_selector
         && selector.trim().is_empty()
     {
         return Err(SpiderError::download(
-            "browser wait_for requires a non-empty selector",
+            "browser wait_for_selector requires a non-empty selector",
         ));
     }
 
@@ -920,7 +920,7 @@ async fn execute_browser_request_on_page(
             .map_err(map_playwright_error)?;
         let frame = page.main_frame().await.map_err(map_playwright_error)?;
 
-        if let Some(selector) = &config.wait_for {
+        if let Some(selector) = &config.wait_for_selector {
             wait_for_selector(&frame, selector, request.timeout).await?;
         }
 
@@ -1109,7 +1109,7 @@ async fn wait_for_selector(
 
         if tokio::time::Instant::now() >= deadline {
             return Err(SpiderError::download(format!(
-                "browser wait_for selector timed out: {selector}"
+                "browser wait_for_selector timed out: {selector}"
             )));
         }
 
@@ -1472,7 +1472,7 @@ mod tests {
     #[test]
     fn browser_request_contract_allows_wait_for_selector() {
         let request = Request::browser("https://example.com")
-            .with_browser(BrowserConfig::default().with_wait_for(".result"));
+            .with_browser(BrowserConfig::default().with_wait_for_selector(".result"));
 
         let result = validate_browser_request_contract(
             &request,
@@ -1488,7 +1488,7 @@ mod tests {
     #[test]
     fn browser_request_contract_rejects_empty_wait_for_selector() {
         let request = Request::browser("https://example.com")
-            .with_browser(BrowserConfig::default().with_wait_for("   "));
+            .with_browser(BrowserConfig::default().with_wait_for_selector("   "));
 
         let error = validate_browser_request_contract(
             &request,
@@ -1501,7 +1501,7 @@ mod tests {
 
         assert_eq!(
             error,
-            SpiderError::download("browser wait_for requires a non-empty selector")
+            SpiderError::download("browser wait_for_selector requires a non-empty selector")
         );
     }
 

@@ -32,7 +32,7 @@ fn main() {
                         .with_max_touch_points(0),
                 )
                 .with_session_reuse(browser::SessionReuse::Context)
-                .with_wait_for("#app"),
+                .with_wait_for_selector("#app"),
         );
 
     println!("{:#?}", request.browser);

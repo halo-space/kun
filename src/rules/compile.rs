@@ -556,8 +556,8 @@ fn parse_browser_config(
 
         config = config.with_custom_fingerprint_profile(custom);
     }
-    if let Some(wait_for) = value.get("wait_for").and_then(Value::as_str) {
-        config = config.with_wait_for(wait_for.to_string());
+    if let Some(wait_for_selector) = value.get("wait_for_selector").and_then(Value::as_str) {
+        config = config.with_wait_for_selector(wait_for_selector.to_string());
     }
     if let Some(session_reuse) = value.get("session_reuse").and_then(Value::as_str) {
         config = config

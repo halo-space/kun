@@ -224,7 +224,7 @@ pub struct Config {
     pub fingerprint_profile: Option<String>,
     #[serde(default)]
     pub custom_fingerprint_profile: Option<FingerprintProfile>,
-    pub wait_for: Option<String>,
+    pub wait_for_selector: Option<String>,
     pub viewport: Viewport,
     #[serde(default)]
     pub session_reuse: SessionReuse,
@@ -239,7 +239,7 @@ impl Default for Config {
             stealth: false,
             fingerprint_profile: None,
             custom_fingerprint_profile: None,
-            wait_for: None,
+            wait_for_selector: None,
             viewport: Viewport::default(),
             session_reuse: SessionReuse::default(),
         }
@@ -279,8 +279,8 @@ impl Config {
         self
     }
 
-    pub fn with_wait_for(mut self, selector: impl Into<String>) -> Self {
-        self.wait_for = Some(selector.into());
+    pub fn with_wait_for_selector(mut self, selector: impl Into<String>) -> Self {
+        self.wait_for_selector = Some(selector.into());
         self
     }
 
@@ -309,7 +309,7 @@ mod tests {
         assert!(!config.stealth);
         assert_eq!(config.fingerprint_profile, None);
         assert_eq!(config.custom_fingerprint_profile, None);
-        assert_eq!(config.wait_for, None);
+        assert_eq!(config.wait_for_selector, None);
         assert_eq!(config.session_reuse, SessionReuse::Storage);
     }
 
@@ -319,14 +319,14 @@ mod tests {
             .with_engine(Engine::Firefox)
             .with_stealth(true)
             .with_fingerprint_profile("desktop_zh_cn")
-            .with_wait_for("#app")
+            .with_wait_for_selector("#app")
             .with_session_reuse(SessionReuse::Context);
 
         assert_eq!(config.engine, Engine::Firefox);
         assert!(config.stealth);
         assert_eq!(config.fingerprint_profile.as_deref(), Some("desktop_zh_cn"));
         assert_eq!(config.custom_fingerprint_profile, None);
-        assert_eq!(config.wait_for.as_deref(), Some("#app"));
+        assert_eq!(config.wait_for_selector.as_deref(), Some("#app"));
         assert_eq!(config.session_reuse, SessionReuse::Context);
     }
 

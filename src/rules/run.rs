@@ -784,7 +784,7 @@ mod tests {
                             "session": "parent-session"
                         },
                         "browser": {
-                            "wait_for": "#list"
+                            "wait_for_selector": "#list"
                         }
                     },
                     "parse": {
