@@ -52,13 +52,13 @@ README 这里只保留总览；模块级细节统一放到 [docs/capabilities.md
 
 当前仍待补齐的底层能力：
 
-- 观测能力还不完整：虽然已经有细粒度 `stats`、`signals / extensions`、`Engine::with_stats_reporter(...)` 和统一 `telemetry` exporter 边界，也内置了 `telemetry::File`、`telemetry::Prometheus`、`telemetry::OpenTelemetry`，但还没有更完整的持久化事件总线聚合层，以及更高阶的跨 job 运维自动化。
-- durable scheduler 已经覆盖 worker ownership、heartbeat、stale reclaim、scope snapshot、跨 scope `overview()`、统一 `scheduler::Control` 运维动作与 worker 运行态视图；`store -> scheduler resolve` 的提交边界也已经显式收口，但它不是跨组件分布式事务；当前剩余缺口主要是更强的分布式协调，以及更完整的 exporter / 事件总线 / 自动化运维能力。
-- `store` 边界已经建立，但更丰富的文件格式、更高阶消息语义和更多内置外部系统适配还没有继续铺开。
-- browser 已经支持内置 profile、结构化自定义 profile 与显式 `session_reuse`；当前剩余缺口主要是更高阶第三方 stealth 套件与跨 engine 更完整的品牌级指纹伪装。
-- validation 本身已经比较完整，但“校验失败如何映射到 runtime 行为”这层统一策略还没完全收口。
-- plugin 自动装载当前仍只支持 `middleware` kind；`store`、`scheduler`、`dedup`、`robots`、`http`、`browser` 这些 kind 还没有真正自动接线。
-- DSL 继续后置，尚未完全追平代码爬虫已经具备的共享 request / parse / schedule / validation 能力。
+- 观测主链路其实已经有了：`stats`、`signals / extensions`、`trace`、`Engine::with_stats_reporter(...)` 和统一 `telemetry` exporter 都已接好；当前真正还缺的是更完整的持久化事件总线聚合层、跨 job 仪表盘/巡检视图，以及更高阶的运维自动化。
+- durable scheduler 的核心语义已经基本收口：`Memory / Sqlite / Redis`、worker ownership、heartbeat、stale reclaim、batch、scope `snapshot / overview`、统一 `scheduler::Control`、`store -> scheduler resolve` 显式提交边界都已经到位；当前主要剩的是更强的分布式协调后端、更完整的后台运维服务层，以及更丰富的 exporter / 自动化接线。
+- `store` 这条线基础边界已经成立，而且内置 `Memory / File / Sqlite / Webhook / Redis / Kafka` 都能用；当前剩余更多是“继续扩展更多格式和外部系统适配”，不是主线能力缺失。
+- browser 的核心抓取能力也已经不是空白：内置 profile、结构化 custom profile、最小 stealth bootstrap、`session_reuse` 与稳定 session 目录都已具备；当前剩余主要是更高阶第三方 stealth 套件、更强的品牌级指纹伪装，以及跨 engine 更完整的 session/context 复用策略。
+- validation 规则层和 report API 已经比较完整；当前真正还没完全收口的是“校验失败映射成什么 runtime 行为”这层策略，而不是校验能力本身。
+- plugin 自动装载这条线当前仍只自动接 `middleware`；`store`、`scheduler`、`dedup`、`robots`、`http`、`browser` 这些 kind 还没有完成真正的 engine 自动接线。
+- DSL 继续后置；当前它已经共享底层 `Request / parse / scheduler / validation` 模型，但整体能力面仍然没有完全追平代码爬虫主线。
 
 ## 快速开始
 
