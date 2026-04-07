@@ -1,7 +1,7 @@
 use crate::error::SpiderError;
 use crate::middleware::{Config as MiddlewareConfig, Map as MiddlewareMap, Stage};
 use crate::request::browser::{
-    Config as BrowserConfig, Driver, Engine, FingerprintProfile, SessionReuse, Viewport,
+    Config as BrowserConfig, Driver, Engine, FingerprintProfile, RuntimeReuse, Viewport,
 };
 use crate::request::http::Config as HttpConfig;
 use crate::request::{Headers, ProxyConfig, RequestMode, SessionConfig};
@@ -559,9 +559,9 @@ fn parse_browser_config(
     if let Some(wait_for_selector) = value.get("wait_for_selector").and_then(Value::as_str) {
         config = config.with_wait_for_selector(wait_for_selector.to_string());
     }
-    if let Some(session_reuse) = value.get("session_reuse").and_then(Value::as_str) {
+    if let Some(runtime_reuse) = value.get("runtime_reuse").and_then(Value::as_str) {
         config = config
-            .with_session_reuse(SessionReuse::try_from(session_reuse).map_err(SpiderError::rules)?);
+            .with_runtime_reuse(RuntimeReuse::try_from(runtime_reuse).map_err(SpiderError::rules)?);
     }
     if let Some(viewport) = value.get("viewport") {
         let viewport = expect_object(viewport, "fetch.browser.viewport")?;

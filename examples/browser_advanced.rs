@@ -3,7 +3,7 @@
 //! Shows:
 //! - built-in browser request path
 //! - structured fingerprint profile
-//! - explicit session reuse policy
+//! - explicit live runtime reuse policy
 //! - stable session id for live context/page reuse boundaries
 //!
 //! Run:
@@ -31,7 +31,7 @@ fn main() {
                         .with_device_memory(8)
                         .with_max_touch_points(0),
                 )
-                .with_session_reuse(browser::SessionReuse::Context)
+                .with_runtime_reuse(browser::RuntimeReuse::Context)
                 .with_wait_for_selector("#app"),
         );
 

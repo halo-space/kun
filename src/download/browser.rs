@@ -3,7 +3,7 @@ use crate::error::SpiderError;
 #[cfg(any(feature = "browser", test))]
 use crate::request::Headers;
 use crate::request::browser::{
-    Config as BrowserConfig, Engine as BrowserEngine, FingerprintProfile, SessionReuse,
+    Config as BrowserConfig, Engine as BrowserEngine, FingerprintProfile, RuntimeReuse,
 };
 use crate::request::{Request, RequestMode};
 use crate::response::Response;
@@ -103,7 +103,7 @@ fn validate_browser_request_contract(
 ) -> Result<(), SpiderError> {
     resolve_fingerprint_profile(config).map(|_| ())?;
     validate_browser_wait_for_selector(config)?;
-    validate_browser_session_reuse(request, config)?;
+    validate_browser_runtime_reuse(request, config)?;
 
     Ok(())
 }
@@ -120,13 +120,13 @@ fn validate_browser_wait_for_selector(config: &BrowserConfig) -> Result<(), Spid
     Ok(())
 }
 
-fn validate_browser_session_reuse(
+fn validate_browser_runtime_reuse(
     request: &Request,
     config: &BrowserConfig,
 ) -> Result<(), SpiderError> {
-    if config.session_reuse != SessionReuse::Storage && request.session.is_none() {
+    if config.runtime_reuse != RuntimeReuse::Isolated && request.session.is_none() {
         return Err(SpiderError::download(
-            "browser session_reuse=context/page requires request.session",
+            "browser runtime_reuse=context/page requires request.session",
         ));
     }
 
@@ -305,7 +305,7 @@ fn builtin_browser_fingerprint_family(engine: BrowserEngine) -> BuiltinBrowserFi
 struct BrowserExecutionPlan {
     profile: Option<FingerprintProfile>,
     init_script: Option<String>,
-    session_reuse: SessionReuse,
+    runtime_reuse: RuntimeReuse,
 }
 
 #[cfg(any(feature = "browser", test))]
@@ -318,7 +318,7 @@ impl BrowserExecutionPlan {
         Ok(Self {
             profile,
             init_script,
-            session_reuse: config.session_reuse,
+            runtime_reuse: config.runtime_reuse,
         })
     }
 }
@@ -607,7 +607,7 @@ struct BrowserSessionSignature {
     headless: bool,
     viewport: crate::request::browser::Viewport,
     stealth: bool,
-    session_reuse: SessionReuse,
+    runtime_reuse: RuntimeReuse,
     profile: Option<FingerprintProfile>,
     proxy: Option<String>,
 }
@@ -624,7 +624,7 @@ impl BrowserSessionSignature {
             headless: config.headless,
             viewport: config.viewport.clone(),
             stealth: config.stealth,
-            session_reuse: execution_plan.session_reuse,
+            runtime_reuse: execution_plan.runtime_reuse,
             profile: execution_plan.profile.clone(),
             proxy: request.proxy.as_ref().map(|proxy| proxy.url.clone()),
         }
@@ -649,7 +649,7 @@ async fn fetch_with_playwright_inner(
     let _session_execution_guard = acquire_browser_session_execution_guard(request).await;
     let execution_plan = BrowserExecutionPlan::from_config(config)?;
 
-    if request.session.is_some() && execution_plan.session_reuse != SessionReuse::Storage {
+    if request.session.is_some() && execution_plan.runtime_reuse != RuntimeReuse::Isolated {
         return fetch_with_playwright_live_session(request, config, &execution_plan).await;
     }
 
@@ -727,7 +727,7 @@ async fn fetch_with_playwright_live_session(
         }
     };
 
-    let keep_page = execution_plan.session_reuse == SessionReuse::Page;
+    let keep_page = execution_plan.runtime_reuse == RuntimeReuse::Page;
     let existing_page = if keep_page { session.page.take() } else { None };
     let outcome = run_browser_request_in_context(
         &session.context,
@@ -756,7 +756,7 @@ async fn fetch_with_playwright_live_session(
 #[cfg(feature = "browser")]
 fn browser_live_session_mismatch_error(session_id: &str) -> SpiderError {
     SpiderError::download(format!(
-        "browser live session `{session_id}` requires stable engine/headless/viewport/stealth/fingerprint_preset/fingerprint_profile/proxy/session_reuse across requests"
+        "browser live session `{session_id}` requires stable engine/headless/viewport/stealth/fingerprint_preset/fingerprint_profile/proxy/runtime_reuse across requests"
     ))
 }
 
@@ -1297,7 +1297,7 @@ mod tests {
     use super::*;
     use crate::download::traits::Downloader;
     use crate::request::browser::{
-        Config as BrowserConfig, Engine as BrowserEngine, FingerprintProfile, SessionReuse,
+        Config as BrowserConfig, Engine as BrowserEngine, FingerprintProfile, RuntimeReuse,
     };
     use std::sync::Arc;
 
@@ -1415,7 +1415,7 @@ mod tests {
     #[test]
     fn browser_request_contract_rejects_live_reuse_without_session() {
         let request = Request::browser("https://example.com")
-            .with_browser(BrowserConfig::default().with_session_reuse(SessionReuse::Context));
+            .with_browser(BrowserConfig::default().with_runtime_reuse(RuntimeReuse::Context));
 
         let error = validate_browser_request_contract(
             &request,
@@ -1428,7 +1428,7 @@ mod tests {
 
         assert_eq!(
             error,
-            SpiderError::download("browser session_reuse=context/page requires request.session")
+            SpiderError::download("browser runtime_reuse=context/page requires request.session")
         );
     }
 
@@ -1436,7 +1436,7 @@ mod tests {
     fn browser_request_contract_allows_live_reuse_with_session() {
         let request = Request::browser("https://example.com")
             .with_session("shared-browser")
-            .with_browser(BrowserConfig::default().with_session_reuse(SessionReuse::Page));
+            .with_browser(BrowserConfig::default().with_runtime_reuse(RuntimeReuse::Page));
 
         let result = validate_browser_request_contract(
             &request,

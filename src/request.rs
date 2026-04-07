@@ -353,7 +353,7 @@ mod option_signed_duration_millis {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::request::browser::{Driver, Engine, FingerprintProfile, SessionReuse};
+    use crate::request::browser::{Driver, Engine, FingerprintProfile, RuntimeReuse};
     use crate::value::Value;
     use jiff::SignedDuration;
 
@@ -512,7 +512,7 @@ mod tests {
                             .with_accept_language("zh-CN,zh;q=0.9,en;q=0.8")
                             .with_languages(["zh-CN", "zh", "en"]),
                     )
-                    .with_session_reuse(SessionReuse::Context)
+                    .with_runtime_reuse(RuntimeReuse::Context)
                     .with_wait_for_selector("#app"),
             );
 
@@ -557,8 +557,8 @@ mod tests {
             Some("#app")
         );
         assert_eq!(
-            decoded.browser.as_ref().map(|config| config.session_reuse),
-            Some(SessionReuse::Context)
+            decoded.browser.as_ref().map(|config| config.runtime_reuse),
+            Some(RuntimeReuse::Context)
         );
         assert_eq!(
             decoded

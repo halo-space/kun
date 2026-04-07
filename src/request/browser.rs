@@ -179,38 +179,38 @@ impl FingerprintProfile {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SessionReuse {
+pub enum RuntimeReuse {
     #[default]
-    Storage,
+    Isolated,
     Context,
     Page,
 }
 
-impl SessionReuse {
+impl RuntimeReuse {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Storage => "storage",
+            Self::Isolated => "isolated",
             Self::Context => "context",
             Self::Page => "page",
         }
     }
 }
 
-impl Display for SessionReuse {
+impl Display for RuntimeReuse {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
 }
 
-impl TryFrom<&str> for SessionReuse {
+impl TryFrom<&str> for RuntimeReuse {
     type Error = String;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value {
-            "storage" => Ok(Self::Storage),
+            "isolated" => Ok(Self::Isolated),
             "context" => Ok(Self::Context),
             "page" => Ok(Self::Page),
-            other => Err(format!("unsupported browser session reuse: {other}")),
+            other => Err(format!("unsupported browser runtime reuse: {other}")),
         }
     }
 }
@@ -227,7 +227,7 @@ pub struct Config {
     pub wait_for_selector: Option<String>,
     pub viewport: Viewport,
     #[serde(default)]
-    pub session_reuse: SessionReuse,
+    pub runtime_reuse: RuntimeReuse,
 }
 
 impl Default for Config {
@@ -241,7 +241,7 @@ impl Default for Config {
             fingerprint_profile: None,
             wait_for_selector: None,
             viewport: Viewport::default(),
-            session_reuse: SessionReuse::default(),
+            runtime_reuse: RuntimeReuse::default(),
         }
     }
 }
@@ -289,8 +289,8 @@ impl Config {
         self
     }
 
-    pub fn with_session_reuse(mut self, session_reuse: SessionReuse) -> Self {
-        self.session_reuse = session_reuse;
+    pub fn with_runtime_reuse(mut self, runtime_reuse: RuntimeReuse) -> Self {
+        self.runtime_reuse = runtime_reuse;
         self
     }
 }
@@ -310,7 +310,7 @@ mod tests {
         assert_eq!(config.fingerprint_preset, None);
         assert_eq!(config.fingerprint_profile, None);
         assert_eq!(config.wait_for_selector, None);
-        assert_eq!(config.session_reuse, SessionReuse::Storage);
+        assert_eq!(config.runtime_reuse, RuntimeReuse::Isolated);
     }
 
     #[test]
@@ -320,14 +320,14 @@ mod tests {
             .with_stealth(true)
             .with_fingerprint_preset("desktop_zh_cn")
             .with_wait_for_selector("#app")
-            .with_session_reuse(SessionReuse::Context);
+            .with_runtime_reuse(RuntimeReuse::Context);
 
         assert_eq!(config.engine, Engine::Firefox);
         assert!(config.stealth);
         assert_eq!(config.fingerprint_preset.as_deref(), Some("desktop_zh_cn"));
         assert_eq!(config.fingerprint_profile, None);
         assert_eq!(config.wait_for_selector.as_deref(), Some("#app"));
-        assert_eq!(config.session_reuse, SessionReuse::Context);
+        assert_eq!(config.runtime_reuse, RuntimeReuse::Context);
     }
 
     #[test]
@@ -346,13 +346,13 @@ mod tests {
     }
 
     #[test]
-    fn session_reuse_try_from_string_supports_explicit_policies() {
-        assert_eq!(SessionReuse::try_from("storage"), Ok(SessionReuse::Storage));
-        assert_eq!(SessionReuse::try_from("context"), Ok(SessionReuse::Context));
-        assert_eq!(SessionReuse::try_from("page"), Ok(SessionReuse::Page));
+    fn runtime_reuse_try_from_string_supports_explicit_policies() {
+        assert_eq!(RuntimeReuse::try_from("isolated"), Ok(RuntimeReuse::Isolated));
+        assert_eq!(RuntimeReuse::try_from("context"), Ok(RuntimeReuse::Context));
+        assert_eq!(RuntimeReuse::try_from("page"), Ok(RuntimeReuse::Page));
         assert_eq!(
-            SessionReuse::try_from("other"),
-            Err("unsupported browser session reuse: other".to_string())
+            RuntimeReuse::try_from("other"),
+            Err("unsupported browser runtime reuse: other".to_string())
         );
     }
 }
