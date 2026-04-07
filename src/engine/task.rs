@@ -35,6 +35,23 @@ where
     S: Scheduler,
     D: crate::dedup::Dedup,
 {
+    let Some(task) = prepare_task_for_enqueue(dedup, task, allowed_domains, stats).await? else {
+        return Ok(false);
+    };
+
+    scheduler.enqueue(task).await?;
+    Ok(true)
+}
+
+async fn prepare_task_for_enqueue<D>(
+    dedup: &mut D,
+    task: Task,
+    allowed_domains: &[String],
+    stats: Option<&crate::stats::Tracker>,
+) -> Result<Option<Task>, SpiderError>
+where
+    D: crate::dedup::Dedup,
+{
     let request = &task.request;
 
     if !request.dont_filter && !super::is_domain_allowed(&request.url, allowed_domains) {
@@ -42,7 +59,7 @@ where
             url = request.url.as_str(),
             "request filtered out because domain is not in allowed_domains"
         );
-        return Ok(false);
+        return Ok(None);
     }
 
     if !request.dont_filter && !dedup.check_and_insert(&request).await? {
@@ -53,11 +70,10 @@ where
             url = request.url.as_str(),
             "request dropped by dedup component before scheduler"
         );
-        return Ok(false);
+        return Ok(None);
     }
 
-    scheduler.enqueue(task).await?;
-    Ok(true)
+    Ok(Some(task))
 }
 
 pub(super) async fn apply_task_run<S, D>(
@@ -88,17 +104,33 @@ where
                 "completed parse round {}",
                 round,
             );
+            let mut scheduled_follows = Vec::new();
+            let mut follow_tasks = Vec::new();
             for follow in &output.follows {
-                let enqueued = enqueue_request(
-                    scheduler,
+                let task = prepare_task_for_enqueue(
                     dedup,
-                    follow.clone(),
+                    Task::new(follow.clone()),
                     allowed_domains,
                     Some(stats),
                 )
                 .await?;
 
-                if enqueued {
+                if let Some(task) = task {
+                    scheduled_follows.push(follow.clone());
+                    follow_tasks.push(task);
+                }
+            }
+            let committed = resolve_scheduler_transition(
+                scheduler.complete_and_enqueue(&lease, follow_tasks),
+                &lease,
+                "complete",
+                url.as_str(),
+                spider_name,
+                stats,
+            )
+            .await?;
+            if committed {
+                for follow in &scheduled_follows {
                     signals
                         .emit(crate::signals::Signal::request_scheduled(
                             spider_name,
@@ -107,15 +139,6 @@ where
                         .await;
                 }
             }
-            resolve_scheduler_transition(
-                scheduler.complete(&lease),
-                &lease,
-                "complete",
-                url.as_str(),
-                spider_name,
-                stats,
-            )
-            .await?;
             outputs.push(SpiderOutput {
                 items: output.items,
                 requests: output.follows,
@@ -123,16 +146,15 @@ where
         }
         TaskOutcome::Retry(retry_task) => {
             stats.record_retry();
+            let retry_task = *retry_task;
             let request = retry_task.request.clone();
-            scheduler.enqueue(*retry_task).await?;
-            signals
-                .emit(crate::signals::Signal::request_scheduled(
-                    spider_name,
-                    request,
-                ))
-                .await;
-            resolve_scheduler_transition(
-                scheduler.complete(&lease),
+            let retry_tasks =
+                prepare_task_for_enqueue(dedup, retry_task, allowed_domains, Some(stats))
+                    .await?
+                    .into_iter()
+                    .collect::<Vec<_>>();
+            let committed = resolve_scheduler_transition(
+                scheduler.complete_and_enqueue(&lease, retry_tasks),
                 &lease,
                 "complete",
                 url.as_str(),
@@ -140,6 +162,14 @@ where
                 stats,
             )
             .await?;
+            if committed {
+                signals
+                    .emit(crate::signals::Signal::request_scheduled(
+                        spider_name,
+                        request,
+                    ))
+                    .await;
+            }
         }
         TaskOutcome::Drop => {
             resolve_scheduler_transition(
@@ -187,9 +217,9 @@ async fn resolve_scheduler_transition(
     url: &str,
     spider_name: &str,
     stats: &crate::stats::Tracker,
-) -> Result<(), SpiderError> {
+) -> Result<bool, SpiderError> {
     match transition.await {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(true),
         Err(error) if error.is_scheduler_lease_resolution_error() => {
             stats.record_error();
             tracing::warn!(
@@ -201,7 +231,7 @@ async fn resolve_scheduler_transition(
                 error = %error,
                 "task lease could not be resolved after task execution"
             );
-            Ok(())
+            Ok(false)
         }
         Err(error) => Err(error),
     }

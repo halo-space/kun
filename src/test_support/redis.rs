@@ -380,6 +380,9 @@ fn handle_eval_command(
     {
         return eval_scheduler_complete(state, keys, args);
     }
+    if script.contains("kun:scheduler:complete_and_enqueue_v1") {
+        return eval_scheduler_complete_and_enqueue(state, keys, args);
+    }
     if script.contains("kun:scheduler:requeue_v1")
         || script.contains("kun:scheduler:requeue_v2")
         || script.contains("kun:scheduler:requeue_v3")
@@ -518,6 +521,54 @@ fn eval_scheduler_complete(
     hash_delete(state, &keys[6], task_id);
     hash_delete(state, &keys[7], task_id);
     hash_delete(state, &keys[0], task_id);
+
+    Ok(integer_reply(1))
+}
+
+fn eval_scheduler_complete_and_enqueue(
+    state: &mut TestRedisState,
+    keys: &[String],
+    args: &[String],
+) -> Result<Vec<u8>, std::io::Error> {
+    if keys.len() != 13 || args.len() < 6 || (args.len() - 6) % 3 != 0 {
+        return Ok(error_reply("ERR invalid complete_and_enqueue script args"));
+    }
+
+    let task_id = args[0].as_str();
+    if !lease_matches(state, &keys[6], &keys[7], task_id, &args[1], &args[2]) {
+        return Ok(integer_reply(lease_result_code(
+            state, &keys[6], &keys[7], task_id, &args[1], &args[2],
+        )));
+    }
+    sync_worker_runtime_meta(
+        state, &keys[9], &keys[10], &keys[11], &keys[12], &args[1], &args[3], &args[4], &args[5],
+    );
+    sorted_set_remove(state, &keys[5], task_id);
+    set_remove(state, &keys[4], task_id);
+    set_remove(state, &keys[1], task_id);
+    sorted_set_remove(state, &keys[3], task_id);
+    hash_delete(state, &keys[2], task_id);
+    hash_delete(state, &keys[6], task_id);
+    hash_delete(state, &keys[7], task_id);
+    hash_delete(state, &keys[0], task_id);
+
+    for chunk in args[6..].chunks(3) {
+        let next_task_id = chunk[0].as_str();
+        let task_json = chunk[1].clone();
+        let ready_at = chunk[2].as_str();
+
+        hash_set(state, &keys[0], next_task_id, task_json);
+        if ready_at.is_empty() {
+            push_ready(state, &keys[1], &keys[2], &keys[8], next_task_id)?;
+        } else {
+            sorted_set_insert(
+                state,
+                &keys[3],
+                next_task_id,
+                ready_at.parse::<i64>().map_err(int_error)?,
+            );
+        }
+    }
 
     Ok(integer_reply(1))
 }

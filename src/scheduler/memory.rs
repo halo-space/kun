@@ -326,6 +326,30 @@ impl Scheduler for Memory {
         Ok(())
     }
 
+    async fn complete_and_enqueue(
+        &self,
+        lease: &TaskLease,
+        tasks: Vec<Task>,
+    ) -> Result<(), SpiderError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let pos = find_inflight_entry(&state.inflight, lease.task_id()).ok_or_else(|| {
+            SpiderError::scheduler(SchedulerError::InactiveLease {
+                action: "complete",
+                task_id: lease.task_id().as_str().to_string(),
+            })
+        })?;
+        ensure_memory_lease("complete", self.worker_id(), &state.inflight[pos], lease)?;
+        state.inflight.remove(pos);
+        for task in tasks {
+            state.push_task(task);
+        }
+        state.reset_worker_if_idle();
+        Ok(())
+    }
+
     async fn requeue(&self, lease: &TaskLease) -> Result<(), SpiderError> {
         let mut state = self
             .state
@@ -566,6 +590,39 @@ mod tests {
             second.map(|task| task.task.request.url),
             Some("https://example.com/retry".to_string())
         );
+    }
+
+    #[test]
+    fn memory_scheduler_complete_and_enqueue_moves_follow_tasks_atomically() {
+        let scheduler = Memory::default();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/current"))))
+            .unwrap();
+
+        let claimed = block_on(scheduler.take_ready()).unwrap().unwrap();
+        let ready_follow = Task::new(Request::new("https://example.com/follow-ready"));
+        let delayed_follow =
+            Task::with_delay(Request::new("https://example.com/follow-delayed"), 500);
+
+        block_on(scheduler.complete_and_enqueue(
+            &claimed.lease,
+            vec![ready_follow.clone(), delayed_follow.clone()],
+        ))
+        .unwrap();
+
+        assert_eq!(
+            scheduler.counts(),
+            Counts {
+                ready: 1,
+                delayed: 1,
+                inflight: 0,
+            }
+        );
+        let checkpoint = scheduler.checkpoint();
+        assert_eq!(checkpoint.ready.len(), 1);
+        assert_eq!(checkpoint.ready[0].id, ready_follow.id);
+        assert_eq!(checkpoint.delayed.len(), 1);
+        assert_eq!(checkpoint.delayed[0].id, delayed_follow.id);
+        assert!(checkpoint.inflight.is_empty());
     }
 
     #[test]

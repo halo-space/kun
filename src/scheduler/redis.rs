@@ -316,6 +316,94 @@ redis.call('HDEL', inflight_leases, task_id)
 redis.call('HDEL', tasks, task_id)
 return 1
 "#;
+const SCHEDULER_COMPLETE_AND_ENQUEUE_SCRIPT: &str = r#"
+-- kun:scheduler:complete_and_enqueue_v1
+local tasks = KEYS[1]
+local ready = KEYS[2]
+local ready_order = KEYS[3]
+local delayed = KEYS[4]
+local inflight = KEYS[5]
+local inflight_deadlines = KEYS[6]
+local inflight_workers = KEYS[7]
+local inflight_leases = KEYS[8]
+local sequence = KEYS[9]
+local workers = KEYS[10]
+local worker_seen = KEYS[11]
+local worker_lease_timeout = KEYS[12]
+local worker_heartbeat_interval = KEYS[13]
+
+local task_id = ARGV[1]
+local worker_id = ARGV[2]
+local lease_id = ARGV[3]
+local now = ARGV[4]
+local lease_timeout = ARGV[5]
+local heartbeat_interval = ARGV[6]
+
+local function push_ready(id)
+    local next_ready_order = redis.call('INCR', sequence)
+    redis.call('SADD', ready, id)
+    redis.call('HSET', ready_order, id, tostring(next_ready_order))
+end
+
+local function sync_worker_runtime()
+    redis.call('SADD', workers, worker_id)
+    redis.call('HSET', worker_seen, worker_id, now)
+    if lease_timeout == '' then
+        redis.call('HDEL', worker_lease_timeout, worker_id)
+    else
+        redis.call('HSET', worker_lease_timeout, worker_id, lease_timeout)
+    end
+    if heartbeat_interval == '' then
+        redis.call('HDEL', worker_heartbeat_interval, worker_id)
+    else
+        redis.call('HSET', worker_heartbeat_interval, worker_id, heartbeat_interval)
+    end
+end
+
+local current_worker = redis.call('HGET', inflight_workers, task_id)
+local current_lease = redis.call('HGET', inflight_leases, task_id)
+
+if (not current_worker) or (not current_lease) then
+    return 0
+end
+
+if current_worker ~= worker_id then
+    return -1
+end
+
+if current_lease ~= lease_id then
+    return -2
+end
+
+if ((#ARGV - 6) % 3) ~= 0 then
+    return redis.error_reply('ERR invalid complete_and_enqueue task payload')
+end
+
+sync_worker_runtime()
+redis.call('ZREM', inflight_deadlines, task_id)
+redis.call('SREM', inflight, task_id)
+redis.call('SREM', ready, task_id)
+redis.call('ZREM', delayed, task_id)
+redis.call('HDEL', ready_order, task_id)
+redis.call('HDEL', inflight_workers, task_id)
+redis.call('HDEL', inflight_leases, task_id)
+redis.call('HDEL', tasks, task_id)
+
+for index = 7, #ARGV, 3 do
+    local next_task_id = ARGV[index]
+    local task_json = ARGV[index + 1]
+    local ready_at = ARGV[index + 2]
+
+    redis.call('HSET', tasks, next_task_id, task_json)
+    if ready_at == '' then
+        push_ready(next_task_id)
+    else
+        redis.call('ZADD', delayed, ready_at, next_task_id)
+    end
+end
+
+return 1
+"#;
 const SCHEDULER_REQUEUE_SCRIPT: &str = r#"
 -- kun:scheduler:requeue_v4
 local tasks = KEYS[1]
@@ -1105,6 +1193,59 @@ impl Scheduler for Redis {
         ensure_lease_transition("complete", lease, result)
     }
 
+    async fn complete_and_enqueue(
+        &self,
+        lease: &TaskLease,
+        tasks: Vec<Task>,
+    ) -> Result<(), SpiderError> {
+        self.validate_lease_worker(lease)?;
+        let mut guard = self.connection().await?;
+        let connection = self.connection_mut(&mut guard)?;
+        self.sync_scope_metadata(connection).await?;
+        let keys = self.keys();
+        let worker_seen = now().to_string();
+        let lease_timeout = self
+            .lease_timeout_millis()
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        let heartbeat_interval = self
+            .heartbeat_interval_millis()
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        let mut args = vec![
+            lease.task_id().as_str().to_string(),
+            lease.worker_id().to_string(),
+            lease.lease_id().to_string(),
+            worker_seen,
+            lease_timeout,
+            heartbeat_interval,
+        ];
+        args.extend(encode_enqueue_args(&tasks)?);
+        let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+        let result: i64 = scheduler_eval(
+            connection,
+            SCHEDULER_COMPLETE_AND_ENQUEUE_SCRIPT,
+            &[
+                keys.tasks.as_str(),
+                keys.ready.as_str(),
+                keys.ready_order.as_str(),
+                keys.delayed.as_str(),
+                keys.inflight.as_str(),
+                keys.inflight_deadlines.as_str(),
+                keys.inflight_workers.as_str(),
+                keys.inflight_leases.as_str(),
+                keys.sequence.as_str(),
+                keys.workers.as_str(),
+                keys.worker_seen.as_str(),
+                keys.worker_lease_timeout.as_str(),
+                keys.worker_heartbeat_interval.as_str(),
+            ],
+            &arg_refs,
+        )
+        .await?;
+        ensure_lease_transition("complete", lease, result)
+    }
+
     async fn requeue(&self, lease: &TaskLease) -> Result<(), SpiderError> {
         self.validate_lease_worker(lease)?;
         let mut guard = self.connection().await?;
@@ -1280,6 +1421,23 @@ fn default_heartbeat_interval(lease_timeout: u64) -> u64 {
 
 fn signed_duration_from_millis(millis: u64) -> SignedDuration {
     SignedDuration::from_millis(i64::try_from(millis).unwrap_or(i64::MAX))
+}
+
+fn encode_enqueue_args(tasks: &[Task]) -> Result<Vec<String>, SpiderError> {
+    let mut args = Vec::with_capacity(tasks.len() * 3);
+    for task in tasks {
+        let task_json = serde_json::to_string(task).map_err(|error| {
+            SpiderError::scheduler(format!("failed to encode redis scheduler task: {error}"))
+        })?;
+        let ready_at = task
+            .ready_at
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        args.push(task.id.as_str().to_string());
+        args.push(task_json);
+        args.push(ready_at);
+    }
+    Ok(args)
 }
 
 fn next_worker_id() -> String {
@@ -2331,6 +2489,52 @@ mod tests {
         worker_a.close().await.unwrap();
         worker_b.close().await.unwrap();
         observer.close().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn redis_scheduler_complete_and_enqueue_moves_follow_tasks_atomically() {
+        let (url, _commands_rx, server_handle) = spawn_redis_server().await;
+        let namespace = "complete_and_enqueue";
+        let scheduler = Redis::new(format!("redis://{url}"), namespace).with_worker(
+            Worker::new("worker-a").with_lease_timeout(SignedDuration::from_millis(50)),
+        );
+        scheduler
+            .enqueue(Task::new(Request::new("https://example.com/current")))
+            .await
+            .unwrap();
+        let claimed = scheduler.take_ready().await.unwrap().unwrap();
+        let ready_follow = Task::new(Request::new("https://example.com/follow-ready"));
+        let delayed_follow =
+            Task::with_delay(Request::new("https://example.com/follow-delayed"), 60);
+
+        scheduler
+            .complete_and_enqueue(
+                &claimed.lease,
+                vec![ready_follow.clone(), delayed_follow.clone()],
+            )
+            .await
+            .unwrap();
+
+        let checkpoint = scheduler.checkpoint().await.unwrap();
+        assert_eq!(checkpoint.ready.len(), 1);
+        assert_eq!(checkpoint.ready[0].id, ready_follow.id);
+        assert_eq!(checkpoint.delayed.len(), 1);
+        assert_eq!(checkpoint.delayed[0].id, delayed_follow.id);
+        assert!(checkpoint.inflight.is_empty());
+
+        let ready_claim = scheduler.take_ready().await.unwrap().unwrap();
+        assert_eq!(ready_claim.task.id, ready_follow.id);
+        scheduler.complete(&ready_claim.lease).await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::try_from(SignedDuration::from_millis(80)).unwrap())
+            .await;
+
+        let delayed_claim = scheduler.take_ready().await.unwrap().unwrap();
+        assert_eq!(delayed_claim.task.id, delayed_follow.id);
+        scheduler.complete(&delayed_claim.lease).await.unwrap();
+
+        scheduler.close().await.unwrap();
         server_handle.await.unwrap().unwrap();
     }
 

@@ -77,6 +77,22 @@ pub trait Scheduler: Send + Sync {
     /// Marks an inflight task as completed and removes it from the scheduler.
     async fn complete(&self, lease: &TaskLease) -> Result<(), SpiderError>;
 
+    /// Atomically completes one inflight task and enqueues follow-up tasks
+    /// back into the scheduler when the backend supports it.
+    ///
+    /// The default implementation falls back to enqueueing tasks first and
+    /// then completing the lease.
+    async fn complete_and_enqueue(
+        &self,
+        lease: &TaskLease,
+        tasks: Vec<Task>,
+    ) -> Result<(), SpiderError> {
+        for task in tasks {
+            self.enqueue(task).await?;
+        }
+        self.complete(lease).await
+    }
+
     /// Marks an inflight task as not completed and requeues it for later work.
     async fn requeue(&self, lease: &TaskLease) -> Result<(), SpiderError>;
 

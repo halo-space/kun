@@ -86,6 +86,15 @@ where
         self.save_checkpoint().await
     }
 
+    async fn complete_and_enqueue(
+        &self,
+        lease: &TaskLease,
+        tasks: Vec<Task>,
+    ) -> Result<(), SpiderError> {
+        self.scheduler.complete_and_enqueue(lease, tasks).await?;
+        self.save_checkpoint().await
+    }
+
     async fn requeue(&self, lease: &TaskLease) -> Result<(), SpiderError> {
         self.scheduler.requeue(lease).await?;
         self.save_checkpoint().await
@@ -182,6 +191,31 @@ mod tests {
         assert_eq!(checkpoint.ready.len(), 1);
         assert!(checkpoint.inflight.is_empty());
         assert_eq!(checkpoint.ready[0].id, taken.task.id);
+
+        tokio::fs::remove_file(path).await.ok();
+    }
+
+    #[tokio::test]
+    async fn checkpoint_memory_persists_complete_and_enqueue() {
+        let path = unique_path("complete_and_enqueue");
+        let scheduler = Memory::load(File::new(path.clone())).await.unwrap();
+
+        scheduler
+            .enqueue(Task::new(Request::new("https://example.com/current")))
+            .await
+            .unwrap();
+        let taken = scheduler.take_ready().await.unwrap().unwrap();
+        let follow = Task::new(Request::new("https://example.com/follow"));
+
+        scheduler
+            .complete_and_enqueue(&taken.lease, vec![follow.clone()])
+            .await
+            .unwrap();
+
+        let checkpoint = File::new(path.clone()).load().await.unwrap();
+        assert_eq!(checkpoint.ready.len(), 1);
+        assert_eq!(checkpoint.ready[0].id, follow.id);
+        assert!(checkpoint.inflight.is_empty());
 
         tokio::fs::remove_file(path).await.ok();
     }
