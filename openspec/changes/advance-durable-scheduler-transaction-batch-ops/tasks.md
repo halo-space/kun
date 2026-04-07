@@ -13,13 +13,13 @@
 - [x] 2.3 为 `scheduler::Redis` 实现 batch API，并补单元测试 / 契约测试。
 - [x] 2.4 评估 engine 主循环是否需要接入 batch claim 路径，并补最小接线。
 
-## 3. 跨 Job 运维控制面
+## 3. 跨 Job 运维控制
 
-- [ ] 3.1 定义统一的跨 job 运维入口，明确哪些是读接口，哪些是控制动作。
-- [ ] 3.2 实现最小控制动作，并保证 `Memory / Redis / 后续后端` 可以沿同一抽象扩展。
-- [ ] 3.3 补 `docs/distributed_scheduler.md` 与 `examples/custom_scheduler.rs` 示例，给出真实操作方式。
+- [x] 3.1 定义统一的跨 job 运维入口，明确哪些是读接口，哪些是控制动作。
+- [x] 3.2 实现最小控制动作，并保证 `Memory / Redis / 后续后端` 可以沿同一抽象扩展。
+- [x] 3.3 补 `docs/distributed_scheduler.md` 与 `examples/custom_scheduler.rs` 示例，给出真实操作方式。
 
 ## 4. 文档与收口
 
-- [ ] 4.1 同步 `openspec/specs/runtime-engine/spec.md`、`README.md`、`docs/capabilities.md`。
-- [ ] 4.2 完成实现后运行相关 `cargo test` 与 `cargo check --examples`。
+- [x] 4.1 同步 `openspec/specs/runtime-engine/spec.md`、`README.md`、`docs/capabilities.md`。
+- [x] 4.2 完成实现后运行相关 `cargo test` 与 `cargo check --examples`。

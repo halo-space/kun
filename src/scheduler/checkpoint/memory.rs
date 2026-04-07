@@ -1,6 +1,7 @@
 use crate::error::SpiderError;
 use crate::scheduler::checkpoint::File;
 use crate::scheduler::checkpoint::{Checkpoint, Counts, Persist};
+use crate::scheduler::control::Control;
 use crate::scheduler::memory::Memory as CoreMemory;
 use crate::scheduler::runtime::RuntimeEvent;
 use crate::scheduler::{ClaimedTask, Scheduler, Snapshot, Task, TaskLease};
@@ -129,10 +130,40 @@ where
     }
 }
 
+impl<P> Control for Memory<P>
+where
+    P: Persist,
+{
+    async fn pause_scope(&self, scope: &str) -> Result<bool, SpiderError> {
+        let changed = self.scheduler.pause_scope(scope).await?;
+        self.save_checkpoint().await?;
+        Ok(changed)
+    }
+
+    async fn resume_scope(&self, scope: &str) -> Result<bool, SpiderError> {
+        let changed = self.scheduler.resume_scope(scope).await?;
+        self.save_checkpoint().await?;
+        Ok(changed)
+    }
+
+    async fn release_scope(&self, scope: &str) -> Result<usize, SpiderError> {
+        let released = self.scheduler.release_scope(scope).await?;
+        self.save_checkpoint().await?;
+        Ok(released)
+    }
+
+    async fn purge_scope(&self, scope: &str) -> Result<Counts, SpiderError> {
+        let removed = self.scheduler.purge_scope(scope).await?;
+        self.save_checkpoint().await?;
+        Ok(removed)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::request::Request;
+    use crate::scheduler::Control;
     use crate::scheduler::checkpoint::File;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -252,6 +283,58 @@ mod tests {
         assert_eq!(scheduler.counts().inflight, 1);
         assert!(scheduler.take_ready().await.unwrap().is_none());
         assert_eq!(scheduler.checkpoint().inflight[0].id, inflight.id);
+
+        tokio::fs::remove_file(path).await.ok();
+    }
+
+    #[tokio::test]
+    async fn checkpoint_memory_persists_release_and_purge_scope() {
+        let path = unique_path("control_scope");
+        let scheduler = Memory::load(File::new(path.clone())).await.unwrap();
+
+        scheduler
+            .enqueue(Task::new(Request::new("https://example.com/control-ready")))
+            .await
+            .unwrap();
+        scheduler
+            .enqueue(Task::with_delay(
+                Request::new("https://example.com/control-delayed"),
+                500,
+            ))
+            .await
+            .unwrap();
+        let _claimed = scheduler.take_ready().await.unwrap().unwrap();
+
+        assert_eq!(
+            scheduler
+                .release_scope(scheduler.scheduler.scope())
+                .await
+                .unwrap(),
+            1
+        );
+
+        let checkpoint = File::new(path.clone()).load().await.unwrap();
+        assert_eq!(checkpoint.ready.len(), 1);
+        assert_eq!(checkpoint.delayed.len(), 1);
+        assert!(checkpoint.inflight.is_empty());
+
+        let removed = scheduler
+            .purge_scope(scheduler.scheduler.scope())
+            .await
+            .unwrap();
+        assert_eq!(
+            removed,
+            Counts {
+                ready: 1,
+                delayed: 1,
+                inflight: 0,
+            }
+        );
+
+        let checkpoint = File::new(path.clone()).load().await.unwrap();
+        assert!(checkpoint.ready.is_empty());
+        assert!(checkpoint.delayed.is_empty());
+        assert!(checkpoint.inflight.is_empty());
 
         tokio::fs::remove_file(path).await.ok();
     }

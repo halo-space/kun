@@ -1,6 +1,7 @@
 use crate::error::SpiderError;
 use crate::redis::{Connection, ErrorContext, connect, query, validate_url};
 use crate::scheduler::checkpoint::{Checkpoint, Counts};
+use crate::scheduler::control::Control;
 use crate::scheduler::runtime::RuntimeEvent;
 use crate::scheduler::snapshot::{InflightTaskSnapshot, Snapshot, WorkerSnapshot};
 use crate::scheduler::{ClaimedTask, Scheduler, Task, TaskId, TaskLease, TaskResolution, Worker};
@@ -18,6 +19,7 @@ static NEXT_LEASE_ID: AtomicU64 = AtomicU64::new(1);
 const SCHEDULER_NAMESPACE_REGISTRY_KEY: &str = "kun:scheduler:namespaces:v1";
 const META_LEASE_TIMEOUT: &str = "lease_timeout";
 const META_HEARTBEAT_INTERVAL: &str = "heartbeat_interval";
+const META_PAUSED: &str = "paused";
 const SCHEDULER_ENQUEUE_SCRIPT: &str = r#"
 -- kun:scheduler:enqueue_v1
 local tasks = KEYS[1]
@@ -121,7 +123,7 @@ end
 return reclaimed
 "#;
 const SCHEDULER_CLAIM_READY_SCRIPT: &str = r#"
--- kun:scheduler:claim_ready_v3
+-- kun:scheduler:claim_ready_v4
 local tasks = KEYS[1]
 local ready = KEYS[2]
 local ready_order = KEYS[3]
@@ -136,6 +138,7 @@ local workers = KEYS[11]
 local worker_seen = KEYS[12]
 local worker_lease_timeout = KEYS[13]
 local worker_heartbeat_interval = KEYS[14]
+local meta = KEYS[15]
 
 local now = tonumber(ARGV[1])
 local lease_timeout = ARGV[2]
@@ -192,6 +195,15 @@ for _, task_id in ipairs(delayed_ids) do
             push_ready(task_id)
         end
     end
+end
+
+local paused = redis.call('HGET', meta, 'paused')
+if paused == '1' then
+    local known_worker = redis.call('HGET', worker_seen, worker_id)
+    if known_worker then
+        sync_worker_runtime()
+    end
+    return nil
 end
 
 local best_task_id = nil
@@ -606,6 +618,103 @@ end
 
 return released
 "#;
+const SCHEDULER_RELEASE_SCOPE_SCRIPT: &str = r#"
+-- kun:scheduler:release_scope_v1
+local tasks = KEYS[1]
+local ready = KEYS[2]
+local ready_order = KEYS[3]
+local delayed = KEYS[4]
+local inflight = KEYS[5]
+local inflight_deadlines = KEYS[6]
+local inflight_workers = KEYS[7]
+local inflight_leases = KEYS[8]
+local sequence = KEYS[9]
+local workers = KEYS[10]
+local worker_seen = KEYS[11]
+local worker_lease_timeout = KEYS[12]
+local worker_heartbeat_interval = KEYS[13]
+
+local now = tonumber(ARGV[1])
+local released = 0
+
+local function push_ready(id)
+    local next_ready_order = redis.call('INCR', sequence)
+    redis.call('SADD', ready, id)
+    redis.call('HSET', ready_order, id, tostring(next_ready_order))
+end
+
+local function route_task(id, task_json)
+    local ok, task = pcall(cjson.decode, task_json)
+    if not ok then
+        return
+    end
+
+    local ready_at = task['ready_at']
+    if (not ready_at) or tonumber(ready_at) <= now then
+        push_ready(id)
+    else
+        redis.call('ZADD', delayed, tostring(ready_at), id)
+    end
+end
+
+local task_ids = redis.call('SMEMBERS', inflight)
+for _, task_id in ipairs(task_ids) do
+    local task_json = redis.call('HGET', tasks, task_id)
+    local removed = redis.call('SREM', inflight, task_id)
+    redis.call('ZREM', inflight_deadlines, task_id)
+    redis.call('HDEL', inflight_workers, task_id)
+    redis.call('HDEL', inflight_leases, task_id)
+    if removed > 0 and task_json then
+        route_task(task_id, task_json)
+        released = released + 1
+    end
+end
+
+redis.call('DEL', workers, worker_seen, worker_lease_timeout, worker_heartbeat_interval)
+
+return released
+"#;
+const SCHEDULER_PURGE_SCOPE_SCRIPT: &str = r#"
+-- kun:scheduler:purge_scope_v1
+local tasks = KEYS[1]
+local ready = KEYS[2]
+local ready_order = KEYS[3]
+local delayed = KEYS[4]
+local inflight = KEYS[5]
+local inflight_deadlines = KEYS[6]
+local inflight_workers = KEYS[7]
+local inflight_leases = KEYS[8]
+local sequence = KEYS[9]
+local reclaimed_total = KEYS[10]
+local workers = KEYS[11]
+local worker_seen = KEYS[12]
+local worker_lease_timeout = KEYS[13]
+local worker_heartbeat_interval = KEYS[14]
+
+local ready_count = redis.call('SCARD', ready)
+local delayed_count = redis.call('ZCARD', delayed)
+local inflight_count = redis.call('SCARD', inflight)
+
+redis.call(
+    'DEL',
+    tasks,
+    ready,
+    ready_order,
+    delayed,
+    inflight,
+    inflight_deadlines,
+    inflight_workers,
+    inflight_leases,
+    sequence,
+    reclaimed_total,
+    workers,
+    worker_seen,
+    worker_lease_timeout,
+    worker_heartbeat_interval
+)
+
+return {ready_count, delayed_count, inflight_count}
+"#;
 
 #[derive(Debug, Clone)]
 /// Redis-backed durable scheduler.
@@ -919,15 +1028,7 @@ impl Redis {
         &self,
         connection: &mut Connection,
     ) -> Result<(), SpiderError> {
-        let _: i64 = scheduler_query(
-            connection,
-            redis_command(
-                "SADD",
-                [SCHEDULER_NAMESPACE_REGISTRY_KEY, self.namespace.as_str()],
-            ),
-        )
-        .await?;
-        Ok(())
+        register_namespace(connection, self.namespace.as_str()).await
     }
 
     async fn sync_scope_metadata(&self, connection: &mut Connection) -> Result<(), SpiderError> {
@@ -948,6 +1049,32 @@ impl Redis {
             self.heartbeat_interval_millis(),
         )
         .await
+    }
+
+    async fn ensure_control_scope(
+        &self,
+        connection: &mut Connection,
+        scope: &str,
+    ) -> Result<Keys, SpiderError> {
+        if scope.trim().is_empty() {
+            return Err(SpiderError::scheduler(
+                "scheduler control scope cannot be empty",
+            ));
+        }
+
+        if scope == self.scope() {
+            self.sync_scope_metadata(connection).await?;
+            return Ok(Keys::for_namespace(scope));
+        }
+
+        let scopes = load_registry_namespaces(connection, "").await?;
+        if scopes.iter().any(|visible| visible == scope) {
+            Ok(Keys::for_namespace(scope))
+        } else {
+            Err(SpiderError::scheduler(format!(
+                "scheduler scope `{scope}` is not visible from current backend"
+            )))
+        }
     }
 
     async fn take_ready_internal(
@@ -983,6 +1110,7 @@ impl Redis {
                 keys.worker_seen.as_str(),
                 keys.worker_lease_timeout.as_str(),
                 keys.worker_heartbeat_interval.as_str(),
+                keys.meta.as_str(),
             ],
             &[
                 now.as_str(),
@@ -1289,7 +1417,8 @@ impl Scheduler for Redis {
         let mut guard = self.connection().await?;
         let connection = self.connection_mut(&mut guard)?;
         self.sync_scope_metadata(connection).await?;
-        self.complete_and_enqueue_internal(connection, lease, &tasks).await
+        self.complete_and_enqueue_internal(connection, lease, &tasks)
+            .await
     }
 
     async fn complete_and_enqueue_batch(
@@ -1408,6 +1537,118 @@ impl Scheduler for Redis {
     }
 }
 
+impl Control for Redis {
+    async fn pause_scope(&self, scope: &str) -> Result<bool, SpiderError> {
+        let mut guard = self.connection().await?;
+        let connection = self.connection_mut(&mut guard)?;
+        let keys = self.ensure_control_scope(connection, scope).await?;
+        let paused = parse_optional_meta_bool(
+            scope,
+            META_PAUSED,
+            scheduler_query(connection, redis_command("HGET", [&keys.meta, META_PAUSED])).await?,
+        )?
+        .unwrap_or(false);
+        let _: i64 = scheduler_query(
+            connection,
+            redis_command("HSET", [&keys.meta, META_PAUSED, "1"]),
+        )
+        .await?;
+        Ok(!paused)
+    }
+
+    async fn resume_scope(&self, scope: &str) -> Result<bool, SpiderError> {
+        let mut guard = self.connection().await?;
+        let connection = self.connection_mut(&mut guard)?;
+        let keys = self.ensure_control_scope(connection, scope).await?;
+        let paused = parse_optional_meta_bool(
+            scope,
+            META_PAUSED,
+            scheduler_query(connection, redis_command("HGET", [&keys.meta, META_PAUSED])).await?,
+        )?
+        .unwrap_or(false);
+        let _: i64 =
+            scheduler_query(connection, redis_command("HDEL", [&keys.meta, META_PAUSED])).await?;
+        Ok(paused)
+    }
+
+    async fn release_scope(&self, scope: &str) -> Result<usize, SpiderError> {
+        let mut guard = self.connection().await?;
+        let connection = self.connection_mut(&mut guard)?;
+        let keys = self.ensure_control_scope(connection, scope).await?;
+        let current_time = now().to_string();
+        let released: i64 = scheduler_eval(
+            connection,
+            SCHEDULER_RELEASE_SCOPE_SCRIPT,
+            &[
+                keys.tasks.as_str(),
+                keys.ready.as_str(),
+                keys.ready_order.as_str(),
+                keys.delayed.as_str(),
+                keys.inflight.as_str(),
+                keys.inflight_deadlines.as_str(),
+                keys.inflight_workers.as_str(),
+                keys.inflight_leases.as_str(),
+                keys.sequence.as_str(),
+                keys.workers.as_str(),
+                keys.worker_seen.as_str(),
+                keys.worker_lease_timeout.as_str(),
+                keys.worker_heartbeat_interval.as_str(),
+            ],
+            &[current_time.as_str()],
+        )
+        .await?;
+        let released = usize::try_from(released).unwrap_or_default();
+        if released > 0 {
+            self.push_runtime_event(RuntimeEvent::released(
+                Some(scope.to_string()),
+                None,
+                released,
+            ));
+        }
+        Ok(released)
+    }
+
+    async fn purge_scope(&self, scope: &str) -> Result<Counts, SpiderError> {
+        let mut guard = self.connection().await?;
+        let connection = self.connection_mut(&mut guard)?;
+        let keys = self.ensure_control_scope(connection, scope).await?;
+        let removed: Vec<i64> = scheduler_eval(
+            connection,
+            SCHEDULER_PURGE_SCOPE_SCRIPT,
+            &[
+                keys.tasks.as_str(),
+                keys.ready.as_str(),
+                keys.ready_order.as_str(),
+                keys.delayed.as_str(),
+                keys.inflight.as_str(),
+                keys.inflight_deadlines.as_str(),
+                keys.inflight_workers.as_str(),
+                keys.inflight_leases.as_str(),
+                keys.sequence.as_str(),
+                keys.reclaimed_total.as_str(),
+                keys.workers.as_str(),
+                keys.worker_seen.as_str(),
+                keys.worker_lease_timeout.as_str(),
+                keys.worker_heartbeat_interval.as_str(),
+            ],
+            &[],
+        )
+        .await?;
+
+        if removed.len() != 3 {
+            return Err(SpiderError::scheduler(
+                "redis scheduler purge scope script returned invalid counts payload",
+            ));
+        }
+
+        Ok(Counts {
+            ready: usize::try_from(removed[0]).unwrap_or_default(),
+            delayed: usize::try_from(removed[1]).unwrap_or_default(),
+            inflight: usize::try_from(removed[2]).unwrap_or_default(),
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 struct Keys {
     tasks: String,
@@ -1517,6 +1758,7 @@ impl Keys {
 
 #[derive(Debug, Clone, Copy, Default)]
 struct NamespaceMeta {
+    paused: bool,
     lease_timeout: Option<u64>,
     heartbeat_interval: Option<u64>,
 }
@@ -1734,6 +1976,18 @@ async fn load_registry_namespaces(
     Ok(namespaces)
 }
 
+async fn register_namespace(
+    connection: &mut Connection,
+    namespace: &str,
+) -> Result<(), SpiderError> {
+    let _: i64 = scheduler_query(
+        connection,
+        redis_command("SADD", [SCHEDULER_NAMESPACE_REGISTRY_KEY, namespace]),
+    )
+    .await?;
+    Ok(())
+}
+
 async fn sync_namespace_meta_field(
     connection: &mut Connection,
     meta_key: &str,
@@ -1793,6 +2047,12 @@ async fn load_namespace_meta(
     namespace: &str,
 ) -> Result<NamespaceMeta, SpiderError> {
     let keys = Keys::for_namespace(namespace);
+    let paused = parse_optional_meta_bool(
+        namespace,
+        META_PAUSED,
+        scheduler_query(connection, redis_command("HGET", [&keys.meta, META_PAUSED])).await?,
+    )?
+    .unwrap_or(false);
     let lease_timeout = parse_optional_meta_u64(
         namespace,
         META_LEASE_TIMEOUT,
@@ -1813,6 +2073,7 @@ async fn load_namespace_meta(
     )?;
 
     Ok(NamespaceMeta {
+        paused,
         lease_timeout,
         heartbeat_interval: heartbeat_interval
             .or_else(|| lease_timeout.map(default_heartbeat_interval)),
@@ -1836,6 +2097,27 @@ fn parse_optional_meta_u64(
             "redis scheduler metadata `{field}` for namespace `{namespace}` is invalid: {error}"
         ))
     })
+}
+
+fn parse_optional_meta_bool(
+    namespace: &str,
+    field: &str,
+    value: Option<String>,
+) -> Result<Option<bool>, SpiderError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    if value.is_empty() {
+        return Ok(None);
+    }
+
+    match value.as_str() {
+        "1" | "true" => Ok(Some(true)),
+        "0" | "false" => Ok(Some(false)),
+        _ => Err(SpiderError::scheduler(format!(
+            "redis scheduler metadata `{field}` for namespace `{namespace}` is invalid: expected boolean-like value, got `{value}`"
+        ))),
+    }
 }
 
 async fn reclaim_expired_inflight_for_keys(
@@ -2113,6 +2395,7 @@ async fn read_scope_snapshot(
 
     Ok(Snapshot {
         scope: namespace.to_string(),
+        is_paused: meta.paused,
         counts: Counts {
             ready,
             delayed,
@@ -2538,6 +2821,7 @@ mod tests {
         let snapshot = scheduler.snapshot().await.unwrap();
 
         assert_eq!(snapshot.scope, "snapshot");
+        assert!(!snapshot.is_paused);
         assert_eq!(
             snapshot.counts,
             Counts {
@@ -2979,6 +3263,7 @@ mod tests {
             .iter()
             .find(|snapshot| snapshot.scope == "jobs:news")
             .unwrap();
+        assert!(!news_snapshot.is_paused);
         assert_eq!(
             news_snapshot.counts,
             Counts {
@@ -3017,6 +3302,7 @@ mod tests {
             .iter()
             .find(|snapshot| snapshot.scope == "jobs:blog")
             .unwrap();
+        assert!(!blog_snapshot.is_paused);
         assert_eq!(
             blog_snapshot.counts,
             Counts {
@@ -3040,6 +3326,7 @@ mod tests {
         let overview = news.overview().await.unwrap();
         assert_eq!(overview.scope_count, 2);
         assert_eq!(overview.pending_scope_count, 2);
+        assert_eq!(overview.paused_scope_count, 0);
         assert_eq!(overview.stale_scope_count, 0);
         assert_eq!(
             overview.counts,
@@ -3057,6 +3344,7 @@ mod tests {
         let blog_overview = news.overview_with_prefix("jobs:blog").await.unwrap();
         assert_eq!(blog_overview.scope_count, 1);
         assert_eq!(blog_overview.pending_scope_count, 1);
+        assert_eq!(blog_overview.paused_scope_count, 0);
         assert_eq!(blog_overview.stale_scope_count, 0);
         assert_eq!(
             blog_overview.counts,
@@ -3074,6 +3362,7 @@ mod tests {
         let no_overview = news.overview_with_prefix("other:").await.unwrap();
         assert_eq!(no_overview.scope_count, 0);
         assert_eq!(no_overview.pending_scope_count, 0);
+        assert_eq!(no_overview.paused_scope_count, 0);
         assert_eq!(no_overview.stale_scope_count, 0);
         assert_eq!(no_overview.counts, Counts::default());
         assert_eq!(no_overview.worker_count, 0);
@@ -3130,6 +3419,157 @@ mod tests {
 
         first.close().await.unwrap();
         second.close().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn redis_scheduler_control_pause_resume_scope_blocks_new_claims() {
+        let (url, _commands_rx, server_handle) = spawn_redis_server().await;
+        let redis_url = format!("redis://{url}");
+
+        let news = Redis::new(redis_url.clone(), "jobs:news-control")
+            .with_worker(Worker::new("news-worker"));
+        news.enqueue(Task::new(Request::new("https://example.com/control")))
+            .await
+            .unwrap();
+
+        let ops = Redis::new(redis_url.clone(), "jobs:ops-control").with_worker(Worker::new("ops"));
+
+        assert!(ops.pause_scope("jobs:news-control").await.unwrap());
+        assert!(!ops.pause_scope("jobs:news-control").await.unwrap());
+        assert!(news.take_ready().await.unwrap().is_none());
+
+        let paused_snapshot = news.snapshot().await.unwrap();
+        assert!(paused_snapshot.is_paused);
+
+        let paused_overview = ops.overview_with_prefix("jobs:").await.unwrap();
+        assert_eq!(paused_overview.paused_scope_count, 1);
+
+        assert!(ops.resume_scope("jobs:news-control").await.unwrap());
+        assert!(!ops.resume_scope("jobs:news-control").await.unwrap());
+
+        let claimed = news.take_ready().await.unwrap().unwrap();
+        assert_eq!(claimed.task.request.url, "https://example.com/control");
+
+        let resumed_snapshot = news.snapshot().await.unwrap();
+        assert!(!resumed_snapshot.is_paused);
+
+        news.complete(&claimed.lease).await.unwrap();
+        news.close().await.unwrap();
+        ops.close().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn redis_scheduler_control_release_scope_requeues_all_inflight_tasks() {
+        let (url, _commands_rx, server_handle) = spawn_redis_server().await;
+        let redis_url = format!("redis://{url}");
+        let namespace = "jobs:release-scope";
+
+        let worker_a =
+            Redis::new(redis_url.clone(), namespace).with_worker(Worker::new("worker-a"));
+        let worker_b =
+            Redis::new(redis_url.clone(), namespace).with_worker(Worker::new("worker-b"));
+        worker_a
+            .enqueue(Task::new(Request::new("https://example.com/release/a")))
+            .await
+            .unwrap();
+        worker_a
+            .enqueue(Task::new(Request::new("https://example.com/release/b")))
+            .await
+            .unwrap();
+
+        let first = worker_a.take_ready().await.unwrap().unwrap();
+        let second = worker_b.take_ready().await.unwrap().unwrap();
+
+        let ops = Redis::new(redis_url.clone(), "jobs:ops-release").with_worker(Worker::new("ops"));
+        assert_eq!(ops.release_scope(namespace).await.unwrap(), 2);
+
+        let snapshot = worker_a.snapshot().await.unwrap();
+        assert_eq!(
+            snapshot.counts,
+            Counts {
+                ready: 2,
+                delayed: 0,
+                inflight: 0,
+            }
+        );
+        assert!(snapshot.workers.is_empty());
+
+        let reclaimed = worker_a.take_batch_ready(2).await.unwrap();
+        assert_eq!(reclaimed.len(), 2);
+        let reclaimed_ids = reclaimed
+            .iter()
+            .map(|task| task.task.id.clone())
+            .collect::<Vec<_>>();
+        assert!(reclaimed_ids.contains(&first.task.id));
+        assert!(reclaimed_ids.contains(&second.task.id));
+
+        worker_a
+            .complete_batch(reclaimed.into_iter().map(|task| task.lease).collect())
+            .await
+            .unwrap();
+        worker_a.close().await.unwrap();
+        worker_b.close().await.unwrap();
+        ops.close().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn redis_scheduler_control_purge_scope_clears_all_tracked_tasks() {
+        let (url, _commands_rx, server_handle) = spawn_redis_server().await;
+        let redis_url = format!("redis://{url}");
+        let namespace = "jobs:purge-scope";
+
+        let worker = Redis::new(redis_url.clone(), namespace).with_worker(Worker::new("worker-a"));
+        worker
+            .enqueue(Task::new(Request::new("https://example.com/purge/ready")))
+            .await
+            .unwrap();
+        worker
+            .enqueue(Task::with_delay(
+                Request::new("https://example.com/purge/delayed"),
+                500,
+            ))
+            .await
+            .unwrap();
+        let _claimed = worker.take_ready().await.unwrap().unwrap();
+
+        let ops = Redis::new(redis_url.clone(), "jobs:ops-purge").with_worker(Worker::new("ops"));
+        let removed = ops.purge_scope(namespace).await.unwrap();
+        assert_eq!(
+            removed,
+            Counts {
+                ready: 0,
+                delayed: 1,
+                inflight: 1,
+            }
+        );
+
+        let snapshot = worker.snapshot().await.unwrap();
+        assert!(!snapshot.is_paused);
+        assert_eq!(snapshot.counts, Counts::default());
+        assert!(snapshot.workers.is_empty());
+
+        worker.close().await.unwrap();
+        ops.close().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn redis_scheduler_control_rejects_unknown_scope() {
+        let (url, _commands_rx, server_handle) = spawn_redis_server().await;
+        let ops = Redis::new(format!("redis://{url}"), "jobs:ops").with_worker(Worker::new("ops"));
+
+        let error = ops.pause_scope("jobs:missing").await.unwrap_err();
+        assert_eq!(
+            error,
+            SpiderError::scheduler(
+                "scheduler scope `jobs:missing` is not visible from current backend"
+            )
+        );
+
+        ops.close().await.unwrap();
         server_handle.await.unwrap().unwrap();
     }
 

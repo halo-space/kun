@@ -8,6 +8,8 @@ pub struct Overview {
     pub scope_count: usize,
     /// Number of scopes that still have ready, delayed, or inflight tasks.
     pub pending_scope_count: usize,
+    /// Number of scopes currently paused for new claims.
+    pub paused_scope_count: usize,
     /// Number of scopes that currently report at least one stale worker.
     pub stale_scope_count: usize,
     /// Aggregate ready / delayed / inflight task counts across all scopes.
@@ -29,6 +31,7 @@ impl Overview {
     {
         let mut scope_count = 0usize;
         let mut pending_scope_count = 0usize;
+        let mut paused_scope_count = 0usize;
         let mut stale_scope_count = 0usize;
         let mut counts = Counts::default();
         let mut worker_count = 0usize;
@@ -40,6 +43,9 @@ impl Overview {
             scope_count += 1;
             if snapshot.counts.has_pending() {
                 pending_scope_count += 1;
+            }
+            if snapshot.is_paused {
+                paused_scope_count += 1;
             }
             if snapshot.workers.iter().any(|worker| worker.is_stale) {
                 stale_scope_count += 1;
@@ -60,6 +66,7 @@ impl Overview {
         Self {
             scope_count,
             pending_scope_count,
+            paused_scope_count,
             stale_scope_count,
             counts,
             worker_count,
@@ -74,6 +81,8 @@ impl Overview {
 pub struct Snapshot {
     /// Logical scheduler scope this runtime snapshot was read from.
     pub scope: String,
+    /// Whether this scope is currently paused for new claims.
+    pub is_paused: bool,
     /// Instantaneous ready / delayed / inflight counts after any refresh work
     /// done for this snapshot.
     pub counts: Counts,

@@ -33,7 +33,7 @@ README 这里只保留总览；模块级细节统一放到 [docs/capabilities.md
 - `download::Browser` 已具备最小可用浏览器下载能力，并支持统一 `Request` 上的 `method` / `body` / `headers` / `timeout` / `proxy` / cookies / `session`
 - `Response.body` 与 `Response.text` 的语义已经明确并统一解码
 - Spider 现在除了 `start_urls()` / `build_start_urls()`，也可以直接覆写 `build_start_requests()` 返回完整 `Request`；默认仍然是把 URL 自动包成 `Request::new(...)`
-- `scheduler::Memory` 与 `scheduler::Redis` 已把任务状态收口为 `ready / delayed / inflight`，并支持 `priority / depth` 排序；其中 `scheduler::Memory` 仍支持 `scheduler::checkpoint::Checkpoint` 导出/恢复，`scheduler::Redis` 也已补最小 `lease_timeout` stale inflight reclaim，把 `enqueue / claim / complete / requeue / reclaim` 这些关键状态迁移收口成 Redis 原子脚本；现在所有 scheduler 后端统一通过 `Scheduler` 暴露 `checkpoint() / counts() / snapshot() / scopes() / snapshots() / overview()` 这组读能力，`Redis` 这类共享后端可以返回多个 scope，本地 `Memory` 则返回当前 scope
+- `scheduler::Memory` 与 `scheduler::Redis` 已把任务状态收口为 `ready / delayed / inflight`，并支持 `priority / depth` 排序；其中 `scheduler::Memory` 仍支持 `scheduler::checkpoint::Checkpoint` 导出/恢复，`scheduler::Redis` 也已补最小 `lease_timeout` stale inflight reclaim，把 `enqueue / claim / complete / requeue / reclaim` 这些关键状态迁移收口成 Redis 原子脚本；现在所有 scheduler 后端统一通过 `Scheduler` 暴露 `checkpoint() / counts() / snapshot() / scopes() / snapshots() / overview()` 这组读能力，并通过 `scheduler::Control` 暴露 `pause_scope() / resume_scope() / release_scope() / purge_scope()` 这组运维控制入口；`Redis` 这类共享后端可以返回/控制多个 scope，本地 `Memory` 则返回/控制当前 scope
 - 已提供 `scheduler::checkpoint::File`、`scheduler::checkpoint::Redis` 与 `scheduler::checkpoint::Memory`，用于文件、Redis 的 scheduler checkpoint 持久化；也已提供直接基于 Redis 的 durable scheduler
 - `dedup` 已从默认 middleware 收口为显式 engine 组件；当前默认使用精确 `dedup::Memory`，也内置可选 `dedup::Bloom`，并可以通过 `Engine::with_dedup(...)` 切换为其它实现
 - `robots` 已提升为显式 engine 组件；当前默认使用 `robots::Memory`，也可以通过 `Engine::with_robots(...)` 切换为其它实现
@@ -52,8 +52,8 @@ README 这里只保留总览；模块级细节统一放到 [docs/capabilities.md
 
 当前仍待补齐的底层能力：
 
-- 观测能力还不完整：虽然已经有细粒度 `stats`、`signals / extensions`、`Engine::with_stats_reporter(...)` 和统一 `telemetry` exporter 边界，也内置了 `telemetry::File`、`telemetry::Prometheus`、`telemetry::OpenTelemetry`，但还没有更完整的持久化事件总线聚合层，以及跨 job 运维控制面。
-- durable scheduler 已经覆盖 worker ownership、heartbeat、stale reclaim、scope snapshot、跨 scope `overview()` 与 worker 运行态运维视图；`store -> scheduler resolve` 的提交边界也已经显式收口，但它不是跨组件分布式事务；当前剩余缺口主要是更强的分布式协调，以及更完整的 exporter / 事件总线 / 自动化运维能力。
+- 观测能力还不完整：虽然已经有细粒度 `stats`、`signals / extensions`、`Engine::with_stats_reporter(...)` 和统一 `telemetry` exporter 边界，也内置了 `telemetry::File`、`telemetry::Prometheus`、`telemetry::OpenTelemetry`，但还没有更完整的持久化事件总线聚合层，以及更高阶的跨 job 运维自动化。
+- durable scheduler 已经覆盖 worker ownership、heartbeat、stale reclaim、scope snapshot、跨 scope `overview()`、统一 `scheduler::Control` 运维动作与 worker 运行态视图；`store -> scheduler resolve` 的提交边界也已经显式收口，但它不是跨组件分布式事务；当前剩余缺口主要是更强的分布式协调，以及更完整的 exporter / 事件总线 / 自动化运维能力。
 - `store` 边界已经建立，但更丰富的文件格式、更高阶消息语义和更多内置外部系统适配还没有继续铺开。
 - browser 已经支持内置 profile、结构化自定义 profile 与显式 `session_reuse`；当前剩余缺口主要是更高阶第三方 stealth 套件与跨 engine 更完整的品牌级指纹伪装。
 - validation 本身已经比较完整，但“校验失败如何映射到 runtime 行为”这层统一策略还没完全收口。
@@ -176,6 +176,7 @@ let settings = Settings::default()
 - `snapshot.inflight_tasks` 会直接带出每条 inflight task 的 `task_id / url / worker_id / lease_id / deadline / priority / depth / ready_at`，运维时不需要再手工回读底层 Redis key
 - `snapshot.workers` 会直接带出每个 worker 的 `last_seen / is_stale / inflight_task_ids / next_deadline / lease_timeout / heartbeat_interval`
 - `scheduler.scopes()` / `scheduler.scopes_with_prefix(...)` / `scheduler.snapshots()` / `scheduler.snapshots_with_prefix(...)` / `scheduler.overview()` / `scheduler.overview_with_prefix(...)` 是统一的 scheduler 运维读入口；像 `scheduler::Redis` 这种共享后端可以返回多个 scope，本地 `scheduler::Memory` 则默认只返回自己这一份 scope
+- `scheduler::Control` 是统一的 scheduler 运维改状态入口；当前提供 `pause_scope()` / `resume_scope()` / `release_scope()` / `purge_scope()`，共享后端可以操作多个可见 scope，本地后端则只操作当前 scope
 - 如果你想给 scheduler 指定稳定的逻辑 worker 身份，或者统一配置 lease / heartbeat 策略，显式传 `scheduler::Worker::new(...)` 给 `.with_worker(...)` 即可；`Memory`、`Redis`、以后其它后端都走同一入口
 - 如果你只想先看聚合后的跨 scope 摘要，优先用 `scheduler.overview()` 或 `scheduler.overview_with_prefix(...)`；它会汇总 `scope_count / pending_scope_count / stale_scope_count / counts / worker_count / active_lease_count / reclaimed_total`
 - 如果你想调整这层恢复窗口、显式指定 worker 身份或 heartbeat 节奏，统一改 `scheduler::Worker::new(...).with_lease_timeout(...).with_heartbeat_interval(...)`；如果你明确不想要这层自动回收，也可以在 `Worker` 上调用 `.without_lease_timeout()`

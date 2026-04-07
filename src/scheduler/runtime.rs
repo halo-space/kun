@@ -1,4 +1,5 @@
 use crate::error::SpiderError;
+use crate::scheduler::control::Control;
 use crate::scheduler::{ClaimedTask, Scheduler, TaskId, TaskLease};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -565,6 +566,46 @@ where
 
     fn drain_runtime_events(&self) -> Vec<RuntimeEvent> {
         self.inner.drain_runtime_events()
+    }
+}
+
+impl<S> Control for Observed<S>
+where
+    S: Control + Scheduler,
+{
+    async fn pause_scope(&self, scope: &str) -> Result<bool, SpiderError> {
+        let result = self.inner.pause_scope(scope).await;
+        if result.is_ok() {
+            self.emit_drained_runtime_events();
+        }
+        result
+    }
+
+    async fn resume_scope(&self, scope: &str) -> Result<bool, SpiderError> {
+        let result = self.inner.resume_scope(scope).await;
+        if result.is_ok() {
+            self.emit_drained_runtime_events();
+        }
+        result
+    }
+
+    async fn release_scope(&self, scope: &str) -> Result<usize, SpiderError> {
+        let result = self.inner.release_scope(scope).await;
+        if result.is_ok() {
+            self.emit_drained_runtime_events();
+        }
+        result
+    }
+
+    async fn purge_scope(
+        &self,
+        scope: &str,
+    ) -> Result<crate::scheduler::checkpoint::Counts, SpiderError> {
+        let result = self.inner.purge_scope(scope).await;
+        if result.is_ok() {
+            self.emit_drained_runtime_events();
+        }
+        result
     }
 }
 

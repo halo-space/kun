@@ -15,7 +15,7 @@ README 负责总览，这里负责把每个模块现在到底能做什么、还�
 
 如果只看“代码爬虫底层能力”这一层，而不看 DSL，当前和 Scrapy 更完整运行时相比，最主要的剩余缺口是：
 
-- 更完整的观测能力：exporter、trace 链路、跨 job 运维视角还没补完
+- 更完整的观测能力：exporter、trace 链路、跨 job 运维自动化还没补完
 - 更强的分布式 scheduler 协调与事务语义还没完全统一
 - browser 已支持结构化 custom profile 与显式 `session_reuse`；当前剩余缺口主要是更高阶 stealth 套件和跨 engine 更完整的指纹伪装
 - plugin 自动装载与 DSL 对齐仍明显落后于底层 runtime 能力
@@ -208,6 +208,7 @@ browser 在这里的角色是“渲染型下载器”，不是另起一套通用
 - 如果 `store` 失败，日志会打出 `engine.commit.store.fail`，并明确标记 `scheduler_resolve=skipped`
 - 如果 `store` 已成功、但后续 `scheduler resolve` 失败，item 仍然已经写出；日志会分别出现 `engine.commit.store.ok` 和 `engine.commit.scheduler_resolve.fail`，这条边界按 at-least-once 理解
 - `scheduler::Scheduler` 现在统一还包含 `checkpoint() / counts() / snapshot() / scopes() / snapshots() / overview()` 这组读能力；共享后端可以返回多个 scope，本地后端则至少返回当前 scope
+- `scheduler::Control` 现在统一包含 `pause_scope() / resume_scope() / release_scope() / purge_scope()` 这组运维控制入口；共享后端可以控制多个可见 scope，本地后端则控制当前 scope
 - `scheduler::Memory` 现在在 active inflight task 上也会带出本地 `worker_id / lease_id`，所以 `snapshot.inflight_tasks`、`snapshot.workers` 与 `overview()` 在本地和共享后端上都是统一形状；`Redis` 额外再承担 stale reclaim、heartbeat 与跨 scope registry
 - `scheduler.snapshot().await?` 可以直接读取当前 scheduler scope 这一刻的运行时快照；对于 `scheduler::Redis` 来说，这个 scope 对应 Redis namespace
 - `snapshot.inflight_tasks` 会直接带出每条 inflight task 的 task id、url、worker、lease、deadline 与 priority/depth 元信息
@@ -384,12 +385,13 @@ let engine = Engine::new().with_dedup(MethodUrlDedup {
 - `Redis` 对 `enqueue / claim / complete / requeue / reclaim / heartbeat` 这些关键迁移已经收口成原子脚本，所以同一个 namespace 上的多 worker 不会再重复 claim 同一条 ready task
 - `Redis` 现在还显式校验 `worker_id + lease_id` ownership；旧 lease 或错误 worker 不能再覆盖当前 inflight owner
 - `Scheduler` 现在统一还承担最小读接口：`checkpoint() / counts() / snapshot() / scopes() / snapshots() / overview()`；`Memory`、`Redis` 以及后续其它后端都走同一套能力形状
+- `Control` 现在统一承担最小运维控制接口：`pause_scope() / resume_scope() / release_scope() / purge_scope()`；`Memory`、`Redis` 以及后续其它后端都走同一套名字
 - `Redis::snapshot()` 现在除了 scope 级计数，也会带出 `snapshot.workers`，直接给出每个 worker 的 `last_seen / is_stale / inflight_task_ids / next_deadline / lease_timeout / heartbeat_interval`
 - `Scheduler::release_inflight()` 现在也属于统一 worker 运维语义：当前 worker 如果准备优雅退出，可以主动把自己手里的 inflight task 放回 `ready / delayed`
 - `snapshot()`、`counts()`、`checkpoint()` 这类只读入口不会把调用方登记成活跃 worker；真正刷新 worker runtime 的只有 `enqueue / take_ready / complete / requeue / heartbeat`
 - `scheduler::checkpoint::Memory` 会在调度状态变化后自动把 checkpoint 保存到共享 `Persist`
 - `checkpoint` 恢复的仍然只是保存时那份静态 `ready / delayed / inflight` 快照，不承担 runtime reclaim
-- 当前 durable scheduler 的最小运行时语义已经完成：除了文件、Redis 两种 checkpoint 持久化，也已经提供直接基于 Redis 的 durable scheduler；当前这层已经覆盖最小 worker ownership、heartbeat、stale reclaim、scope snapshot、worker runtime snapshot、跨 scope 运维读取入口，以及聚合级 `overview()`。
+- 当前 durable scheduler 的最小运行时语义已经完成：除了文件、Redis 两种 checkpoint 持久化，也已经提供直接基于 Redis 的 durable scheduler；当前这层已经覆盖最小 worker ownership、heartbeat、stale reclaim、scope snapshot、worker runtime snapshot、跨 scope 运维读取入口、统一 `Control` 运维动作，以及聚合级 `overview()`。
 
 后续如果补更多 scheduler / checkpoint 后端，也继续是“同一套 trait，不同存储实现”，而不是重写一套新的任务语义。
 

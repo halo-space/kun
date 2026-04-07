@@ -370,6 +370,7 @@ fn handle_eval_command(
     if script.contains("kun:scheduler:claim_ready_v1")
         || script.contains("kun:scheduler:claim_ready_v2")
         || script.contains("kun:scheduler:claim_ready_v3")
+        || script.contains("kun:scheduler:claim_ready_v4")
     {
         return eval_scheduler_claim_ready(state, keys, args);
     }
@@ -398,6 +399,12 @@ fn handle_eval_command(
     }
     if script.contains("kun:scheduler:release_inflight_v1") {
         return eval_scheduler_release_inflight(state, keys, args);
+    }
+    if script.contains("kun:scheduler:release_scope_v1") {
+        return eval_scheduler_release_scope(state, keys, args);
+    }
+    if script.contains("kun:scheduler:purge_scope_v1") {
+        return eval_scheduler_purge_scope(state, keys, args);
     }
 
     Ok(error_reply("ERR unsupported test script"))
@@ -450,13 +457,34 @@ fn eval_scheduler_claim_ready(
     keys: &[String],
     args: &[String],
 ) -> Result<Vec<u8>, std::io::Error> {
-    if keys.len() != 14 || args.len() != 5 {
+    if (keys.len() != 14 && keys.len() != 15) || args.len() != 5 {
         return Ok(error_reply("ERR invalid claim script args"));
     }
 
     let now = args[0].parse::<i64>().map_err(int_error)?;
     reclaim_expired_inflight(state, keys, now)?;
     promote_delayed(state, keys, now)?;
+
+    if keys.len() == 15
+        && state
+            .hashes
+            .get(&keys[14])
+            .and_then(|fields| fields.get("paused"))
+            .is_some_and(|value| value == "1")
+    {
+        let known_worker = state
+            .hashes
+            .get(&keys[11])
+            .and_then(|workers| workers.get(&args[2]))
+            .cloned();
+        if known_worker.is_some() {
+            sync_worker_runtime_meta(
+                state, &keys[10], &keys[11], &keys[12], &keys[13], &args[2], &args[0], &args[1],
+                &args[4],
+            );
+        }
+        return Ok(bulk_reply(None));
+    }
 
     let Some((task_id, task_json)) = choose_best_ready_task(state, &keys[0], &keys[1], &keys[2])?
     else {
@@ -739,6 +767,100 @@ fn eval_scheduler_release_inflight(
     }
 
     Ok(integer_reply(i64::try_from(released).unwrap_or_default()))
+}
+
+fn eval_scheduler_release_scope(
+    state: &mut TestRedisState,
+    keys: &[String],
+    args: &[String],
+) -> Result<Vec<u8>, std::io::Error> {
+    if keys.len() != 13 || args.len() != 1 {
+        return Ok(error_reply("ERR invalid release scope script args"));
+    }
+
+    let now = args[0].parse::<i64>().map_err(int_error)?;
+    let task_ids = state
+        .sets
+        .get(&keys[4])
+        .map(|members| members.iter().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+
+    let mut released = 0usize;
+    for task_id in task_ids {
+        let task_json = state
+            .hashes
+            .get(&keys[0])
+            .and_then(|tasks| tasks.get(task_id.as_str()))
+            .cloned();
+        let removed = set_remove(state, &keys[4], task_id.as_str());
+        sorted_set_remove(state, &keys[5], task_id.as_str());
+        hash_delete(state, &keys[6], task_id.as_str());
+        hash_delete(state, &keys[7], task_id.as_str());
+
+        let Some(task_json) = task_json else {
+            continue;
+        };
+        if !removed {
+            continue;
+        }
+
+        route_task(
+            state,
+            &keys[1],
+            &keys[2],
+            &keys[3],
+            &keys[8],
+            task_id.as_str(),
+            &task_json,
+            now,
+        )?;
+        released += 1;
+    }
+
+    state.sets.remove(&keys[9]);
+    state.hashes.remove(&keys[10]);
+    state.hashes.remove(&keys[11]);
+    state.hashes.remove(&keys[12]);
+
+    Ok(integer_reply(i64::try_from(released).unwrap_or_default()))
+}
+
+fn eval_scheduler_purge_scope(
+    state: &mut TestRedisState,
+    keys: &[String],
+    args: &[String],
+) -> Result<Vec<u8>, std::io::Error> {
+    if keys.len() != 14 || !args.is_empty() {
+        return Ok(error_reply("ERR invalid purge scope script args"));
+    }
+
+    let ready_count = state.sets.get(&keys[1]).map_or(0usize, BTreeSet::len);
+    let delayed_count = state
+        .sorted_sets
+        .get(&keys[3])
+        .map_or(0usize, BTreeMap::len);
+    let inflight_count = state.sets.get(&keys[4]).map_or(0usize, BTreeSet::len);
+
+    state.hashes.remove(&keys[0]);
+    state.sets.remove(&keys[1]);
+    state.hashes.remove(&keys[2]);
+    state.sorted_sets.remove(&keys[3]);
+    state.sets.remove(&keys[4]);
+    state.sorted_sets.remove(&keys[5]);
+    state.hashes.remove(&keys[6]);
+    state.hashes.remove(&keys[7]);
+    state.strings.remove(&keys[8]);
+    state.strings.remove(&keys[9]);
+    state.sets.remove(&keys[10]);
+    state.hashes.remove(&keys[11]);
+    state.hashes.remove(&keys[12]);
+    state.hashes.remove(&keys[13]);
+
+    Ok(array_reply(vec![
+        ready_count.to_string(),
+        delayed_count.to_string(),
+        inflight_count.to_string(),
+    ]))
 }
 
 fn reclaim_expired_inflight(

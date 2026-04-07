@@ -46,14 +46,14 @@
 #### Scenario: Control actions are not modeled as batch task resolution
 
 - **WHEN** 调用方需要对 scope、worker 或 job 执行运维动作
-- **THEN** 这些动作通过独立的运维控制面暴露
+- **THEN** 这些动作通过独立的运维控制入口暴露
 - **AND** 它们不与 `take_batch_ready / complete_batch / requeue_batch` 混成同一组接口
 
-### Requirement: Cross-job scheduler control plane is explicit
+### Requirement: Cross-job scheduler control is explicit
 
-系统必须为多 job / 多 scope 的 scheduler 运行提供统一、明确的运维控制面，而不是只提供快照读取。
+系统必须为多 job / 多 scope 的 scheduler 运行提供统一、明确的运维控制入口，而不是只提供快照读取。
 
-#### Scenario: Multiple scopes can be inspected through one control plane
+#### Scenario: Multiple scopes can be inspected through one control interface
 
 - **WHEN** 调用方在同一个 backend 上运行多个 job / scope
 - **THEN** 它可以通过统一入口读取 scopes、overview、workers 等跨 job 视图

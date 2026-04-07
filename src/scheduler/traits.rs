@@ -13,7 +13,8 @@ use jiff::SignedDuration;
 ///
 /// It also exposes a unified read surface for scheduler state:
 /// `checkpoint()`, `counts()`, `snapshot()`, `scopes()`, `snapshots()`, and
-/// `overview()`.
+/// `overview()`. Mutable operations such as `pause / resume / release / purge`
+/// live on the separate `scheduler::Control` trait.
 pub trait Scheduler: Send + Sync {
     /// Adds a task into the scheduler buckets.
     async fn enqueue(&self, task: Task) -> Result<(), SpiderError>;

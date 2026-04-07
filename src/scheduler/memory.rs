@@ -1,5 +1,6 @@
 use crate::error::{SchedulerError, SpiderError};
 use crate::scheduler::checkpoint::{Checkpoint, Counts};
+use crate::scheduler::control::Control;
 use crate::scheduler::runtime::RuntimeEvent;
 use crate::scheduler::snapshot::{InflightTaskSnapshot, Snapshot, WorkerSnapshot};
 use crate::scheduler::{ClaimedTask, Scheduler, Task, TaskLease, TaskResolution, Worker};
@@ -21,6 +22,7 @@ struct State {
     ready: VecDeque<Task>,
     delayed: Vec<Task>,
     inflight: Vec<InflightEntry>,
+    paused: bool,
     worker_last_seen: Option<Timestamp>,
 }
 
@@ -79,6 +81,7 @@ impl Memory {
                     .into_iter()
                     .map(InflightEntry::inactive)
                     .collect(),
+                paused: false,
                 worker_last_seen: None,
             }),
             runtime_events: Mutex::new(Vec::new()),
@@ -178,6 +181,7 @@ impl Memory {
 
         Ok(Snapshot {
             scope: self.scope.clone(),
+            is_paused: state.paused,
             counts: Counts {
                 ready: state.ready.len(),
                 delayed: state.delayed.len(),
@@ -301,6 +305,9 @@ impl Scheduler for Memory {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.paused {
+            return Ok(None);
+        }
         state.promote_delayed();
 
         let Some(task) = state.ready.pop_front() else {
@@ -328,6 +335,9 @@ impl Scheduler for Memory {
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.paused {
+            return Ok(Vec::new());
+        }
         state.promote_delayed();
 
         let mut claimed = Vec::with_capacity(limit);
@@ -420,15 +430,14 @@ impl Scheduler for Memory {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         for resolution in resolutions {
-            let pos =
-                find_inflight_entry(&state.inflight, resolution.lease.task_id()).ok_or_else(
-                    || {
-                        SpiderError::scheduler(SchedulerError::InactiveLease {
-                            action: "complete",
-                            task_id: resolution.lease.task_id().as_str().to_string(),
-                        })
-                    },
-                )?;
+            let pos = find_inflight_entry(&state.inflight, resolution.lease.task_id()).ok_or_else(
+                || {
+                    SpiderError::scheduler(SchedulerError::InactiveLease {
+                        action: "complete",
+                        task_id: resolution.lease.task_id().as_str().to_string(),
+                    })
+                },
+            )?;
             ensure_memory_lease(
                 "complete",
                 self.worker_id(),
@@ -566,6 +575,75 @@ impl Scheduler for Memory {
     }
 }
 
+impl Control for Memory {
+    async fn pause_scope(&self, scope: &str) -> Result<bool, SpiderError> {
+        ensure_memory_scope(self.scope(), scope)?;
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let changed = !state.paused;
+        state.paused = true;
+        Ok(changed)
+    }
+
+    async fn resume_scope(&self, scope: &str) -> Result<bool, SpiderError> {
+        ensure_memory_scope(self.scope(), scope)?;
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let changed = state.paused;
+        state.paused = false;
+        Ok(changed)
+    }
+
+    async fn release_scope(&self, scope: &str) -> Result<usize, SpiderError> {
+        ensure_memory_scope(self.scope(), scope)?;
+        let released = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let released = state.inflight.len();
+            let inflight = std::mem::take(&mut state.inflight);
+            for entry in inflight {
+                state.push_task(entry.task);
+            }
+            state.reset_worker_if_idle();
+            released
+        };
+
+        if released > 0 {
+            self.push_runtime_event(RuntimeEvent::released(
+                Some(scope.to_string()),
+                None,
+                released,
+            ));
+        }
+
+        Ok(released)
+    }
+
+    async fn purge_scope(&self, scope: &str) -> Result<Counts, SpiderError> {
+        ensure_memory_scope(self.scope(), scope)?;
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let removed = Counts {
+            ready: state.ready.len(),
+            delayed: state.delayed.len(),
+            inflight: state.inflight.len(),
+        };
+        state.ready.clear();
+        state.delayed.clear();
+        state.inflight.clear();
+        state.worker_last_seen = None;
+        Ok(removed)
+    }
+}
+
 fn ready_ordering(left: &Task, right: &Task) -> Ordering {
     right
         .priority
@@ -643,6 +721,16 @@ fn ensure_memory_lease(
     Ok(())
 }
 
+fn ensure_memory_scope(current_scope: &str, scope: &str) -> Result<(), SpiderError> {
+    if scope == current_scope {
+        Ok(())
+    } else {
+        Err(SpiderError::scheduler(format!(
+            "memory scheduler scope `{scope}` is not visible from current scope `{current_scope}`"
+        )))
+    }
+}
+
 fn ready_at_timestamp(scope: &str, task_id: &str, millis: u64) -> Result<Timestamp, SpiderError> {
     let millis = i64::try_from(millis).map_err(|_| {
         SpiderError::scheduler(format!(
@@ -661,7 +749,7 @@ mod tests {
     use super::*;
     use crate::error::{SchedulerError, SpiderError};
     use crate::request::Request;
-    use crate::scheduler::Scheduler;
+    use crate::scheduler::{Control, Scheduler};
     use jiff::SignedDuration;
     use std::future::Future;
     use std::pin::Pin;
@@ -1054,6 +1142,7 @@ mod tests {
         let snapshot = block_on(scheduler.snapshot()).unwrap();
 
         assert_eq!(snapshot.scope, "memory:demo");
+        assert!(!snapshot.is_paused);
         assert_eq!(
             snapshot.counts,
             Counts {
@@ -1132,6 +1221,7 @@ mod tests {
         let overview = block_on(scheduler.overview()).unwrap();
         assert_eq!(overview.scope_count, 1);
         assert_eq!(overview.pending_scope_count, 1);
+        assert_eq!(overview.paused_scope_count, 0);
         assert_eq!(overview.stale_scope_count, 0);
         assert_eq!(
             overview.counts,
@@ -1152,6 +1242,7 @@ mod tests {
         let no_overview = block_on(scheduler.overview_with_prefix("other:")).unwrap();
         assert_eq!(no_overview.scope_count, 0);
         assert_eq!(no_overview.pending_scope_count, 0);
+        assert_eq!(no_overview.paused_scope_count, 0);
         assert_eq!(no_overview.stale_scope_count, 0);
         assert_eq!(no_overview.counts, Counts::default());
         assert_eq!(no_overview.worker_count, 0);
@@ -1228,6 +1319,81 @@ mod tests {
 
         let reclaimed = block_on(scheduler.take_ready()).unwrap().unwrap();
         assert_eq!(reclaimed.task.id, claimed.task.id);
+    }
+
+    #[test]
+    fn memory_scheduler_control_pause_resume_and_release_scope_work() {
+        let scheduler = Memory::default()
+            .with_scope("jobs:memory-control")
+            .with_worker(Worker::new("memory-worker-a"));
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/a")))).unwrap();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/b")))).unwrap();
+
+        assert!(block_on(scheduler.pause_scope("jobs:memory-control")).unwrap());
+        assert!(!block_on(scheduler.pause_scope("jobs:memory-control")).unwrap());
+        assert!(block_on(scheduler.take_ready()).unwrap().is_none());
+
+        let snapshot = block_on(scheduler.snapshot()).unwrap();
+        assert!(snapshot.is_paused);
+
+        let overview = block_on(scheduler.overview()).unwrap();
+        assert_eq!(overview.paused_scope_count, 1);
+
+        assert!(block_on(scheduler.resume_scope("jobs:memory-control")).unwrap());
+        assert!(!block_on(scheduler.resume_scope("jobs:memory-control")).unwrap());
+
+        let claimed = block_on(scheduler.take_batch_ready(2)).unwrap();
+        assert_eq!(claimed.len(), 2);
+
+        let released = block_on(scheduler.release_scope("jobs:memory-control")).unwrap();
+        assert_eq!(released, 2);
+        assert_eq!(
+            scheduler.counts(),
+            Counts {
+                ready: 2,
+                delayed: 0,
+                inflight: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn memory_scheduler_control_purge_scope_clears_all_tracked_tasks() {
+        let scheduler = Memory::default().with_scope("jobs:memory-purge");
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/ready")))).unwrap();
+        block_on(scheduler.enqueue(Task::with_delay(
+            Request::new("https://example.com/delayed"),
+            500,
+        )))
+        .unwrap();
+        let _claimed = block_on(scheduler.take_ready()).unwrap().unwrap();
+
+        let removed = block_on(scheduler.purge_scope("jobs:memory-purge")).unwrap();
+        assert_eq!(
+            removed,
+            Counts {
+                ready: 0,
+                delayed: 1,
+                inflight: 1,
+            }
+        );
+        assert_eq!(scheduler.counts(), Counts::default());
+        let snapshot = block_on(scheduler.snapshot()).unwrap();
+        assert!(!snapshot.is_paused);
+        assert!(snapshot.workers.is_empty());
+    }
+
+    #[test]
+    fn memory_scheduler_control_rejects_other_scope_names() {
+        let scheduler = Memory::default().with_scope("jobs:memory-current");
+
+        let error = block_on(scheduler.pause_scope("jobs:memory-other")).unwrap_err();
+        assert_eq!(
+            error,
+            SpiderError::scheduler(
+                "memory scheduler scope `jobs:memory-other` is not visible from current scope `jobs:memory-current`"
+            )
+        );
     }
 
     #[test]

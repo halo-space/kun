@@ -162,6 +162,62 @@ for snapshot in snapshots {
 - `overview_with_prefix(...)` 底层也是从 `snapshots_with_prefix(...)` 聚合出来的，所以它同样看到的是“这次读取后”的即时状态
 - `snapshots_with_prefix(...)` 读取时会顺带刷新各 scope 的 stale reclaim，所以它看到的是“这次读取后”的即时状态
 
+## 跨 job 运维怎么控制
+
+跨 scope 的可变运维动作不再混在 `Scheduler` 读接口里，而是统一走
+`scheduler::Control`：
+
+```rust
+use halo_spider::scheduler::{self, Control, Scheduler};
+
+let ops = scheduler::Redis::new("redis://127.0.0.1:6379", "jobs:ops")
+    .with_worker(scheduler::Worker::new("ops-worker"));
+
+let scopes = ops.scopes_with_prefix("jobs:").await?;
+println!("visible scopes: {:?}", scopes);
+
+let changed = ops.pause_scope("jobs:news").await?;
+println!("pause changed: {changed}");
+
+let snapshot = ops
+    .snapshots_with_prefix("jobs:")
+    .await?
+    .into_iter()
+    .find(|snapshot| snapshot.scope == "jobs:news")
+    .unwrap();
+println!("news paused: {}", snapshot.is_paused);
+
+let released = ops.release_scope("jobs:news").await?;
+println!("released inflight tasks: {released}");
+
+let removed = ops.purge_scope("jobs:news").await?;
+println!("purged counts: {:?}", removed);
+
+ops.resume_scope("jobs:news").await?;
+```
+
+这组控制动作的语义分别是：
+
+- `pause_scope(scope)`
+  - 只阻止这个 scope 继续 claim 新任务
+  - 不会把现有 inflight 任务直接取消
+- `resume_scope(scope)`
+  - 恢复该 scope 的新任务 claim
+- `release_scope(scope)`
+  - 把这个 scope 当前所有 inflight task 统一放回 `ready / delayed`
+  - 适合人工接管、缩容、故障恢复时快速交回任务
+- `purge_scope(scope)`
+  - 清空这个 scope 当前记录的 `ready / delayed / inflight`
+  - 更像显式清仓，不是日常运行路径
+
+这层也要明确：
+
+- 读入口继续是 `Scheduler`
+- 改状态入口统一是 `Control`
+- 对 `scheduler::Memory`，`Control` 只能控制当前这一个 scope
+- 对 `scheduler::Redis`，`Control` 可以操作当前 backend 里已经可见的其它 scope
+- 这套抽象是后端无关的，后面接 `sqlite` 或其它 backend 也继续走这组名字
+
 ## 怎么看 worker 运行态
 
 `snapshot.workers` 里的每一项都代表一个当前 namespace 下见过的 worker：

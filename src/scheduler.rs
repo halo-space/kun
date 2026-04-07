@@ -1,6 +1,6 @@
 //! Scheduler is split into two layers:
 //!
-//! - core scheduler: [`Memory`], [`Redis`], [`Task`], [`TaskId`], [`Scheduler`]
+//! - core scheduler: [`Memory`], [`Redis`], [`Task`], [`TaskId`], [`Scheduler`], [`Control`]
 //! - checkpoint layer: [`checkpoint`]
 //!
 //! Core schedulers own task lifecycle semantics.
@@ -9,6 +9,7 @@
 //! reclaim, which remain the scheduler's responsibility.
 
 pub mod checkpoint;
+pub mod control;
 pub mod memory;
 pub mod redis;
 pub mod runtime;
@@ -17,6 +18,7 @@ pub mod task;
 pub mod traits;
 pub mod worker;
 
+pub use control::Control;
 pub use memory::Memory;
 pub use redis::Redis;
 pub use runtime::{

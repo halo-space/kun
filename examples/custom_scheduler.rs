@@ -2,7 +2,7 @@ use halo_spider::engine::Engine;
 use halo_spider::error::SpiderError;
 use halo_spider::request::Request;
 use halo_spider::scheduler::checkpoint::{Checkpoint, Persist};
-use halo_spider::scheduler::{self, Scheduler, Task, TaskLease, TaskResolution};
+use halo_spider::scheduler::{self, Control, Scheduler, Task, TaskLease, TaskResolution};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex;
 
@@ -68,6 +68,24 @@ impl Scheduler for RecordingScheduler {
     }
 }
 
+impl Control for RecordingScheduler {
+    async fn pause_scope(&self, scope: &str) -> Result<bool, SpiderError> {
+        self.inner.pause_scope(scope).await
+    }
+
+    async fn resume_scope(&self, scope: &str) -> Result<bool, SpiderError> {
+        self.inner.resume_scope(scope).await
+    }
+
+    async fn release_scope(&self, scope: &str) -> Result<usize, SpiderError> {
+        self.inner.release_scope(scope).await
+    }
+
+    async fn purge_scope(&self, scope: &str) -> Result<scheduler::checkpoint::Counts, SpiderError> {
+        self.inner.purge_scope(scope).await
+    }
+}
+
 /// Custom checkpoint persistence example.
 ///
 /// Real projects can replace this with Redis, S3, a database, or any other
@@ -94,9 +112,11 @@ async fn main() -> Result<(), SpiderError> {
     custom_checkpoint_demo().await?;
     memory_snapshot_demo().await?;
     memory_batch_demo().await?;
+    memory_control_demo().await?;
     memory_scope_overview_demo().await?;
     redis_snapshot_demo().await?;
     redis_batch_demo().await?;
+    redis_control_demo().await?;
     redis_scope_overview_demo().await?;
     Ok(())
 }
@@ -232,6 +252,53 @@ async fn memory_scope_overview_demo() -> Result<(), SpiderError> {
     Ok(())
 }
 
+async fn memory_control_demo() -> Result<(), SpiderError> {
+    println!("== memory scheduler control demo ==");
+
+    let scheduler = scheduler::Memory::default()
+        .with_scope("examples:custom-scheduler:memory-control")
+        .with_worker(scheduler::Worker::new("example-memory-control-worker"));
+    scheduler
+        .enqueue(Task::new(Request::new(
+            "https://example.com/memory-control/ready",
+        )))
+        .await?;
+
+    scheduler
+        .pause_scope("examples:custom-scheduler:memory-control")
+        .await?;
+    println!(
+        "take while paused: {:?}",
+        scheduler
+            .take_ready()
+            .await?
+            .as_ref()
+            .map(|task| task.task.request.url.as_str())
+    );
+
+    scheduler
+        .resume_scope("examples:custom-scheduler:memory-control")
+        .await?;
+    let claimed = scheduler
+        .take_ready()
+        .await?
+        .expect("memory control task should exist");
+    println!("claimed after resume: {}", claimed.task.request.url);
+
+    let released = scheduler
+        .release_scope("examples:custom-scheduler:memory-control")
+        .await?;
+    println!("released via control: {released}");
+
+    let removed = scheduler
+        .purge_scope("examples:custom-scheduler:memory-control")
+        .await?;
+    println!("purged counts: {:?}", removed);
+
+    scheduler.close().await?;
+    Ok(())
+}
+
 async fn memory_batch_demo() -> Result<(), SpiderError> {
     println!("== memory scheduler batch demo ==");
 
@@ -268,7 +335,10 @@ async fn memory_batch_demo() -> Result<(), SpiderError> {
         )])
         .await?;
 
-    println!("counts after batch operations: {:?}", Scheduler::counts(&scheduler).await?);
+    println!(
+        "counts after batch operations: {:?}",
+        Scheduler::counts(&scheduler).await?
+    );
 
     scheduler.close().await?;
     Ok(())
@@ -334,6 +404,52 @@ async fn redis_scope_overview_demo() -> Result<(), SpiderError> {
     Ok(())
 }
 
+async fn redis_control_demo() -> Result<(), SpiderError> {
+    println!("== redis scheduler control demo ==");
+
+    let Ok(url) = std::env::var("HALO_SPIDER_EXAMPLE_REDIS_URL") else {
+        println!(
+            "set HALO_SPIDER_EXAMPLE_REDIS_URL=redis://127.0.0.1:6379 to run the Redis control demo"
+        );
+        return Ok(());
+    };
+
+    let target = "examples:custom-scheduler:control";
+    let worker = scheduler::Redis::new(url.clone(), target)
+        .with_worker(scheduler::Worker::new("example-redis-worker"));
+    worker
+        .enqueue(Task::new(Request::new(
+            "https://example.com/redis-control/ready",
+        )))
+        .await?;
+
+    let ops = scheduler::Redis::new(url, "examples:custom-scheduler:ops-control")
+        .with_worker(scheduler::Worker::new("example-redis-ops"));
+    println!("pause changed: {}", ops.pause_scope(target).await?);
+    println!(
+        "claim while paused: {:?}",
+        worker
+            .take_ready()
+            .await?
+            .as_ref()
+            .map(|task| task.task.request.url.as_str())
+    );
+
+    println!("resume changed: {}", ops.resume_scope(target).await?);
+    let claimed = worker
+        .take_ready()
+        .await?
+        .expect("redis control task should exist");
+    println!("claimed after resume: {}", claimed.task.request.url);
+
+    println!("release_scope count: {}", ops.release_scope(target).await?);
+    println!("purge_scope counts: {:?}", ops.purge_scope(target).await?);
+
+    worker.close().await?;
+    ops.close().await?;
+    Ok(())
+}
+
 async fn redis_batch_demo() -> Result<(), SpiderError> {
     println!("== redis scheduler batch demo ==");
 
@@ -365,7 +481,10 @@ async fn redis_batch_demo() -> Result<(), SpiderError> {
         .requeue_batch(claimed.iter().map(|task| task.lease.clone()).collect())
         .await?;
 
-    println!("redis batch counts: {:?}", Scheduler::counts(&scheduler).await?);
+    println!(
+        "redis batch counts: {:?}",
+        Scheduler::counts(&scheduler).await?
+    );
     scheduler.close().await?;
     Ok(())
 }
