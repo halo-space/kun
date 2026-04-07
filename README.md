@@ -154,6 +154,7 @@ let settings = Settings::default()
 - 如果你只关心 scheduler runtime 流转，可以直接过滤 `signals::Kind::SchedulerEvent`；事件体里会带 `Claimed / Completed / Requeued / Heartbeat / LeaseLost`、`task_id / worker_id / lease_id / url`
 - 如果你想挂语义更清楚的运行时扩展，可以显式用 `.with_extension(...)` 或 `.with_extension_for([...], ...)`；它底层复用同一条 signal bus
 - 如果你想观测 scheduler 后端自己触发的 runtime 事件，比如 `reclaim / release_inflight / close`，可以用 `scheduler::Observed::new(...)` 包一层，再挂 `scheduler::RuntimeReporter`；这层事件统一收口为 `Claimed / Completed / Requeued / Heartbeat / LeaseLost / Reclaimed / Released / Closed`
+- 如果你想先拿内置计数版 scheduler metrics，不急着上 Prometheus，也可以直接用 `scheduler::MetricsReporter::new()`；它会按 `totals / scopes / workers` 聚合 `claimed / completed / requeued / heartbeat / lease_lost / reclaimed / released / closed`
 - `checkpoint` 本身没有单独的 runtime 默认值；只有你显式启用 checkpoint 时，默认内置后端才是 `scheduler::checkpoint::File::default()`，路径是 `output/scheduler-checkpoint.json`
 - 如果你想要“内存调度 + 文件 checkpoint”的便捷组合，可以直接用 `scheduler::checkpoint::Memory::default()`
 - 如果你要从默认 checkpoint 文件恢复到 memory scheduler，使用 `scheduler::checkpoint::Memory::load_default().await?`
@@ -273,7 +274,15 @@ let scheduler = scheduler::Observed::new(
 )
 .with_reporter(my_scheduler_reporter);
 
-// 17. 如果要自定义全部底层组件，用 from_parts(...)
+// 17. 如果想直接拿内置 scheduler metrics，也可以挂 MetricsReporter
+let metrics = scheduler::MetricsReporter::new();
+let scheduler = scheduler::Observed::new(
+    scheduler::Redis::new("redis://127.0.0.1:6379", "kun:scheduler"),
+)
+.with_reporter(metrics.clone());
+let snapshot = metrics.snapshot();
+
+// 18. 如果要自定义全部底层组件，用 from_parts(...)
 let engine = Engine::from_parts(
     scheduler::Redis::new("redis://127.0.0.1:6379", "kun:scheduler"),
     Http::default(),

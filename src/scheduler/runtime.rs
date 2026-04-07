@@ -1,5 +1,6 @@
 use crate::error::SpiderError;
 use crate::scheduler::{ClaimedTask, Scheduler, TaskId, TaskLease};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,14 +94,118 @@ impl RuntimeEvent {
             task_id: None,
             lease_id: None,
             url: None,
-            count: 0,
+            count: 1,
             error: None,
         }
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MetricCounts {
+    pub claimed_total: u64,
+    pub completed_total: u64,
+    pub requeued_total: u64,
+    pub heartbeat_total: u64,
+    pub lease_lost_total: u64,
+    pub reclaimed_total: u64,
+    pub released_total: u64,
+    pub closed_total: u64,
+}
+
+impl MetricCounts {
+    fn record(&mut self, event: &RuntimeEvent) {
+        let delta = u64::try_from(event.count.max(1)).unwrap_or(u64::MAX);
+        match event.kind {
+            RuntimeEventKind::Claimed => {
+                self.claimed_total = self.claimed_total.saturating_add(delta);
+            }
+            RuntimeEventKind::Completed => {
+                self.completed_total = self.completed_total.saturating_add(delta);
+            }
+            RuntimeEventKind::Requeued => {
+                self.requeued_total = self.requeued_total.saturating_add(delta);
+            }
+            RuntimeEventKind::Heartbeat => {
+                self.heartbeat_total = self.heartbeat_total.saturating_add(delta);
+            }
+            RuntimeEventKind::LeaseLost => {
+                self.lease_lost_total = self.lease_lost_total.saturating_add(delta);
+            }
+            RuntimeEventKind::Reclaimed => {
+                self.reclaimed_total = self.reclaimed_total.saturating_add(delta);
+            }
+            RuntimeEventKind::Released => {
+                self.released_total = self.released_total.saturating_add(delta);
+            }
+            RuntimeEventKind::Closed => {
+                self.closed_total = self.closed_total.saturating_add(delta);
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct WorkerMetricsKey {
+    pub scope: Option<String>,
+    pub worker_id: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MetricsSnapshot {
+    pub totals: MetricCounts,
+    pub scopes: BTreeMap<String, MetricCounts>,
+    pub workers: BTreeMap<WorkerMetricsKey, MetricCounts>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MetricsReporter {
+    snapshot: Arc<Mutex<MetricsSnapshot>>,
+}
+
+impl MetricsReporter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn snapshot(&self) -> MetricsSnapshot {
+        self.snapshot
+            .lock()
+            .map(|it| it.clone())
+            .unwrap_or_default()
+    }
+}
+
 pub trait RuntimeReporter: Send + Sync {
     fn report(&self, event: RuntimeEvent);
+}
+
+impl RuntimeReporter for MetricsReporter {
+    fn report(&self, event: RuntimeEvent) {
+        let Ok(mut snapshot) = self.snapshot.lock() else {
+            return;
+        };
+
+        snapshot.totals.record(&event);
+
+        if let Some(scope) = &event.scope {
+            snapshot
+                .scopes
+                .entry(scope.clone())
+                .or_default()
+                .record(&event);
+        }
+
+        if let Some(worker_id) = &event.worker_id {
+            snapshot
+                .workers
+                .entry(WorkerMetricsKey {
+                    scope: event.scope.clone(),
+                    worker_id: worker_id.clone(),
+                })
+                .or_default()
+                .record(&event);
+        }
+    }
 }
 
 pub struct Observed<S> {
@@ -485,6 +590,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn metrics_reporter_aggregates_claim_complete_and_close_counts() {
+        let metrics = MetricsReporter::new();
+        let scheduler = Observed::new(
+            Memory::default()
+                .with_scope("jobs:metrics")
+                .with_worker(Worker::new("metrics-worker")),
+        )
+        .with_reporter(metrics.clone());
+
+        scheduler
+            .enqueue(Task::new(Request::new("https://example.com/metrics")))
+            .await
+            .unwrap();
+        let claimed = scheduler.take_ready().await.unwrap().unwrap();
+        scheduler.complete(&claimed.lease).await.unwrap();
+        scheduler.close().await.unwrap();
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(
+            snapshot.totals,
+            MetricCounts {
+                claimed_total: 1,
+                completed_total: 1,
+                closed_total: 1,
+                ..MetricCounts::default()
+            }
+        );
+        assert_eq!(
+            snapshot.scopes.get("jobs:metrics"),
+            Some(&MetricCounts {
+                claimed_total: 1,
+                completed_total: 1,
+                closed_total: 1,
+                ..MetricCounts::default()
+            })
+        );
+        assert_eq!(
+            snapshot.workers.get(&WorkerMetricsKey {
+                scope: Some("jobs:metrics".to_string()),
+                worker_id: "metrics-worker".to_string(),
+            }),
+            Some(&MetricCounts {
+                claimed_total: 1,
+                completed_total: 1,
+                closed_total: 1,
+                ..MetricCounts::default()
+            })
+        );
+    }
+
+    #[tokio::test]
     async fn memory_scheduler_drains_release_and_close_runtime_events() {
         let scheduler = Memory::default()
             .with_scope("jobs:memory-runtime")
@@ -549,6 +705,60 @@ mod tests {
 
         scheduler.close().await.unwrap();
         server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn metrics_reporter_aggregates_backend_runtime_events() {
+        let metrics = MetricsReporter::new();
+        let scheduler = Observed::new(
+            Memory::default()
+                .with_scope("jobs:backend-metrics")
+                .with_worker(Worker::new("backend-worker")),
+        )
+        .with_reporter(metrics.clone());
+
+        scheduler
+            .enqueue(Task::new(Request::new("https://example.com/backend")))
+            .await
+            .unwrap();
+        let claimed = scheduler.take_ready().await.unwrap().unwrap();
+        assert_eq!(scheduler.release_inflight().await.unwrap(), 1);
+        scheduler.close().await.unwrap();
+
+        let snapshot = metrics.snapshot();
+        assert_eq!(
+            snapshot.totals,
+            MetricCounts {
+                claimed_total: 1,
+                released_total: 1,
+                closed_total: 1,
+                ..MetricCounts::default()
+            }
+        );
+        assert_eq!(
+            snapshot.scopes.get("jobs:backend-metrics"),
+            Some(&MetricCounts {
+                claimed_total: 1,
+                released_total: 1,
+                closed_total: 1,
+                ..MetricCounts::default()
+            })
+        );
+        assert_eq!(
+            snapshot.workers.get(&WorkerMetricsKey {
+                scope: Some("jobs:backend-metrics".to_string()),
+                worker_id: "backend-worker".to_string(),
+            }),
+            Some(&MetricCounts {
+                claimed_total: 1,
+                released_total: 1,
+                closed_total: 1,
+                ..MetricCounts::default()
+            })
+        );
+
+        let reclaimed = scheduler.take_ready().await.unwrap().unwrap();
+        assert_eq!(claimed.task.id, reclaimed.task.id);
     }
 
     #[tokio::test]

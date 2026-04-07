@@ -19,7 +19,10 @@ pub mod worker;
 
 pub use memory::Memory;
 pub use redis::Redis;
-pub use runtime::{Observed, RuntimeEvent, RuntimeEventKind, RuntimeReporter};
+pub use runtime::{
+    MetricCounts, MetricsReporter, MetricsSnapshot, Observed, RuntimeEvent, RuntimeEventKind,
+    RuntimeReporter, WorkerMetricsKey,
+};
 pub use snapshot::{InflightTaskSnapshot, Overview, Snapshot, WorkerSnapshot};
 pub use task::{ClaimedTask, Task, TaskId, TaskLease};
 pub use traits::Scheduler;
