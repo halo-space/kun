@@ -3,6 +3,7 @@ use crate::future::BoxFuture;
 use crate::item::Item;
 use crate::request::Request;
 use crate::response::Response;
+use crate::scheduler::{TaskId, TaskLease};
 use crate::stats::Snapshot as StatsSnapshot;
 use std::sync::{Arc, Mutex};
 
@@ -14,6 +15,7 @@ pub enum Kind {
     ResponseReceived,
     ItemScraped,
     SpiderError,
+    SchedulerEvent,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +55,26 @@ pub struct SpiderErrorSignal {
     pub error: SpiderError,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchedulerEventKind {
+    Claimed,
+    Completed,
+    Requeued,
+    Heartbeat,
+    LeaseLost,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchedulerEvent {
+    pub spider_name: String,
+    pub event: SchedulerEventKind,
+    pub task_id: TaskId,
+    pub worker_id: String,
+    pub lease_id: String,
+    pub url: String,
+    pub error: Option<SpiderError>,
+}
+
 #[derive(Debug, Clone)]
 pub enum Signal {
     SpiderOpened(SpiderOpened),
@@ -61,6 +83,7 @@ pub enum Signal {
     ResponseReceived(ResponseReceived),
     ItemScraped(ItemScraped),
     SpiderError(SpiderErrorSignal),
+    SchedulerEvent(SchedulerEvent),
 }
 
 impl Signal {
@@ -112,6 +135,24 @@ impl Signal {
         })
     }
 
+    pub fn scheduler_event(
+        spider_name: impl Into<String>,
+        event: SchedulerEventKind,
+        lease: &TaskLease,
+        url: impl Into<String>,
+        error: Option<SpiderError>,
+    ) -> Self {
+        Self::SchedulerEvent(SchedulerEvent {
+            spider_name: spider_name.into(),
+            event,
+            task_id: lease.task_id().clone(),
+            worker_id: lease.worker_id().to_string(),
+            lease_id: lease.lease_id().to_string(),
+            url: url.into(),
+            error,
+        })
+    }
+
     pub fn kind(&self) -> Kind {
         match self {
             Self::SpiderOpened(_) => Kind::SpiderOpened,
@@ -120,6 +161,7 @@ impl Signal {
             Self::ResponseReceived(_) => Kind::ResponseReceived,
             Self::ItemScraped(_) => Kind::ItemScraped,
             Self::SpiderError(_) => Kind::SpiderError,
+            Self::SchedulerEvent(_) => Kind::SchedulerEvent,
         }
     }
 
@@ -131,6 +173,7 @@ impl Signal {
             Self::ResponseReceived(signal) => signal.spider_name.as_str(),
             Self::ItemScraped(signal) => signal.spider_name.as_str(),
             Self::SpiderError(signal) => signal.spider_name.as_str(),
+            Self::SchedulerEvent(signal) => signal.spider_name.as_str(),
         }
     }
 }

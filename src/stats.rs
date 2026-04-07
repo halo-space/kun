@@ -20,6 +20,11 @@ pub struct Snapshot {
     pub http_cache_store_count: u64,
     pub http_cache_miss_count: u64,
     pub store_error_count: u64,
+    pub scheduler_claim_count: u64,
+    pub scheduler_complete_count: u64,
+    pub scheduler_requeue_count: u64,
+    pub scheduler_heartbeat_count: u64,
+    pub scheduler_lease_lost_count: u64,
 }
 
 /// Event emitted whenever one runtime stats counter is updated.
@@ -39,6 +44,11 @@ pub enum Event {
     HttpCacheStore,
     HttpCacheMiss,
     StoreError,
+    SchedulerClaim,
+    SchedulerComplete,
+    SchedulerRequeue,
+    SchedulerHeartbeat,
+    SchedulerLeaseLost,
 }
 
 /// Lightweight hook for custom stats reporters or exporters.
@@ -66,6 +76,11 @@ pub(crate) struct Tracker {
     http_cache_store_count: AtomicU64,
     http_cache_miss_count: AtomicU64,
     store_error_count: AtomicU64,
+    scheduler_claim_count: AtomicU64,
+    scheduler_complete_count: AtomicU64,
+    scheduler_requeue_count: AtomicU64,
+    scheduler_heartbeat_count: AtomicU64,
+    scheduler_lease_lost_count: AtomicU64,
     reporters: Mutex<Vec<Arc<dyn Reporter>>>,
 }
 
@@ -101,6 +116,11 @@ impl Tracker {
             http_cache_store_count: self.http_cache_store_count.load(Ordering::Relaxed),
             http_cache_miss_count: self.http_cache_miss_count.load(Ordering::Relaxed),
             store_error_count: self.store_error_count.load(Ordering::Relaxed),
+            scheduler_claim_count: self.scheduler_claim_count.load(Ordering::Relaxed),
+            scheduler_complete_count: self.scheduler_complete_count.load(Ordering::Relaxed),
+            scheduler_requeue_count: self.scheduler_requeue_count.load(Ordering::Relaxed),
+            scheduler_heartbeat_count: self.scheduler_heartbeat_count.load(Ordering::Relaxed),
+            scheduler_lease_lost_count: self.scheduler_lease_lost_count.load(Ordering::Relaxed),
         }
     }
 
@@ -175,6 +195,34 @@ impl Tracker {
         self.notify(Event::StoreError);
     }
 
+    pub(crate) fn record_scheduler_claim(&self) {
+        self.scheduler_claim_count.fetch_add(1, Ordering::Relaxed);
+        self.notify(Event::SchedulerClaim);
+    }
+
+    pub(crate) fn record_scheduler_complete(&self) {
+        self.scheduler_complete_count
+            .fetch_add(1, Ordering::Relaxed);
+        self.notify(Event::SchedulerComplete);
+    }
+
+    pub(crate) fn record_scheduler_requeue(&self) {
+        self.scheduler_requeue_count.fetch_add(1, Ordering::Relaxed);
+        self.notify(Event::SchedulerRequeue);
+    }
+
+    pub(crate) fn record_scheduler_heartbeat(&self) {
+        self.scheduler_heartbeat_count
+            .fetch_add(1, Ordering::Relaxed);
+        self.notify(Event::SchedulerHeartbeat);
+    }
+
+    pub(crate) fn record_scheduler_lease_lost(&self) {
+        self.scheduler_lease_lost_count
+            .fetch_add(1, Ordering::Relaxed);
+        self.notify(Event::SchedulerLeaseLost);
+    }
+
     fn notify(&self, event: Event) {
         let snapshot = self.snapshot();
         let reporters = match self.reporters.lock() {
@@ -215,6 +263,11 @@ mod tests {
         tracker.record_http_cache_store();
         tracker.record_http_cache_miss();
         tracker.record_store_error();
+        tracker.record_scheduler_claim();
+        tracker.record_scheduler_complete();
+        tracker.record_scheduler_requeue();
+        tracker.record_scheduler_heartbeat();
+        tracker.record_scheduler_lease_lost();
 
         assert_eq!(
             tracker.snapshot(),
@@ -227,6 +280,11 @@ mod tests {
                 http_cache_store_count: 1,
                 http_cache_miss_count: 1,
                 store_error_count: 1,
+                scheduler_claim_count: 1,
+                scheduler_complete_count: 1,
+                scheduler_requeue_count: 1,
+                scheduler_heartbeat_count: 1,
+                scheduler_lease_lost_count: 1,
                 ..Snapshot::default()
             }
         );

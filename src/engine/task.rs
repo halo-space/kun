@@ -76,6 +76,34 @@ where
     Ok(Some(task))
 }
 
+pub(super) async fn record_scheduler_event(
+    spider_name: &str,
+    event: crate::signals::SchedulerEventKind,
+    lease: &TaskLease,
+    url: &str,
+    stats: &crate::stats::Tracker,
+    signals: &crate::signals::Bus,
+    error: Option<SpiderError>,
+) {
+    match event {
+        crate::signals::SchedulerEventKind::Claimed => stats.record_scheduler_claim(),
+        crate::signals::SchedulerEventKind::Completed => stats.record_scheduler_complete(),
+        crate::signals::SchedulerEventKind::Requeued => stats.record_scheduler_requeue(),
+        crate::signals::SchedulerEventKind::Heartbeat => stats.record_scheduler_heartbeat(),
+        crate::signals::SchedulerEventKind::LeaseLost => stats.record_scheduler_lease_lost(),
+    }
+
+    signals
+        .emit(crate::signals::Signal::scheduler_event(
+            spider_name,
+            event,
+            lease,
+            url,
+            error,
+        ))
+        .await;
+}
+
 pub(super) async fn apply_task_run<S, D>(
     run: TaskRun,
     scheduler: &S,
@@ -123,10 +151,11 @@ where
             let committed = resolve_scheduler_transition(
                 scheduler.complete_and_enqueue(&lease, follow_tasks),
                 &lease,
-                "complete",
+                crate::signals::SchedulerEventKind::Completed,
                 url.as_str(),
                 spider_name,
                 stats,
+                signals,
             )
             .await?;
             if committed {
@@ -156,10 +185,11 @@ where
             let committed = resolve_scheduler_transition(
                 scheduler.complete_and_enqueue(&lease, retry_tasks),
                 &lease,
-                "complete",
+                crate::signals::SchedulerEventKind::Completed,
                 url.as_str(),
                 spider_name,
                 stats,
+                signals,
             )
             .await?;
             if committed {
@@ -175,10 +205,11 @@ where
             resolve_scheduler_transition(
                 scheduler.complete(&lease),
                 &lease,
-                "complete",
+                crate::signals::SchedulerEventKind::Completed,
                 url.as_str(),
                 spider_name,
                 stats,
+                signals,
             )
             .await?;
         }
@@ -188,10 +219,11 @@ where
             resolve_scheduler_transition(
                 scheduler.requeue(&lease),
                 &lease,
-                "requeue",
+                crate::signals::SchedulerEventKind::Requeued,
                 url.as_str(),
                 spider_name,
                 stats,
+                signals,
             )
             .await?;
         }
@@ -205,6 +237,16 @@ where
                 error = %error,
                 "task lease was lost before completion"
             );
+            record_scheduler_event(
+                spider_name,
+                crate::signals::SchedulerEventKind::LeaseLost,
+                &lease,
+                url.as_str(),
+                stats,
+                signals,
+                Some(error),
+            )
+            .await;
         }
     }
     Ok(())
@@ -213,20 +255,40 @@ where
 async fn resolve_scheduler_transition(
     transition: impl std::future::Future<Output = Result<(), SpiderError>>,
     lease: &TaskLease,
-    action: &'static str,
+    event: crate::signals::SchedulerEventKind,
     url: &str,
     spider_name: &str,
     stats: &crate::stats::Tracker,
+    signals: &crate::signals::Bus,
 ) -> Result<bool, SpiderError> {
     match transition.await {
-        Ok(()) => Ok(true),
+        Ok(()) => {
+            record_scheduler_event(spider_name, event, lease, url, stats, signals, None).await;
+            Ok(true)
+        }
         Err(error) if error.is_scheduler_lease_resolution_error() => {
             stats.record_error();
+            record_scheduler_event(
+                spider_name,
+                crate::signals::SchedulerEventKind::LeaseLost,
+                lease,
+                url,
+                stats,
+                signals,
+                Some(error.clone()),
+            )
+            .await;
             tracing::warn!(
                 spider = spider_name,
                 task_id = lease.task_id().as_str(),
                 worker_id = lease.worker_id(),
-                action,
+                action = match event {
+                    crate::signals::SchedulerEventKind::Completed => "complete",
+                    crate::signals::SchedulerEventKind::Requeued => "requeue",
+                    crate::signals::SchedulerEventKind::Claimed => "claim",
+                    crate::signals::SchedulerEventKind::Heartbeat => "heartbeat",
+                    crate::signals::SchedulerEventKind::LeaseLost => "lease_lost",
+                },
                 url,
                 error = %error,
                 "task lease could not be resolved after task execution"
@@ -416,6 +478,9 @@ where
         let url = request.url.clone();
         let task_id = lease.task_id().clone();
         let scheduler = self.scheduler;
+        let spider_name = self.spider_name;
+        let stats = self.stats.clone();
+        let signals = self.signals.clone();
         let task_future = async move {
             let _global_permit_guard = global_permit_guard;
             let _domain_permit_guard = match domain_semaphore.acquire().await {
@@ -434,7 +499,16 @@ where
             self.run(task_id, request).await
         };
 
-        let outcome = run_task_with_heartbeat(scheduler, &lease, task_future).await;
+        let outcome = run_task_with_heartbeat(
+            scheduler,
+            &lease,
+            spider_name,
+            url.as_str(),
+            stats.as_ref(),
+            signals.as_ref(),
+            task_future,
+        )
+        .await;
 
         TaskRun {
             lease,
@@ -619,6 +693,10 @@ where
 async fn run_task_with_heartbeat<S, F>(
     scheduler: &S,
     lease: &TaskLease,
+    spider_name: &str,
+    url: &str,
+    stats: &crate::stats::Tracker,
+    signals: &crate::signals::Bus,
     task_future: F,
 ) -> TaskOutcome
 where
@@ -647,6 +725,16 @@ where
                     }
                     return TaskOutcome::Error(error);
                 }
+                record_scheduler_event(
+                    spider_name,
+                    crate::signals::SchedulerEventKind::Heartbeat,
+                    lease,
+                    url,
+                    stats,
+                    signals,
+                    None,
+                )
+                .await;
             }
         }
     }

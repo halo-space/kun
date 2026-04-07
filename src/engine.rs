@@ -5,6 +5,7 @@ mod task;
 use crate::download::traits::Downloader;
 use crate::engine::task::{
     TaskExecutor, TaskRun, TaskRunReservation, apply_task_run, enqueue_request, enqueue_task,
+    record_scheduler_event,
 };
 use crate::error::SpiderError;
 use crate::middleware::{Chain, Config, Registry, build as build_middleware};
@@ -800,6 +801,16 @@ where
                     drop(global_permit_guard);
                     break;
                 };
+                record_scheduler_event(
+                    spider_name,
+                    crate::signals::SchedulerEventKind::Claimed,
+                    &task.lease,
+                    task.task.request.url.as_str(),
+                    stats.as_ref(),
+                    signals.as_ref(),
+                    None,
+                )
+                .await;
 
                 let domain = extract_domain(&task.task.request.url)
                     .unwrap_or("unknown")
@@ -1146,6 +1157,16 @@ where
         let Some(task) = self.scheduler.take_ready().await? else {
             return Ok(None);
         };
+        record_scheduler_event(
+            "manual",
+            crate::signals::SchedulerEventKind::Claimed,
+            &task.lease,
+            task.task.request.url.as_str(),
+            self.stats.as_ref(),
+            self.signals.as_ref(),
+            None,
+        )
+        .await;
         let task_id = task.lease.task_id().clone();
         let mut context = EngineContext::new(task.task.request)
             .with_task_id(task_id)
@@ -1161,10 +1182,30 @@ where
             Ok(crate::engine::flow::Flow::Continue) => {}
             Ok(_) => {
                 self.scheduler.complete(&lease).await?;
+                record_scheduler_event(
+                    "manual",
+                    crate::signals::SchedulerEventKind::Completed,
+                    &lease,
+                    context.request.url.as_str(),
+                    self.stats.as_ref(),
+                    self.signals.as_ref(),
+                    None,
+                )
+                .await;
                 return Ok(None);
             }
             Err(e) => {
                 self.scheduler.requeue(&lease).await?;
+                record_scheduler_event(
+                    "manual",
+                    crate::signals::SchedulerEventKind::Requeued,
+                    &lease,
+                    context.request.url.as_str(),
+                    self.stats.as_ref(),
+                    self.signals.as_ref(),
+                    None,
+                )
+                .await;
                 return Err(e);
             }
         }
@@ -1183,6 +1224,16 @@ where
             Err(e) => {
                 self.stats.record_error();
                 self.scheduler.requeue(&lease).await?;
+                record_scheduler_event(
+                    "manual",
+                    crate::signals::SchedulerEventKind::Requeued,
+                    &lease,
+                    context.request.url.as_str(),
+                    self.stats.as_ref(),
+                    self.signals.as_ref(),
+                    None,
+                )
+                .await;
                 return Err(e);
             }
         };
@@ -1195,10 +1246,30 @@ where
             Ok(crate::engine::flow::Flow::Continue) => {}
             Ok(_) => {
                 self.scheduler.complete(&lease).await?;
+                record_scheduler_event(
+                    "manual",
+                    crate::signals::SchedulerEventKind::Completed,
+                    &lease,
+                    context.request.url.as_str(),
+                    self.stats.as_ref(),
+                    self.signals.as_ref(),
+                    None,
+                )
+                .await;
                 return Ok(None);
             }
             Err(e) => {
                 self.scheduler.requeue(&lease).await?;
+                record_scheduler_event(
+                    "manual",
+                    crate::signals::SchedulerEventKind::Requeued,
+                    &lease,
+                    context.request.url.as_str(),
+                    self.stats.as_ref(),
+                    self.signals.as_ref(),
+                    None,
+                )
+                .await;
                 return Err(e);
             }
         }
@@ -1206,6 +1277,16 @@ where
         let response = context.response.clone().unwrap_or(response);
 
         self.scheduler.complete(&lease).await?;
+        record_scheduler_event(
+            "manual",
+            crate::signals::SchedulerEventKind::Completed,
+            &lease,
+            context.request.url.as_str(),
+            self.stats.as_ref(),
+            self.signals.as_ref(),
+            None,
+        )
+        .await;
         Ok(Some(response))
     }
 
@@ -1225,8 +1306,19 @@ where
         let Some(task) = self.scheduler.take_ready().await? else {
             return Ok(None);
         };
+        record_scheduler_event(
+            spider.name(),
+            crate::signals::SchedulerEventKind::Claimed,
+            &task.lease,
+            task.task.request.url.as_str(),
+            self.stats.as_ref(),
+            self.signals.as_ref(),
+            None,
+        )
+        .await;
         let task_id = task.lease.task_id().clone();
         let lease = task.lease.clone();
+        let task_url = task.task.request.url.clone();
 
         let step_id = step_id_from_request(&task.task.request);
         let default_chain = Chain::default();
@@ -1274,6 +1366,16 @@ where
                     }
                 }
                 self.scheduler.complete(&lease).await?;
+                record_scheduler_event(
+                    spider.name(),
+                    crate::signals::SchedulerEventKind::Completed,
+                    &lease,
+                    task_url.as_str(),
+                    self.stats.as_ref(),
+                    self.signals.as_ref(),
+                    None,
+                )
+                .await;
                 Ok(Some(crate::spider::Output {
                     items: output.items,
                     requests: output.follows,
@@ -1290,15 +1392,45 @@ where
                     ))
                     .await;
                 self.scheduler.complete(&lease).await?;
+                record_scheduler_event(
+                    spider.name(),
+                    crate::signals::SchedulerEventKind::Completed,
+                    &lease,
+                    task_url.as_str(),
+                    self.stats.as_ref(),
+                    self.signals.as_ref(),
+                    None,
+                )
+                .await;
                 Ok(None)
             }
             TaskOutcome::Drop => {
                 self.scheduler.complete(&lease).await?;
+                record_scheduler_event(
+                    spider.name(),
+                    crate::signals::SchedulerEventKind::Completed,
+                    &lease,
+                    task_url.as_str(),
+                    self.stats.as_ref(),
+                    self.signals.as_ref(),
+                    None,
+                )
+                .await;
                 Ok(None)
             }
             TaskOutcome::Error(e) => {
                 self.stats.record_error();
                 self.scheduler.requeue(&lease).await?;
+                record_scheduler_event(
+                    spider.name(),
+                    crate::signals::SchedulerEventKind::Requeued,
+                    &lease,
+                    task_url.as_str(),
+                    self.stats.as_ref(),
+                    self.signals.as_ref(),
+                    None,
+                )
+                .await;
                 Err(e)
             }
             TaskOutcome::LeaseLost(error) => Err(error),
@@ -1322,7 +1454,9 @@ mod tests {
     use crate::scheduler::checkpoint::{Checkpoint, Persist};
     use crate::scheduler::memory::Memory;
     use crate::scheduler::{Scheduler, Task};
-    use crate::signals::{Kind as SignalKind, Listener as SignalListener, Signal};
+    use crate::signals::{
+        Kind as SignalKind, Listener as SignalListener, SchedulerEventKind, Signal,
+    };
     use crate::spider::{Failure, Output as SpiderOutput, Spider};
     use crate::stats::Snapshot as StatsSnapshot;
     use crate::stats::{Event as StatsEvent, Reporter as StatsReporter};
@@ -1699,6 +1833,8 @@ mod tests {
                 request_count: 1,
                 response_count: 1,
                 dedup_reject_count: 1,
+                scheduler_claim_count: 1,
+                scheduler_complete_count: 1,
                 ..StatsSnapshot::default()
             }
         );
@@ -2105,6 +2241,8 @@ mod tests {
                 http_cache_store_count: 1,
                 http_cache_miss_count: 1,
                 http_cache_revalidate_count: 1,
+                scheduler_claim_count: 2,
+                scheduler_complete_count: 2,
                 ..StatsSnapshot::default()
             }
         );
@@ -2135,6 +2273,8 @@ mod tests {
                 request_count: 1,
                 item_count: 1,
                 response_count: 1,
+                scheduler_claim_count: 1,
+                scheduler_complete_count: 1,
                 ..StatsSnapshot::default()
             }
         );
@@ -2178,6 +2318,8 @@ mod tests {
                 request_count: 1,
                 response_count: 1,
                 pipeline_drop_count: 1,
+                scheduler_claim_count: 1,
+                scheduler_complete_count: 1,
                 ..StatsSnapshot::default()
             }
         );
@@ -2203,6 +2345,8 @@ mod tests {
                 request_count: 1,
                 response_count: 1,
                 error_count: 1,
+                scheduler_claim_count: 1,
+                scheduler_requeue_count: 1,
                 ..StatsSnapshot::default()
             }
         );
@@ -2229,6 +2373,8 @@ mod tests {
                 response_count: 1,
                 error_count: 1,
                 store_error_count: 1,
+                scheduler_claim_count: 1,
+                scheduler_requeue_count: 1,
                 ..StatsSnapshot::default()
             }
         );
@@ -2253,9 +2399,17 @@ mod tests {
             events,
             vec![
                 (
+                    StatsEvent::SchedulerClaim,
+                    StatsSnapshot {
+                        scheduler_claim_count: 1,
+                        ..StatsSnapshot::default()
+                    },
+                ),
+                (
                     StatsEvent::Request,
                     StatsSnapshot {
                         request_count: 1,
+                        scheduler_claim_count: 1,
                         ..StatsSnapshot::default()
                     },
                 ),
@@ -2264,6 +2418,7 @@ mod tests {
                     StatsSnapshot {
                         request_count: 1,
                         response_count: 1,
+                        scheduler_claim_count: 1,
                         ..StatsSnapshot::default()
                     },
                 ),
@@ -2273,6 +2428,18 @@ mod tests {
                         request_count: 1,
                         response_count: 1,
                         item_count: 1,
+                        scheduler_claim_count: 1,
+                        ..StatsSnapshot::default()
+                    },
+                ),
+                (
+                    StatsEvent::SchedulerComplete,
+                    StatsSnapshot {
+                        request_count: 1,
+                        response_count: 1,
+                        item_count: 1,
+                        scheduler_claim_count: 1,
+                        scheduler_complete_count: 1,
                         ..StatsSnapshot::default()
                     },
                 ),
@@ -2289,7 +2456,14 @@ mod tests {
 
         let mut engine = Engine::from_parts(Memory::default(), StubHttp, StubBrowser)
             .with_store(MemoryStore::default())
-            .with_signal_listener(listener);
+            .with_signal_listener_for(
+                [
+                    SignalKind::RequestScheduled,
+                    SignalKind::ResponseReceived,
+                    SignalKind::ItemScraped,
+                ],
+                listener,
+            );
 
         block_on(engine.enqueue(Request::new("https://example.com/item"))).unwrap();
 
@@ -2322,7 +2496,14 @@ mod tests {
 
         let mut engine = Engine::from_parts(Memory::default(), StubHttp, StubBrowser)
             .with_store(MemoryStore::default())
-            .with_signal_listener(listener);
+            .with_signal_listener_for(
+                [
+                    SignalKind::RequestScheduled,
+                    SignalKind::ResponseReceived,
+                    SignalKind::SpiderError,
+                ],
+                listener,
+            );
 
         block_on(engine.enqueue(Request::new("https://example.com/error"))).unwrap();
 
@@ -2390,9 +2571,36 @@ mod tests {
             recorded_events.lock().unwrap().clone(),
             vec![
                 SignalKind::RequestScheduled,
+                SignalKind::SchedulerEvent,
                 SignalKind::ResponseReceived,
                 SignalKind::ItemScraped,
+                SignalKind::SchedulerEvent,
             ]
+        );
+    }
+
+    #[test]
+    fn engine_with_signal_listener_receives_scheduler_signals() {
+        let listener = RecordingSignalListener::default();
+        let recorded_events = listener.events.clone();
+        let recorded_scheduler_events = listener.scheduler_events.clone();
+
+        let mut engine = Engine::from_parts(Memory::default(), StubHttp, StubBrowser)
+            .with_store(MemoryStore::default())
+            .with_signal_listener_for([SignalKind::SchedulerEvent], listener);
+
+        block_on(engine.enqueue(Request::new("https://example.com/item"))).unwrap();
+
+        let mut step_chains = BTreeMap::new();
+        block_on(engine.execute_spider_once(&ItemSpider, None, &mut step_chains)).unwrap();
+
+        assert_eq!(
+            recorded_events.lock().unwrap().clone(),
+            vec![SignalKind::SchedulerEvent, SignalKind::SchedulerEvent]
+        );
+        assert_eq!(
+            recorded_scheduler_events.lock().unwrap().clone(),
+            vec![SchedulerEventKind::Claimed, SchedulerEventKind::Completed]
         );
     }
 
@@ -2470,6 +2678,8 @@ mod tests {
                 request_count: 2,
                 response_count: 2,
                 retry_count: 1,
+                scheduler_claim_count: 2,
+                scheduler_complete_count: 2,
                 ..StatsSnapshot::default()
             }
         );
@@ -2506,6 +2716,8 @@ mod tests {
             engine.stats(),
             StatsSnapshot {
                 robots_disallow_count: 1,
+                scheduler_claim_count: 1,
+                scheduler_complete_count: 1,
                 ..StatsSnapshot::default()
             }
         );
@@ -2569,6 +2781,8 @@ mod tests {
                 response_count: 2,
                 retry_count: 1,
                 robots_delay_count: 1,
+                scheduler_claim_count: 3,
+                scheduler_complete_count: 3,
                 ..StatsSnapshot::default()
             }
         );
@@ -3387,6 +3601,7 @@ mod tests {
     #[derive(Clone, Default)]
     struct RecordingSignalListener {
         events: Arc<Mutex<Vec<SignalKind>>>,
+        scheduler_events: Arc<Mutex<Vec<SchedulerEventKind>>>,
         request_urls: Arc<Mutex<Vec<String>>>,
         item_titles: Arc<Mutex<Vec<String>>>,
         errors: Arc<Mutex<Vec<String>>>,
@@ -3411,6 +3626,9 @@ mod tests {
                     }
                     Signal::SpiderError(signal) => {
                         self.errors.lock().unwrap().push(signal.error.to_string());
+                    }
+                    Signal::SchedulerEvent(signal) => {
+                        self.scheduler_events.lock().unwrap().push(signal.event);
                     }
                     _ => {}
                 }
