@@ -218,6 +218,7 @@ browser 在这里的角色是“渲染型下载器”，不是另起一套通用
 - 如果明确不想启用这层自动回收：`scheduler::Worker::new(...).without_lease_timeout()`
 - 如果需要批量 claim / complete / requeue / complete-and-enqueue：统一用 `take_batch_ready(limit)`、`complete_batch(...)`、`requeue_batch(...)`、`complete_and_enqueue_batch(...)`
 - 这组 `batch` API 是吞吐优化入口，不表示多条 task 的整体事务
+- `Engine::run(...)` 现在会按剩余并发窗口优先走 `take_batch_ready(limit)`，所以默认主循环也会自动使用 batch claim
 - 如果需要优雅下线当前 worker、主动交回自己手里的 inflight task：`scheduler.release_inflight().await?`
 - 如果需要链式挂 checkpoint：`Engine::new().with_checkpoint(...)`
 - 如果需要链式从 checkpoint 恢复：`Engine::new().load_checkpoint(...).await?`

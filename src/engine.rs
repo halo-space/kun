@@ -813,61 +813,81 @@ where
             }
 
             while inflight.len() < max_concurrent {
-                let Ok(global_permit_guard) = global_semaphore.clone().try_acquire_owned() else {
+                let available_slots = max_concurrent - inflight.len();
+                let mut permits = Vec::with_capacity(available_slots);
+                while permits.len() < available_slots {
+                    let Ok(global_permit_guard) = global_semaphore.clone().try_acquire_owned() else {
+                        break;
+                    };
+                    permits.push(global_permit_guard);
+                }
+                if permits.is_empty() {
                     break;
-                };
-                let Some(task) = scheduler.take_ready().await? else {
-                    drop(global_permit_guard);
+                }
+
+                let requested = permits.len();
+                let claimed = scheduler.take_batch_ready(requested).await?;
+                let claimed_count = claimed.len();
+                if claimed_count == 0 {
+                    drop(permits);
                     break;
-                };
-                record_scheduler_event(
-                    spider_name,
-                    crate::signals::SchedulerEventKind::Claimed,
-                    &task.lease,
-                    task.task.request.url.as_str(),
-                    stats.as_ref(),
-                    signals.as_ref(),
-                    None,
-                )
-                .await;
+                }
+                permits.truncate(claimed_count);
 
-                let domain = extract_domain(&task.task.request.url)
-                    .unwrap_or("unknown")
-                    .to_string();
-                let domain_semaphore = domain_semaphores
-                    .entry(domain)
-                    .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(per_domain_limit)))
-                    .clone();
+                for (task, global_permit_guard) in claimed.into_iter().zip(permits.into_iter()) {
+                    record_scheduler_event(
+                        spider_name,
+                        crate::signals::SchedulerEventKind::Claimed,
+                        &task.lease,
+                        task.task.request.url.as_str(),
+                        stats.as_ref(),
+                        signals.as_ref(),
+                        None,
+                    )
+                    .await;
 
-                let step_id = step_id_from_request(&task.task.request);
-                let step_chain = step_chains.get(&step_id).unwrap_or(&default_step_chain);
-                let task_executor = TaskExecutor {
-                    scheduler,
-                    http,
-                    browser,
-                    pipeline,
-                    store,
-                    robots,
-                    settings: &self.settings,
-                    stats: stats.clone(),
-                    signals: signals.clone(),
-                    engine_chain,
-                    step_chain,
-                    spider,
-                    compiled: compiled.as_ref(),
-                    allowed_domains,
-                    spider_name,
-                };
-                let task_run_reservation = TaskRunReservation::new(
-                    task.lease,
-                    task.task.request,
-                    global_permit_guard,
-                    domain_semaphore,
-                );
+                    let domain = extract_domain(&task.task.request.url)
+                        .unwrap_or("unknown")
+                        .to_string();
+                    let domain_semaphore = domain_semaphores
+                        .entry(domain)
+                        .or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(per_domain_limit)))
+                        .clone();
 
-                inflight.push(Box::pin(
-                    task_executor.run_with_reservation(task_run_reservation),
-                ));
+                    let step_id = step_id_from_request(&task.task.request);
+                    let step_chain = step_chains.get(&step_id).unwrap_or(&default_step_chain);
+                    let task_executor = TaskExecutor {
+                        scheduler,
+                        http,
+                        browser,
+                        pipeline,
+                        store,
+                        robots,
+                        settings: &self.settings,
+                        stats: stats.clone(),
+                        signals: signals.clone(),
+                        engine_chain,
+                        step_chain,
+                        spider,
+                        compiled: compiled.as_ref(),
+                        allowed_domains,
+                        spider_name,
+                    };
+                    let task_run_reservation = TaskRunReservation::new(
+                        task.lease,
+                        task.task.request,
+                        global_permit_guard,
+                        domain_semaphore,
+                    );
+
+                    inflight.push(Box::pin(
+                        task_executor.run_with_reservation(task_run_reservation),
+                    ));
+                }
+
+                if claimed_count < requested {
+                    break;
+                }
             }
 
             if inflight.is_empty() {
@@ -2764,6 +2784,43 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn engine_run_uses_scheduler_batch_claim_path() {
+        let scheduler = BatchRecordingScheduler::default();
+        let batch_calls = scheduler.batch_calls.clone();
+        let single_calls = scheduler.single_calls.clone();
+
+        let mut engine = Engine::from_parts(scheduler, StubHttp, StubBrowser)
+            .with_store(MemoryStore::default())
+            .with_settings(
+                Settings::default()
+                    .with_concurrent_requests(3)
+                    .with_idle_timeout(SignedDuration::from_millis(5)),
+            );
+
+        let shutdown = engine.shutdown_handle();
+        tokio::spawn(async move {
+            tokio::time::sleep(to_std_duration(SignedDuration::from_millis(40)).unwrap()).await;
+            shutdown.stop();
+        });
+
+        let outputs = engine.run(&BatchStartSpider).await.unwrap();
+
+        assert_eq!(outputs.len(), 3);
+        assert!(*batch_calls.lock().unwrap() > 0);
+        assert_eq!(*single_calls.lock().unwrap(), 0);
+        assert_eq!(
+            engine.stats(),
+            StatsSnapshot {
+                request_count: 3,
+                response_count: 3,
+                scheduler_claim_count: 3,
+                scheduler_complete_count: 3,
+                ..StatsSnapshot::default()
+            }
+        );
+    }
+
     #[test]
     fn engine_stats_track_retries_across_attempts() {
         let scheduler = Memory::default();
@@ -3585,6 +3642,22 @@ mod tests {
         }
     }
 
+    struct BatchStartSpider;
+
+    impl Spider for BatchStartSpider {
+        fn name(&self) -> &str {
+            "batch_start_spider"
+        }
+
+        fn start_urls(&self) -> Vec<String> {
+            vec![
+                "https://example.com/batch/a".to_string(),
+                "https://example.com/batch/b".to_string(),
+                "https://example.com/batch/c".to_string(),
+            ]
+        }
+    }
+
     struct CustomStartRequestSpider;
 
     impl Spider for CustomStartRequestSpider {
@@ -3952,6 +4025,64 @@ mod tests {
             Err(SpiderError::scheduler(
                 "complete_and_enqueue failed after store commit",
             ))
+        }
+
+        async fn requeue(&self, lease: &crate::scheduler::TaskLease) -> Result<(), SpiderError> {
+            self.inner.requeue(lease).await
+        }
+
+        async fn has_pending(&self) -> Result<bool, SpiderError> {
+            self.inner.has_pending().await
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct BatchRecordingScheduler {
+        inner: Arc<Memory>,
+        batch_calls: Arc<Mutex<usize>>,
+        single_calls: Arc<Mutex<usize>>,
+    }
+
+    impl Scheduler for BatchRecordingScheduler {
+        async fn enqueue(&self, task: Task) -> Result<(), SpiderError> {
+            self.inner.enqueue(task).await
+        }
+
+        async fn checkpoint(&self) -> Result<Checkpoint, SpiderError> {
+            Scheduler::checkpoint(self.inner.as_ref()).await
+        }
+
+        async fn counts(&self) -> Result<crate::scheduler::checkpoint::Counts, SpiderError> {
+            Scheduler::counts(self.inner.as_ref()).await
+        }
+
+        async fn snapshot(&self) -> Result<crate::scheduler::Snapshot, SpiderError> {
+            self.inner.snapshot().await
+        }
+
+        async fn take_ready(&self) -> Result<Option<crate::scheduler::ClaimedTask>, SpiderError> {
+            *self.single_calls.lock().unwrap() += 1;
+            self.inner.take_ready().await
+        }
+
+        async fn take_batch_ready(
+            &self,
+            limit: usize,
+        ) -> Result<Vec<crate::scheduler::ClaimedTask>, SpiderError> {
+            *self.batch_calls.lock().unwrap() += 1;
+            self.inner.take_batch_ready(limit).await
+        }
+
+        async fn complete(&self, lease: &crate::scheduler::TaskLease) -> Result<(), SpiderError> {
+            self.inner.complete(lease).await
+        }
+
+        async fn complete_and_enqueue(
+            &self,
+            lease: &crate::scheduler::TaskLease,
+            tasks: Vec<Task>,
+        ) -> Result<(), SpiderError> {
+            self.inner.complete_and_enqueue(lease, tasks).await
         }
 
         async fn requeue(&self, lease: &crate::scheduler::TaskLease) -> Result<(), SpiderError> {
