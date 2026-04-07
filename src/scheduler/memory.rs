@@ -2,7 +2,7 @@ use crate::error::{SchedulerError, SpiderError};
 use crate::scheduler::checkpoint::{Checkpoint, Counts};
 use crate::scheduler::runtime::RuntimeEvent;
 use crate::scheduler::snapshot::{InflightTaskSnapshot, Snapshot, WorkerSnapshot};
-use crate::scheduler::{ClaimedTask, Scheduler, Task, TaskLease, Worker};
+use crate::scheduler::{ClaimedTask, Scheduler, Task, TaskLease, TaskResolution, Worker};
 use jiff::{SignedDuration, Timestamp};
 use std::cmp::Ordering;
 use std::collections::VecDeque;
@@ -319,6 +319,38 @@ impl Scheduler for Memory {
         Ok(Some(ClaimedTask::new(task, lease)))
     }
 
+    async fn take_batch_ready(&self, limit: usize) -> Result<Vec<ClaimedTask>, SpiderError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.promote_delayed();
+
+        let mut claimed = Vec::with_capacity(limit);
+        while claimed.len() < limit {
+            let Some(task) = state.ready.pop_front() else {
+                break;
+            };
+
+            let lease = TaskLease::new(
+                task.id.clone(),
+                self.worker_id().to_string(),
+                next_memory_lease_id(self.worker_id()),
+            );
+            state.worker_last_seen = Some(Timestamp::now());
+            state
+                .inflight
+                .push(InflightEntry::active(task.clone(), lease.clone()));
+            claimed.push(ClaimedTask::new(task, lease));
+        }
+
+        Ok(claimed)
+    }
+
     async fn complete(&self, lease: &TaskLease) -> Result<(), SpiderError> {
         let mut state = self
             .state
@@ -332,6 +364,25 @@ impl Scheduler for Memory {
         })?;
         ensure_memory_lease("complete", self.worker_id(), &state.inflight[pos], lease)?;
         state.inflight.remove(pos);
+        state.reset_worker_if_idle();
+        Ok(())
+    }
+
+    async fn complete_batch(&self, leases: Vec<TaskLease>) -> Result<(), SpiderError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for lease in leases {
+            let pos = find_inflight_entry(&state.inflight, lease.task_id()).ok_or_else(|| {
+                SpiderError::scheduler(SchedulerError::InactiveLease {
+                    action: "complete",
+                    task_id: lease.task_id().as_str().to_string(),
+                })
+            })?;
+            ensure_memory_lease("complete", self.worker_id(), &state.inflight[pos], &lease)?;
+            state.inflight.remove(pos);
+        }
         state.reset_worker_if_idle();
         Ok(())
     }
@@ -360,6 +411,39 @@ impl Scheduler for Memory {
         Ok(())
     }
 
+    async fn complete_and_enqueue_batch(
+        &self,
+        resolutions: Vec<TaskResolution>,
+    ) -> Result<(), SpiderError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for resolution in resolutions {
+            let pos =
+                find_inflight_entry(&state.inflight, resolution.lease.task_id()).ok_or_else(
+                    || {
+                        SpiderError::scheduler(SchedulerError::InactiveLease {
+                            action: "complete",
+                            task_id: resolution.lease.task_id().as_str().to_string(),
+                        })
+                    },
+                )?;
+            ensure_memory_lease(
+                "complete",
+                self.worker_id(),
+                &state.inflight[pos],
+                &resolution.lease,
+            )?;
+            state.inflight.remove(pos);
+            for task in resolution.tasks {
+                state.push_task(task);
+            }
+        }
+        state.reset_worker_if_idle();
+        Ok(())
+    }
+
     async fn requeue(&self, lease: &TaskLease) -> Result<(), SpiderError> {
         let mut state = self
             .state
@@ -374,6 +458,26 @@ impl Scheduler for Memory {
         ensure_memory_lease("requeue", self.worker_id(), &state.inflight[pos], lease)?;
         let entry = state.inflight.remove(pos);
         state.push_task(entry.task);
+        state.reset_worker_if_idle();
+        Ok(())
+    }
+
+    async fn requeue_batch(&self, leases: Vec<TaskLease>) -> Result<(), SpiderError> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        for lease in leases {
+            let pos = find_inflight_entry(&state.inflight, lease.task_id()).ok_or_else(|| {
+                SpiderError::scheduler(SchedulerError::InactiveLease {
+                    action: "requeue",
+                    task_id: lease.task_id().as_str().to_string(),
+                })
+            })?;
+            ensure_memory_lease("requeue", self.worker_id(), &state.inflight[pos], &lease)?;
+            let entry = state.inflight.remove(pos);
+            state.push_task(entry.task);
+        }
         state.reset_worker_if_idle();
         Ok(())
     }
@@ -583,6 +687,28 @@ mod tests {
     }
 
     #[test]
+    fn memory_scheduler_take_batch_ready_claims_multiple_tasks() {
+        let scheduler = Memory::default();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/a")))).unwrap();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/b")))).unwrap();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/c")))).unwrap();
+
+        let claimed = block_on(scheduler.take_batch_ready(2)).unwrap();
+
+        assert_eq!(claimed.len(), 2);
+        assert_eq!(claimed[0].task.request.url, "https://example.com/a");
+        assert_eq!(claimed[1].task.request.url, "https://example.com/b");
+        assert_eq!(
+            scheduler.counts(),
+            Counts {
+                ready: 1,
+                delayed: 0,
+                inflight: 2,
+            }
+        );
+    }
+
+    #[test]
     fn memory_scheduler_tracks_inflight_until_complete() {
         let scheduler = Memory::default();
         block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/a")))).unwrap();
@@ -609,6 +735,31 @@ mod tests {
     }
 
     #[test]
+    fn memory_scheduler_complete_batch_removes_multiple_inflight_tasks() {
+        let scheduler = Memory::default();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/a")))).unwrap();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/b")))).unwrap();
+
+        let claimed = block_on(scheduler.take_batch_ready(2)).unwrap();
+        let leases = claimed
+            .iter()
+            .map(|task| task.lease.clone())
+            .collect::<Vec<_>>();
+
+        block_on(scheduler.complete_batch(leases)).unwrap();
+
+        assert_eq!(
+            scheduler.counts(),
+            Counts {
+                ready: 0,
+                delayed: 0,
+                inflight: 0,
+            }
+        );
+        assert!(!block_on(scheduler.has_pending()).unwrap());
+    }
+
+    #[test]
     fn memory_scheduler_requeue_puts_inflight_task_back_to_ready() {
         let scheduler = Memory::default();
         block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/retry")))).unwrap();
@@ -626,6 +777,26 @@ mod tests {
             second.map(|task| task.task.request.url),
             Some("https://example.com/retry".to_string())
         );
+    }
+
+    #[test]
+    fn memory_scheduler_requeue_batch_returns_multiple_tasks_to_ready() {
+        let scheduler = Memory::default();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/a")))).unwrap();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/b")))).unwrap();
+
+        let claimed = block_on(scheduler.take_batch_ready(2)).unwrap();
+        let leases = claimed
+            .iter()
+            .map(|task| task.lease.clone())
+            .collect::<Vec<_>>();
+
+        block_on(scheduler.requeue_batch(leases)).unwrap();
+
+        let reclaimed = block_on(scheduler.take_batch_ready(2)).unwrap();
+        assert_eq!(reclaimed.len(), 2);
+        assert_eq!(reclaimed[0].task.request.url, "https://example.com/a");
+        assert_eq!(reclaimed[1].task.request.url, "https://example.com/b");
     }
 
     #[test]
@@ -653,6 +824,33 @@ mod tests {
                 inflight: 0,
             }
         );
+        let checkpoint = scheduler.checkpoint();
+        assert_eq!(checkpoint.ready.len(), 1);
+        assert_eq!(checkpoint.ready[0].id, ready_follow.id);
+        assert_eq!(checkpoint.delayed.len(), 1);
+        assert_eq!(checkpoint.delayed[0].id, delayed_follow.id);
+        assert!(checkpoint.inflight.is_empty());
+    }
+
+    #[test]
+    fn memory_scheduler_complete_and_enqueue_batch_moves_follow_tasks() {
+        let scheduler = Memory::default();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/current-a"))))
+            .unwrap();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/current-b"))))
+            .unwrap();
+
+        let claimed = block_on(scheduler.take_batch_ready(2)).unwrap();
+        let ready_follow = Task::new(Request::new("https://example.com/follow-ready"));
+        let delayed_follow =
+            Task::with_delay(Request::new("https://example.com/follow-delayed"), 500);
+
+        block_on(scheduler.complete_and_enqueue_batch(vec![
+            TaskResolution::new(claimed[0].lease.clone(), vec![ready_follow.clone()]),
+            TaskResolution::new(claimed[1].lease.clone(), vec![delayed_follow.clone()]),
+        ]))
+        .unwrap();
+
         let checkpoint = scheduler.checkpoint();
         assert_eq!(checkpoint.ready.len(), 1);
         assert_eq!(checkpoint.ready[0].id, ready_follow.id);

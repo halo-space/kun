@@ -8,9 +8,9 @@
 
 ## 2. Batch 调度接口
 
-- [ ] 2.1 在共享 `Scheduler` trait 上增加统一 batch API，命名统一使用 `batch`。
-- [ ] 2.2 为 `scheduler::Memory` 实现 batch API，保证本地后端先跑通。
-- [ ] 2.3 为 `scheduler::Redis` 实现 batch API，并补单元测试 / 契约测试。
+- [x] 2.1 在共享 `Scheduler` trait 上增加统一 batch API，命名统一使用 `batch`。
+- [x] 2.2 为 `scheduler::Memory` 实现 batch API，保证本地后端先跑通。
+- [x] 2.3 为 `scheduler::Redis` 实现 batch API，并补单元测试 / 契约测试。
 - [ ] 2.4 评估 engine 主循环是否需要接入 batch claim 路径，并补最小接线。
 
 ## 3. 跨 Job 运维控制面

@@ -3,7 +3,7 @@ use crate::redis::{Connection, ErrorContext, connect, query, validate_url};
 use crate::scheduler::checkpoint::{Checkpoint, Counts};
 use crate::scheduler::runtime::RuntimeEvent;
 use crate::scheduler::snapshot::{InflightTaskSnapshot, Snapshot, WorkerSnapshot};
-use crate::scheduler::{ClaimedTask, Scheduler, Task, TaskId, TaskLease, Worker};
+use crate::scheduler::{ClaimedTask, Scheduler, Task, TaskId, TaskLease, TaskResolution, Worker};
 use jiff::{SignedDuration, Timestamp};
 use redis::FromRedisValue;
 use std::cmp::Ordering;
@@ -950,6 +950,68 @@ impl Redis {
         .await
     }
 
+    async fn take_ready_internal(
+        &self,
+        connection: &mut Connection,
+    ) -> Result<Option<ClaimedTask>, SpiderError> {
+        let keys = self.keys();
+        let now = now().to_string();
+        let lease_timeout = self
+            .lease_timeout_millis()
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        let heartbeat_interval = self
+            .heartbeat_interval_millis()
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        let lease_id = next_lease_id(self.worker_id());
+        let result: Option<Vec<String>> = scheduler_eval(
+            connection,
+            SCHEDULER_CLAIM_READY_SCRIPT,
+            &[
+                keys.tasks.as_str(),
+                keys.ready.as_str(),
+                keys.ready_order.as_str(),
+                keys.delayed.as_str(),
+                keys.inflight.as_str(),
+                keys.inflight_deadlines.as_str(),
+                keys.inflight_workers.as_str(),
+                keys.inflight_leases.as_str(),
+                keys.sequence.as_str(),
+                keys.reclaimed_total.as_str(),
+                keys.workers.as_str(),
+                keys.worker_seen.as_str(),
+                keys.worker_lease_timeout.as_str(),
+                keys.worker_heartbeat_interval.as_str(),
+            ],
+            &[
+                now.as_str(),
+                lease_timeout.as_str(),
+                self.worker_id(),
+                lease_id.as_str(),
+                heartbeat_interval.as_str(),
+            ],
+        )
+        .await?;
+
+        let Some(result) = result else {
+            return Ok(None);
+        };
+        if result.len() != 2 {
+            return Err(SpiderError::scheduler(
+                "redis scheduler claim script returned invalid lease payload",
+            ));
+        }
+        let task_json = result[0].as_str();
+        let lease_id = result[1].clone();
+        let task: Task = serde_json::from_str(task_json).map_err(|error| {
+            SpiderError::scheduler(format!("failed to decode redis scheduler task: {error}"))
+        })?;
+        let lease = TaskLease::new(task.id.clone(), self.worker_id().to_string(), lease_id);
+
+        Ok(Some(ClaimedTask::new(task, lease)))
+    }
+
     async fn reclaim_expired_inflight(
         &self,
         connection: &mut Connection,
@@ -1059,6 +1121,64 @@ impl Redis {
         .await
     }
 
+    async fn complete_internal(
+        &self,
+        connection: &mut Connection,
+        lease: &TaskLease,
+    ) -> Result<(), SpiderError> {
+        let keys = self.keys();
+        let script_keys = keys.complete_keys();
+        let args = RedisScriptArgs::complete(self, lease);
+        self.run_lease_transition(
+            connection,
+            SCHEDULER_COMPLETE_SCRIPT,
+            &script_keys,
+            &args,
+            "complete",
+            lease,
+        )
+        .await
+    }
+
+    async fn complete_and_enqueue_internal(
+        &self,
+        connection: &mut Connection,
+        lease: &TaskLease,
+        tasks: &[Task],
+    ) -> Result<(), SpiderError> {
+        let keys = self.keys();
+        let script_keys = keys.complete_and_enqueue_keys();
+        let args = RedisScriptArgs::complete_and_enqueue(self, lease, tasks)?;
+        self.run_lease_transition(
+            connection,
+            SCHEDULER_COMPLETE_AND_ENQUEUE_SCRIPT,
+            &script_keys,
+            &args,
+            "complete",
+            lease,
+        )
+        .await
+    }
+
+    async fn requeue_internal(
+        &self,
+        connection: &mut Connection,
+        lease: &TaskLease,
+    ) -> Result<(), SpiderError> {
+        let keys = self.keys();
+        let script_keys = keys.requeue_keys();
+        let args = RedisScriptArgs::requeue(self, lease);
+        self.run_lease_transition(
+            connection,
+            SCHEDULER_REQUEUE_SCRIPT,
+            &script_keys,
+            &args,
+            "requeue",
+            lease,
+        )
+        .await
+    }
+
     async fn run_lease_transition(
         &self,
         connection: &mut Connection,
@@ -1114,62 +1234,27 @@ impl Scheduler for Redis {
         let mut guard = self.connection().await?;
         let connection = self.connection_mut(&mut guard)?;
         self.sync_scope_metadata(connection).await?;
-        let keys = self.keys();
-        let now = now().to_string();
-        let lease_timeout = self
-            .lease_timeout_millis()
-            .map(|value| value.to_string())
-            .unwrap_or_default();
-        let heartbeat_interval = self
-            .heartbeat_interval_millis()
-            .map(|value| value.to_string())
-            .unwrap_or_default();
-        let lease_id = next_lease_id(self.worker_id());
-        let result: Option<Vec<String>> = scheduler_eval(
-            connection,
-            SCHEDULER_CLAIM_READY_SCRIPT,
-            &[
-                keys.tasks.as_str(),
-                keys.ready.as_str(),
-                keys.ready_order.as_str(),
-                keys.delayed.as_str(),
-                keys.inflight.as_str(),
-                keys.inflight_deadlines.as_str(),
-                keys.inflight_workers.as_str(),
-                keys.inflight_leases.as_str(),
-                keys.sequence.as_str(),
-                keys.reclaimed_total.as_str(),
-                keys.workers.as_str(),
-                keys.worker_seen.as_str(),
-                keys.worker_lease_timeout.as_str(),
-                keys.worker_heartbeat_interval.as_str(),
-            ],
-            &[
-                now.as_str(),
-                lease_timeout.as_str(),
-                self.worker_id(),
-                lease_id.as_str(),
-                heartbeat_interval.as_str(),
-            ],
-        )
-        .await?;
+        self.take_ready_internal(connection).await
+    }
 
-        let Some(result) = result else {
-            return Ok(None);
-        };
-        if result.len() != 2 {
-            return Err(SpiderError::scheduler(
-                "redis scheduler claim script returned invalid lease payload",
-            ));
+    async fn take_batch_ready(&self, limit: usize) -> Result<Vec<ClaimedTask>, SpiderError> {
+        if limit == 0 {
+            return Ok(Vec::new());
         }
-        let task_json = result[0].as_str();
-        let lease_id = result[1].clone();
-        let task: Task = serde_json::from_str(task_json).map_err(|error| {
-            SpiderError::scheduler(format!("failed to decode redis scheduler task: {error}"))
-        })?;
-        let lease = TaskLease::new(task.id.clone(), self.worker_id().to_string(), lease_id);
 
-        Ok(Some(ClaimedTask::new(task, lease)))
+        let mut guard = self.connection().await?;
+        let connection = self.connection_mut(&mut guard)?;
+        self.sync_scope_metadata(connection).await?;
+
+        let mut claimed = Vec::with_capacity(limit);
+        while claimed.len() < limit {
+            let Some(task) = self.take_ready_internal(connection).await? else {
+                break;
+            };
+            claimed.push(task);
+        }
+
+        Ok(claimed)
     }
 
     async fn complete(&self, lease: &TaskLease) -> Result<(), SpiderError> {
@@ -1177,18 +1262,22 @@ impl Scheduler for Redis {
         let mut guard = self.connection().await?;
         let connection = self.connection_mut(&mut guard)?;
         self.sync_scope_metadata(connection).await?;
-        let keys = self.keys();
-        let script_keys = keys.complete_keys();
-        let args = RedisScriptArgs::complete(self, lease);
-        self.run_lease_transition(
-            connection,
-            SCHEDULER_COMPLETE_SCRIPT,
-            &script_keys,
-            &args,
-            "complete",
-            lease,
-        )
-        .await
+        self.complete_internal(connection, lease).await
+    }
+
+    async fn complete_batch(&self, leases: Vec<TaskLease>) -> Result<(), SpiderError> {
+        if leases.is_empty() {
+            return Ok(());
+        }
+
+        let mut guard = self.connection().await?;
+        let connection = self.connection_mut(&mut guard)?;
+        self.sync_scope_metadata(connection).await?;
+        for lease in leases {
+            self.validate_lease_worker(&lease)?;
+            self.complete_internal(connection, &lease).await?;
+        }
+        Ok(())
     }
 
     async fn complete_and_enqueue(
@@ -1200,18 +1289,26 @@ impl Scheduler for Redis {
         let mut guard = self.connection().await?;
         let connection = self.connection_mut(&mut guard)?;
         self.sync_scope_metadata(connection).await?;
-        let keys = self.keys();
-        let script_keys = keys.complete_and_enqueue_keys();
-        let args = RedisScriptArgs::complete_and_enqueue(self, lease, &tasks)?;
-        self.run_lease_transition(
-            connection,
-            SCHEDULER_COMPLETE_AND_ENQUEUE_SCRIPT,
-            &script_keys,
-            &args,
-            "complete",
-            lease,
-        )
-        .await
+        self.complete_and_enqueue_internal(connection, lease, &tasks).await
+    }
+
+    async fn complete_and_enqueue_batch(
+        &self,
+        resolutions: Vec<TaskResolution>,
+    ) -> Result<(), SpiderError> {
+        if resolutions.is_empty() {
+            return Ok(());
+        }
+
+        let mut guard = self.connection().await?;
+        let connection = self.connection_mut(&mut guard)?;
+        self.sync_scope_metadata(connection).await?;
+        for resolution in resolutions {
+            self.validate_lease_worker(&resolution.lease)?;
+            self.complete_and_enqueue_internal(connection, &resolution.lease, &resolution.tasks)
+                .await?;
+        }
+        Ok(())
     }
 
     async fn requeue(&self, lease: &TaskLease) -> Result<(), SpiderError> {
@@ -1219,18 +1316,22 @@ impl Scheduler for Redis {
         let mut guard = self.connection().await?;
         let connection = self.connection_mut(&mut guard)?;
         self.sync_scope_metadata(connection).await?;
-        let keys = self.keys();
-        let script_keys = keys.requeue_keys();
-        let args = RedisScriptArgs::requeue(self, lease);
-        self.run_lease_transition(
-            connection,
-            SCHEDULER_REQUEUE_SCRIPT,
-            &script_keys,
-            &args,
-            "requeue",
-            lease,
-        )
-        .await
+        self.requeue_internal(connection, lease).await
+    }
+
+    async fn requeue_batch(&self, leases: Vec<TaskLease>) -> Result<(), SpiderError> {
+        if leases.is_empty() {
+            return Ok(());
+        }
+
+        let mut guard = self.connection().await?;
+        let connection = self.connection_mut(&mut guard)?;
+        self.sync_scope_metadata(connection).await?;
+        for lease in leases {
+            self.validate_lease_worker(&lease)?;
+            self.requeue_internal(connection, &lease).await?;
+        }
+        Ok(())
     }
 
     async fn release_inflight(&self) -> Result<usize, SpiderError> {
@@ -2194,6 +2295,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn redis_scheduler_take_batch_ready_claims_multiple_tasks() {
+        let (url, _commands_rx, server_handle) = spawn_redis_server().await;
+        let scheduler = Redis::new(format!("redis://{url}"), "batch_claims");
+        scheduler
+            .enqueue(Task::new(Request::new("https://example.com/a")))
+            .await
+            .unwrap();
+        scheduler
+            .enqueue(Task::new(Request::new("https://example.com/b")))
+            .await
+            .unwrap();
+        scheduler
+            .enqueue(Task::new(Request::new("https://example.com/c")))
+            .await
+            .unwrap();
+
+        let claimed = scheduler.take_batch_ready(2).await.unwrap();
+
+        assert_eq!(claimed.len(), 2);
+        assert_eq!(claimed[0].task.request.url, "https://example.com/a");
+        assert_eq!(claimed[1].task.request.url, "https://example.com/b");
+        assert_eq!(
+            scheduler.counts().await.unwrap(),
+            Counts {
+                ready: 1,
+                delayed: 0,
+                inflight: 2,
+            }
+        );
+
+        scheduler.close().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn redis_scheduler_prefers_higher_priority_then_lower_depth() {
         let (url, _commands_rx, server_handle) = spawn_redis_server().await;
         let scheduler = Redis::new(format!("redis://{url}"), "ordering");
@@ -2603,6 +2739,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn redis_scheduler_complete_batch_removes_multiple_inflight_tasks() {
+        let (url, _commands_rx, server_handle) = spawn_redis_server().await;
+        let scheduler = Redis::new(format!("redis://{url}"), "complete_batch")
+            .with_worker(Worker::new("worker-a"));
+        scheduler
+            .enqueue(Task::new(Request::new("https://example.com/a")))
+            .await
+            .unwrap();
+        scheduler
+            .enqueue(Task::new(Request::new("https://example.com/b")))
+            .await
+            .unwrap();
+
+        let claimed = scheduler.take_batch_ready(2).await.unwrap();
+        let leases = claimed
+            .iter()
+            .map(|task| task.lease.clone())
+            .collect::<Vec<_>>();
+
+        scheduler.complete_batch(leases).await.unwrap();
+
+        assert_eq!(
+            scheduler.counts().await.unwrap(),
+            Counts {
+                ready: 0,
+                delayed: 0,
+                inflight: 0,
+            }
+        );
+
+        scheduler.close().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn redis_scheduler_requeue_batch_returns_multiple_tasks_to_ready() {
+        let (url, _commands_rx, server_handle) = spawn_redis_server().await;
+        let scheduler =
+            Redis::new(format!("redis://{url}"), "requeue_batch").with_worker(Worker::new("a"));
+        scheduler
+            .enqueue(Task::new(Request::new("https://example.com/a")))
+            .await
+            .unwrap();
+        scheduler
+            .enqueue(Task::new(Request::new("https://example.com/b")))
+            .await
+            .unwrap();
+
+        let claimed = scheduler.take_batch_ready(2).await.unwrap();
+        let leases = claimed
+            .iter()
+            .map(|task| task.lease.clone())
+            .collect::<Vec<_>>();
+
+        scheduler.requeue_batch(leases).await.unwrap();
+
+        let reclaimed = scheduler.take_batch_ready(2).await.unwrap();
+        assert_eq!(reclaimed.len(), 2);
+        assert_eq!(reclaimed[0].task.request.url, "https://example.com/a");
+        assert_eq!(reclaimed[1].task.request.url, "https://example.com/b");
+
+        scheduler.close().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn redis_scheduler_complete_and_enqueue_moves_follow_tasks_atomically() {
         let (url, _commands_rx, server_handle) = spawn_redis_server().await;
         let namespace = "complete_and_enqueue";
@@ -2643,6 +2845,44 @@ mod tests {
         let delayed_claim = scheduler.take_ready().await.unwrap().unwrap();
         assert_eq!(delayed_claim.task.id, delayed_follow.id);
         scheduler.complete(&delayed_claim.lease).await.unwrap();
+
+        scheduler.close().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn redis_scheduler_complete_and_enqueue_batch_moves_follow_tasks() {
+        let (url, _commands_rx, server_handle) = spawn_redis_server().await;
+        let scheduler = Redis::new(format!("redis://{url}"), "complete_and_enqueue_batch")
+            .with_worker(Worker::new("worker-a"));
+        scheduler
+            .enqueue(Task::new(Request::new("https://example.com/current-a")))
+            .await
+            .unwrap();
+        scheduler
+            .enqueue(Task::new(Request::new("https://example.com/current-b")))
+            .await
+            .unwrap();
+
+        let claimed = scheduler.take_batch_ready(2).await.unwrap();
+        let ready_follow = Task::new(Request::new("https://example.com/follow-ready"));
+        let delayed_follow =
+            Task::with_delay(Request::new("https://example.com/follow-delayed"), 60);
+
+        scheduler
+            .complete_and_enqueue_batch(vec![
+                TaskResolution::new(claimed[0].lease.clone(), vec![ready_follow.clone()]),
+                TaskResolution::new(claimed[1].lease.clone(), vec![delayed_follow.clone()]),
+            ])
+            .await
+            .unwrap();
+
+        let checkpoint = scheduler.checkpoint().await.unwrap();
+        assert_eq!(checkpoint.ready.len(), 1);
+        assert_eq!(checkpoint.ready[0].id, ready_follow.id);
+        assert_eq!(checkpoint.delayed.len(), 1);
+        assert_eq!(checkpoint.delayed[0].id, delayed_follow.id);
+        assert!(checkpoint.inflight.is_empty());
 
         scheduler.close().await.unwrap();
         server_handle.await.unwrap().unwrap();

@@ -183,6 +183,41 @@ for snapshot in snapshots {
 
 这层的设计目的是让你运维时不用再自己回读多组 Redis key 去拼 ownership / heartbeat 状态。
 
+## Batch 怎么用
+
+如果你需要高吞吐 claim / resolve，不要自己在外层手写很多单条循环，直接走统一 batch API：
+
+```rust
+use halo_spider::request::Request;
+use halo_spider::scheduler::{self, Scheduler, Task, TaskResolution};
+
+let scheduler = scheduler::Redis::new("redis://127.0.0.1:6379", "jobs:news")
+    .with_worker(scheduler::Worker::new("news-worker-a"));
+
+let claimed = scheduler.take_batch_ready(32).await?;
+
+let leases = claimed
+    .iter()
+    .map(|task| task.lease.clone())
+    .collect::<Vec<_>>();
+scheduler.complete_batch(leases).await?;
+
+let claimed = scheduler.take_batch_ready(8).await?;
+let follow = Task::new(Request::new("https://example.com/follow"));
+scheduler
+    .complete_and_enqueue_batch(vec![TaskResolution::new(
+        claimed[0].lease.clone(),
+        vec![follow],
+    )])
+    .await?;
+```
+
+这层语义也要明确：
+
+- `batch` 是统一吞吐入口，不是“多条 task 一起事务提交”
+- 某一条 lease 失败时，前面已经成功的那部分不会自动回滚
+- 所以排查时，还是优先看每条 lease 自己的日志和 snapshot
+
 ## 优雅退出怎么做
 
 如果某个 worker 不是崩溃，而是准备发布、缩容或手动下线，

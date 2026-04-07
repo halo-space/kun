@@ -24,6 +24,6 @@ pub use runtime::{
     RuntimeReporter, WorkerMetricsKey,
 };
 pub use snapshot::{InflightTaskSnapshot, Overview, Snapshot, WorkerSnapshot};
-pub use task::{ClaimedTask, Task, TaskId, TaskLease};
+pub use task::{ClaimedTask, Task, TaskId, TaskLease, TaskResolution};
 pub use traits::Scheduler;
 pub use worker::Worker;

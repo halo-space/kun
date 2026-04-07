@@ -90,6 +90,20 @@ impl ClaimedTask {
     }
 }
 
+/// One scheduler resolution that completes a lease and optionally enqueues
+/// follow-up tasks.
+#[derive(Debug, Clone)]
+pub struct TaskResolution {
+    pub lease: TaskLease,
+    pub tasks: Vec<Task>,
+}
+
+impl TaskResolution {
+    pub fn new(lease: TaskLease, tasks: Vec<Task>) -> Self {
+        Self { lease, tasks }
+    }
+}
+
 /// A request plus scheduler-owned execution metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {

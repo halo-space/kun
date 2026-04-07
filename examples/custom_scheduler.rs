@@ -2,7 +2,7 @@ use halo_spider::engine::Engine;
 use halo_spider::error::SpiderError;
 use halo_spider::request::Request;
 use halo_spider::scheduler::checkpoint::{Checkpoint, Persist};
-use halo_spider::scheduler::{self, Scheduler, Task, TaskLease};
+use halo_spider::scheduler::{self, Scheduler, Task, TaskLease, TaskResolution};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex;
 
@@ -93,8 +93,10 @@ async fn main() -> Result<(), SpiderError> {
     custom_scheduler_demo().await?;
     custom_checkpoint_demo().await?;
     memory_snapshot_demo().await?;
+    memory_batch_demo().await?;
     memory_scope_overview_demo().await?;
     redis_snapshot_demo().await?;
+    redis_batch_demo().await?;
     redis_scope_overview_demo().await?;
     Ok(())
 }
@@ -230,6 +232,48 @@ async fn memory_scope_overview_demo() -> Result<(), SpiderError> {
     Ok(())
 }
 
+async fn memory_batch_demo() -> Result<(), SpiderError> {
+    println!("== memory scheduler batch demo ==");
+
+    let scheduler = scheduler::Memory::default()
+        .with_scope("examples:custom-scheduler:memory-batch")
+        .with_worker(scheduler::Worker::new("example-memory-batch-worker"));
+    scheduler
+        .enqueue(Task::new(Request::new("https://example.com/batch/a")))
+        .await?;
+    scheduler
+        .enqueue(Task::new(Request::new("https://example.com/batch/b")))
+        .await?;
+    scheduler
+        .enqueue(Task::new(Request::new("https://example.com/batch/c")))
+        .await?;
+
+    let claimed = scheduler.take_batch_ready(2).await?;
+    println!(
+        "claimed batch urls: {:?}",
+        claimed
+            .iter()
+            .map(|task| task.task.request.url.as_str())
+            .collect::<Vec<_>>()
+    );
+    scheduler
+        .complete_batch(claimed.iter().map(|task| task.lease.clone()).collect())
+        .await?;
+
+    let remaining = scheduler.take_batch_ready(1).await?;
+    scheduler
+        .complete_and_enqueue_batch(vec![TaskResolution::new(
+            remaining[0].lease.clone(),
+            vec![Task::new(Request::new("https://example.com/batch/follow"))],
+        )])
+        .await?;
+
+    println!("counts after batch operations: {:?}", Scheduler::counts(&scheduler).await?);
+
+    scheduler.close().await?;
+    Ok(())
+}
+
 async fn redis_snapshot_demo() -> Result<(), SpiderError> {
     println!("== redis scheduler snapshot demo ==");
 
@@ -287,5 +331,41 @@ async fn redis_scope_overview_demo() -> Result<(), SpiderError> {
 
     scheduler.close().await?;
 
+    Ok(())
+}
+
+async fn redis_batch_demo() -> Result<(), SpiderError> {
+    println!("== redis scheduler batch demo ==");
+
+    let Ok(url) = std::env::var("HALO_SPIDER_EXAMPLE_REDIS_URL") else {
+        println!(
+            "set HALO_SPIDER_EXAMPLE_REDIS_URL=redis://127.0.0.1:6379 to run the Redis batch demo"
+        );
+        return Ok(());
+    };
+
+    let scheduler = scheduler::Redis::new(url, "examples:custom-scheduler:batch")
+        .with_worker(scheduler::Worker::new("example-redis-batch-worker"));
+    scheduler
+        .enqueue(Task::new(Request::new("https://example.com/redis-batch/a")))
+        .await?;
+    scheduler
+        .enqueue(Task::new(Request::new("https://example.com/redis-batch/b")))
+        .await?;
+
+    let claimed = scheduler.take_batch_ready(2).await?;
+    println!(
+        "redis claimed batch urls: {:?}",
+        claimed
+            .iter()
+            .map(|task| task.task.request.url.as_str())
+            .collect::<Vec<_>>()
+    );
+    scheduler
+        .requeue_batch(claimed.iter().map(|task| task.lease.clone()).collect())
+        .await?;
+
+    println!("redis batch counts: {:?}", Scheduler::counts(&scheduler).await?);
+    scheduler.close().await?;
     Ok(())
 }

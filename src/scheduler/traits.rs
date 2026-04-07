@@ -2,7 +2,7 @@ use crate::error::SpiderError;
 use crate::scheduler::checkpoint::{Checkpoint, Counts};
 use crate::scheduler::runtime::RuntimeEvent;
 use crate::scheduler::snapshot::{Overview, Snapshot};
-use crate::scheduler::{ClaimedTask, Task, TaskLease};
+use crate::scheduler::{ClaimedTask, Task, TaskLease, TaskResolution};
 use jiff::SignedDuration;
 
 #[allow(async_fn_in_trait)]
@@ -75,8 +75,37 @@ pub trait Scheduler: Send + Sync {
     /// The caller must later resolve it with the returned task lease.
     async fn take_ready(&self) -> Result<Option<ClaimedTask>, SpiderError>;
 
+    /// Takes up to `limit` ready tasks for execution and moves them into
+    /// `inflight`.
+    ///
+    /// This is a throughput convenience API, not a cross-task transaction.
+    async fn take_batch_ready(&self, limit: usize) -> Result<Vec<ClaimedTask>, SpiderError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+
+        let mut tasks = Vec::with_capacity(limit);
+        while tasks.len() < limit {
+            let Some(task) = self.take_ready().await? else {
+                break;
+            };
+            tasks.push(task);
+        }
+        Ok(tasks)
+    }
+
     /// Marks an inflight task as completed and removes it from the scheduler.
     async fn complete(&self, lease: &TaskLease) -> Result<(), SpiderError>;
+
+    /// Marks a batch of inflight tasks as completed.
+    ///
+    /// This is a throughput convenience API, not a cross-task transaction.
+    async fn complete_batch(&self, leases: Vec<TaskLease>) -> Result<(), SpiderError> {
+        for lease in leases {
+            self.complete(&lease).await?;
+        }
+        Ok(())
+    }
 
     /// Atomically completes one inflight task and enqueues follow-up tasks
     /// back into the scheduler when the backend supports it.
@@ -94,8 +123,33 @@ pub trait Scheduler: Send + Sync {
         self.complete(lease).await
     }
 
+    /// Completes a batch of inflight tasks and enqueues follow-up tasks for
+    /// each lease.
+    ///
+    /// This is a throughput convenience API, not a cross-task transaction.
+    async fn complete_and_enqueue_batch(
+        &self,
+        resolutions: Vec<TaskResolution>,
+    ) -> Result<(), SpiderError> {
+        for resolution in resolutions {
+            self.complete_and_enqueue(&resolution.lease, resolution.tasks)
+                .await?;
+        }
+        Ok(())
+    }
+
     /// Marks an inflight task as not completed and requeues it for later work.
     async fn requeue(&self, lease: &TaskLease) -> Result<(), SpiderError>;
+
+    /// Requeues a batch of inflight tasks for later work.
+    ///
+    /// This is a throughput convenience API, not a cross-task transaction.
+    async fn requeue_batch(&self, leases: Vec<TaskLease>) -> Result<(), SpiderError> {
+        for lease in leases {
+            self.requeue(&lease).await?;
+        }
+        Ok(())
+    }
 
     /// Releases inflight tasks currently owned by this scheduler worker back
     /// into the runnable buckets.
