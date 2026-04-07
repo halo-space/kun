@@ -959,7 +959,7 @@ impl Redis {
 
         for _ in 0..usize::try_from(reclaimed).unwrap_or_default() {
             crate::trace::warn(
-                "scheduler.redis.reclaimed_stale_inflight",
+                "scheduler.reclaim",
                 vec![crate::trace::prop("scope", self.scope())],
             );
         }

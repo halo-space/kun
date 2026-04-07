@@ -200,7 +200,7 @@ where
         TaskOutcome::Error(error) => {
             stats.record_error();
             crate::trace::error(
-                "task.failed",
+                "task.fail",
                 vec![
                     crate::trace::prop("spider", spider_name),
                     crate::trace::prop("url", url.as_str()),
@@ -272,7 +272,7 @@ async fn resolve_scheduler_transition(
             )
             .await;
             crate::trace::warn(
-                "task.lease_resolution_failed",
+                "task.lease_resolve_fail",
                 vec![
                     crate::trace::prop("spider", spider_name),
                     crate::trace::prop("task_id", lease.task_id().as_str()),
@@ -392,7 +392,7 @@ where
                 }
                 Err(error) => {
                     crate::trace::warn(
-                        "pipeline.item_failed",
+                        "pipeline.fail",
                         vec![
                             crate::trace::prop("spider", self.spider_name),
                             crate::trace::prop("error", &error),
@@ -419,7 +419,7 @@ where
                 Err(error) => {
                     self.stats.record_store_error();
                     crate::trace::warn(
-                        "store.batch_write_failed",
+                        "store.write_fail",
                         vec![
                             crate::trace::prop("spider", self.spider_name),
                             crate::trace::prop("error", &error),
@@ -541,7 +541,7 @@ where
                 Ok(crate::robots::Decision::Disallow) => {
                     self.stats.record_robots_disallow();
                     crate::trace::warn(
-                        "robots.request_disallowed",
+                        "robots.blocked",
                         vec![
                             crate::trace::prop("spider", self.spider_name),
                             crate::trace::prop("url", context.request.url.as_str()),
@@ -553,7 +553,7 @@ where
                     self.stats.record_robots_delay();
                     let backoff = u64::try_from(delay.as_millis()).unwrap_or_default().max(1);
                     crate::trace::warn(
-                        "robots.request_delayed",
+                        "robots.delayed",
                         vec![
                             crate::trace::prop("spider", self.spider_name),
                             crate::trace::prop("url", context.request.url.as_str()),
@@ -574,7 +574,7 @@ where
 
         self.stats.record_request();
         crate::trace::info(
-            "request",
+            "request.start",
             vec![
                 crate::trace::prop("spider", self.spider_name),
                 crate::trace::prop("url", context.request.url.as_str()),
@@ -597,7 +597,7 @@ where
             Ok(response) => {
                 self.stats.record_response();
                 crate::trace::info(
-                    "response",
+                    "request.ok",
                     vec![
                         crate::trace::prop("spider", self.spider_name),
                         crate::trace::prop("url", context.request.url.as_str()),
@@ -609,8 +609,9 @@ where
             }
             Err(error) => {
                 crate::trace::warn(
-                    "download.failed",
+                    "request.fail",
                     vec![
+                        crate::trace::prop("spider", self.spider_name),
                         crate::trace::prop("url", context.request.url.as_str()),
                         crate::trace::prop("error", &error),
                     ],
@@ -693,7 +694,7 @@ where
             }
             Err(error) => {
                 crate::trace::error(
-                    "spider.callback_failed",
+                    "spider.fail",
                     vec![
                         crate::trace::prop("spider", self.spider_name),
                         crate::trace::prop("url", context.request.url.as_str()),

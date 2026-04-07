@@ -445,7 +445,7 @@ impl<C: Cache> Memory<C> {
                     self.remember_unavailable_retry(origin.as_str(), current_time)
                         .await;
                     crate::trace::warn(
-                        "robots.cache.refresh_failed_reuse",
+                        "robots.cache_stale_reuse",
                         vec![crate::trace::prop("origin", origin.as_str())],
                     );
                     let policy = Arc::new(Policy::from_cache_policy(&entry.policy));
@@ -460,7 +460,7 @@ impl<C: Cache> Memory<C> {
                     .unavailable_policy
                     .unwrap_or(self.unavailable_policy);
                 crate::trace::warn(
-                    "robots.fetch_unavailable_policy_applied",
+                    "robots.fallback_policy",
                     vec![
                         crate::trace::prop("origin", origin.as_str()),
                         crate::trace::prop("unavailable_policy", format!("{unavailable_policy:?}")),
@@ -942,7 +942,7 @@ async fn fetch_policy_entry(
         Ok(response) => response,
         Err(error) => {
             crate::trace::warn(
-                "robots.fetch_failed",
+                "robots.fetch_fail",
                 vec![
                     crate::trace::prop("robots_url", robots_url.as_str()),
                     crate::trace::prop("error", error),
@@ -958,7 +958,7 @@ async fn fetch_policy_entry(
                 Ok(body) => body,
                 Err(error) => {
                     crate::trace::warn(
-                        "robots.body_read_failed",
+                        "robots.read_fail",
                         vec![
                             crate::trace::prop("robots_url", robots_url.as_str()),
                             crate::trace::prop("error", error),
@@ -985,7 +985,7 @@ async fn fetch_policy_entry(
         ))),
         status => {
             crate::trace::warn(
-                "robots.unsuccessful_status",
+                "robots.bad_status",
                 vec![
                     crate::trace::prop("robots_url", robots_url.as_str()),
                     crate::trace::prop("status", status),

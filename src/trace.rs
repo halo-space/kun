@@ -29,10 +29,6 @@ pub fn info(name: &'static str, properties: Properties) {
     log("info", name, properties);
 }
 
-pub fn debug(name: &'static str, properties: Properties) {
-    log("debug", name, properties);
-}
-
 pub fn warn(name: &'static str, properties: Properties) {
     log("warn", name, properties);
 }

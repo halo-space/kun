@@ -552,7 +552,7 @@ where
                         let Some(resolved) = resolve_url(request.url.as_str(), sitemap.as_str())
                         else {
                             crate::trace::warn(
-                                "robots.sitemap.invalid",
+                                "sitemap.invalid",
                                 vec![
                                     crate::trace::prop("spider", spider_name),
                                     crate::trace::prop("sitemap", sitemap.as_str()),
@@ -568,7 +568,7 @@ where
                 }
                 Err(error) => {
                     crate::trace::warn(
-                        "robots.sitemap.read_failed",
+                        "sitemap.read_fail",
                         vec![
                             crate::trace::prop("spider", spider_name),
                             crate::trace::prop("url", request.url.as_str()),
@@ -591,7 +591,7 @@ where
                 Ok(response) => response,
                 Err(error) => {
                     crate::trace::warn(
-                        "robots.sitemap.fetch_failed",
+                        "sitemap.fetch_fail",
                         vec![
                             crate::trace::prop("spider", spider_name),
                             crate::trace::prop("sitemap", sitemap_url.as_str()),
@@ -604,7 +604,7 @@ where
 
             if !(200..300).contains(&response.status) {
                 crate::trace::warn(
-                    "robots.sitemap.unsuccessful_status",
+                    "sitemap.bad_status",
                     vec![
                         crate::trace::prop("spider", spider_name),
                         crate::trace::prop("sitemap", sitemap_url.as_str()),
@@ -620,7 +620,7 @@ where
                 let Some(resolved) = resolve_url(sitemap_url.as_str(), nested_sitemap.as_str())
                 else {
                     crate::trace::warn(
-                        "robots.sitemap.nested_invalid",
+                        "sitemap.nested_invalid",
                         vec![
                             crate::trace::prop("spider", spider_name),
                             crate::trace::prop("sitemap", nested_sitemap.as_str()),
@@ -638,7 +638,7 @@ where
             for page_url in entries.urls {
                 let Some(resolved) = resolve_url(sitemap_url.as_str(), page_url.as_str()) else {
                     crate::trace::warn(
-                        "robots.sitemap.entry_invalid",
+                        "sitemap.entry_invalid",
                         vec![
                             crate::trace::prop("spider", spider_name),
                             crate::trace::prop("url", page_url.as_str()),
@@ -688,7 +688,7 @@ where
     pub async fn run<Sp: Spider>(&mut self, spider: &Sp) -> Result<Vec<SpiderOutput>, SpiderError> {
         let spider_name = spider.name();
         crate::trace::info(
-            "engine.started",
+            "engine.start",
             vec![crate::trace::prop("spider", spider_name)],
         );
 
@@ -860,7 +860,7 @@ where
         let total_items: usize = outputs.iter().map(|o| o.items.len()).sum();
         let snapshot = stats.snapshot();
         crate::trace::info(
-            "engine.stopped",
+            "engine.stop",
             vec![
                 crate::trace::prop("spider", spider_name),
                 crate::trace::prop("rounds", round),

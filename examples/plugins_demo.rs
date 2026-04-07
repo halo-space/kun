@@ -78,7 +78,7 @@ impl Middleware for CustomSignatureMiddleware {
                 .entry("X-Signature".to_string())
                 .or_insert_with(|| vec![sig.clone()]);
             halo_spider::trace::info(
-                "custom_signature.signed_request",
+                "signature.sign",
                 vec![
                     halo_spider::trace::prop("url", context.request.url.as_str()),
                     halo_spider::trace::prop("signature", sig.as_str()),

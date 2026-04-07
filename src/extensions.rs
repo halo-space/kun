@@ -22,7 +22,7 @@ impl Extension for Summary {
         Box::pin(async move {
             if let Signal::SpiderClosed(closed) = signal {
                 crate::trace::info(
-                    "extension.summary",
+                    "summary",
                     vec![
                         crate::trace::prop("spider", closed.spider_name.as_str()),
                         crate::trace::prop("request_count", closed.stats.request_count),

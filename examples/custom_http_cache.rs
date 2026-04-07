@@ -37,7 +37,7 @@ impl Cache for DemoCache {
         Box::pin(async move {
             let entry = self.entries.lock().await.get(key).cloned();
             halo_spider::trace::info(
-                "custom_http_cache.load",
+                "http_cache.load",
                 vec![
                     halo_spider::trace::prop("key", key),
                     halo_spider::trace::prop("hit", entry.is_some()),
@@ -50,7 +50,7 @@ impl Cache for DemoCache {
     fn save<'a>(&'a self, entry: &'a Entry) -> BoxFuture<'a, Result<(), SpiderError>> {
         Box::pin(async move {
             halo_spider::trace::info(
-                "custom_http_cache.save",
+                "http_cache.save",
                 vec![halo_spider::trace::prop("key", entry.key.as_str())],
             );
             self.entries
@@ -64,7 +64,7 @@ impl Cache for DemoCache {
     fn remove<'a>(&'a self, key: &'a str) -> BoxFuture<'a, Result<(), SpiderError>> {
         Box::pin(async move {
             halo_spider::trace::info(
-                "custom_http_cache.remove",
+                "http_cache.remove",
                 vec![halo_spider::trace::prop("key", key)],
             );
             self.entries.lock().await.remove(key);

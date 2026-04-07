@@ -42,7 +42,7 @@ impl Spider for PeriodSpider {
         meta.insert("front_page".to_string(), Value::String(front_page.clone()));
 
         halo_spider::trace::info(
-            "period.latest_edition_resolved",
+            "period.latest",
             vec![
                 halo_spider::trace::prop("period_date", period_date.as_str()),
                 halo_spider::trace::prop("front_page", front_page.as_str()),
@@ -77,7 +77,7 @@ impl PeriodSpider {
             .unwrap_or("unknown");
 
         halo_spider::trace::info(
-            "period.edition_parsed",
+            "period.edition",
             vec![
                 halo_spider::trace::prop("period_date", period_date),
                 halo_spider::trace::prop("front_page", front_page),
@@ -109,7 +109,7 @@ impl PeriodSpider {
 
     async fn parse_detail(&self, response: &Response) -> Result<Output, SpiderError> {
         halo_spider::trace::info(
-            "period.detail_parsed",
+            "period.detail",
             vec![halo_spider::trace::prop("url", response.url.as_str())],
         );
 

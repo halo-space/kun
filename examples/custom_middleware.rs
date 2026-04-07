@@ -69,7 +69,7 @@ impl Middleware for RequestLoggerMiddleware {
     ) -> BoxFuture<'a, Result<Flow, SpiderError>> {
         Box::pin(async move {
             halo_spider::trace::info(
-                "request_logger.request",
+                "request_logger.start",
                 vec![
                     halo_spider::trace::prop("url", context.request.url.as_str()),
                     halo_spider::trace::prop("method", context.request.method.as_str()),
@@ -87,7 +87,7 @@ impl Middleware for RequestLoggerMiddleware {
         Box::pin(async move {
             if let Some(ref resp) = context.response {
                 halo_spider::trace::info(
-                    "request_logger.response",
+                    "request_logger.ok",
                     vec![
                         halo_spider::trace::prop("url", context.request.url.as_str()),
                         halo_spider::trace::prop("status", resp.status),
@@ -197,7 +197,7 @@ impl PeriodDemoSpider {
         let title = response.css("h2.S10_bb").text().one().unwrap_or_default();
 
         halo_spider::trace::info(
-            "period_demo.edition_parsed",
+            "period.edition",
             vec![
                 halo_spider::trace::prop("period_date", period_date),
                 halo_spider::trace::prop("title", title.as_str()),
