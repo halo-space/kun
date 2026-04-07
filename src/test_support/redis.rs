@@ -457,6 +457,17 @@ fn eval_scheduler_claim_ready(
 
     let Some((task_id, task_json)) = choose_best_ready_task(state, &keys[0], &keys[1], &keys[2])?
     else {
+        let known_worker = state
+            .hashes
+            .get(&keys[11])
+            .and_then(|workers| workers.get(&args[2]))
+            .cloned();
+        if known_worker.is_some() {
+            sync_worker_runtime_meta(
+                state, &keys[10], &keys[11], &keys[12], &keys[13], &args[2], &args[0], &args[1],
+                &args[4],
+            );
+        }
         return Ok(bulk_reply(None));
     };
 

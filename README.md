@@ -169,7 +169,8 @@ let settings = Settings::default()
 - 如果你想调整这层恢复窗口、显式指定 worker 身份或 heartbeat 节奏，统一改 `scheduler::Worker::new(...).with_lease_timeout(...).with_heartbeat_interval(...)`；如果你明确不想要这层自动回收，也可以在 `Worker` 上调用 `.without_lease_timeout()`
 - 如果某个 worker 准备优雅下线，不想等 lease timeout 再让别的 worker 接手，可以显式调用 `scheduler.release_inflight().await?`，把当前 worker 手里的 inflight task 主动放回 `ready / delayed`
 - `last_seen` 这类 worker runtime touch 现在只会在成功的 runtime 迁移上刷新；stale lease 失败的 `heartbeat / complete / requeue` 不会再误把 worker 刷成“活跃”
-- `snapshot()`、`counts()`、`checkpoint()` 这类只读/静态读取入口不会把当前调用方登记成活跃 worker；真正会刷新 worker runtime 的是成功的 `take_ready / complete / requeue / heartbeat`，而不是单纯 `enqueue()` 或空轮询
+- `snapshot()`、`counts()`、`checkpoint()` 这类只读/静态读取入口不会把当前调用方登记成活跃 worker；单纯 `enqueue()` 也不会
+- 对已经参与过 lease 生命周期的 worker，空轮询 `take_ready()` 会继续刷新 `last_seen`，这样 idle 但仍在线的 worker 不会被误判成 stale
 - 如果你是直接管理 scheduler 生命周期，不是交给 `Engine::run(...)`，结束时也可以统一调用 `scheduler.close().await?`；如果是优雅下线 worker，通常是先 `release_inflight()`，再 `close()`
 - 如果你想自定义 checkpoint 后端，可以用 `scheduler::checkpoint::Memory::load(scheduler::checkpoint::Redis::new(...)).await?`
 - `checkpoint` 仍然只是静态快照恢复边界；它不会替代 durable scheduler 的 runtime reclaim

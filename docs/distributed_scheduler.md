@@ -102,7 +102,9 @@ for task in &snapshot.inflight_tasks {
 - `snapshot()` 读的是某个 namespace 当前这一刻的运行时状态
 - `Engine::stats()` 读的是单个 engine 实例生命周期内的累计计数
 - `snapshot.workers` 是 worker 级运行态视图；`snapshot.worker_ids` 只是聚合后的 worker id 集合
-- `snapshot()` / `counts()` / `checkpoint()` 不会把当前调用方登记成活跃 worker；真正刷新 worker runtime 的是成功的 `take_ready / complete / requeue / heartbeat`
+- `snapshot()` / `counts()` / `checkpoint()` 不会把当前调用方登记成活跃 worker
+- 单纯 `enqueue()` 也不会创建 worker runtime
+- 但如果某个 worker 已经参与过 lease 生命周期，后续空轮询 `take_ready()` 仍会刷新它的 `last_seen`，避免 idle worker 被误判成 stale
 
 ## 跨 job 运维怎么读
 
@@ -206,7 +208,8 @@ scheduler.close().await?;
 - 被释放的 task 会按自己的 `ready_at` 回到 `ready / delayed`
 - 它适合 graceful drain，不是日常正常完成任务的主路径
 - 如果 worker 是直接崩溃，还是靠 `lease_timeout` + reclaim 自动恢复
-- 单纯 `enqueue()` 或空轮询 `take_ready()` 不会留下 worker runtime；`snapshot.workers` 更接近“真正参与过 lease 生命周期的 worker”
+- 单纯 `enqueue()` 不会留下 worker runtime；`snapshot.workers` 更接近“真正参与过 lease 生命周期的 worker”
+- 对已经注册过的 worker，空轮询 `take_ready()` 仍会续一下 `last_seen`
 
 另外有一个实现边界：
 

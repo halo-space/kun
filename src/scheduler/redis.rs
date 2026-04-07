@@ -67,6 +67,23 @@ local function push_ready(id)
     redis.call('HSET', ready_order, id, tostring(next_ready_order))
 end
 
+local function sync_worker_runtime()
+    redis.call('SADD', workers, worker_id)
+    redis.call('HSET', worker_seen, worker_id, tostring(now))
+
+    if lease_timeout ~= '' then
+        redis.call('HSET', worker_lease_timeout, worker_id, lease_timeout)
+    else
+        redis.call('HDEL', worker_lease_timeout, worker_id)
+    end
+
+    if heartbeat_interval ~= '' then
+        redis.call('HSET', worker_heartbeat_interval, worker_id, heartbeat_interval)
+    else
+        redis.call('HDEL', worker_heartbeat_interval, worker_id)
+    end
+end
+
 local function route_task(id, task_json)
     local ok, task = pcall(cjson.decode, task_json)
     if not ok then
@@ -214,6 +231,10 @@ for _, task_id in ipairs(ready_ids) do
 end
 
 if not best_task_id then
+    local known_worker = redis.call('HGET', worker_seen, worker_id)
+    if known_worker then
+        sync_worker_runtime()
+    end
     return nil
 end
 
@@ -223,20 +244,7 @@ redis.call('SADD', inflight, best_task_id)
 redis.call('ZREM', inflight_deadlines, best_task_id)
 redis.call('HSET', inflight_workers, best_task_id, worker_id)
 redis.call('HSET', inflight_leases, best_task_id, lease_id)
-redis.call('SADD', workers, worker_id)
-redis.call('HSET', worker_seen, worker_id, tostring(now))
-
-if lease_timeout ~= '' then
-    redis.call('HSET', worker_lease_timeout, worker_id, lease_timeout)
-else
-    redis.call('HDEL', worker_lease_timeout, worker_id)
-end
-
-if heartbeat_interval ~= '' then
-    redis.call('HSET', worker_heartbeat_interval, worker_id, heartbeat_interval)
-else
-    redis.call('HDEL', worker_heartbeat_interval, worker_id)
-end
+sync_worker_runtime()
 
 if lease_timeout ~= '' then
     local deadline = now + tonumber(lease_timeout)
@@ -2722,6 +2730,43 @@ mod tests {
         assert_eq!(snapshot.counts, Counts::default());
         assert!(snapshot.worker_ids.is_empty());
         assert!(snapshot.workers.is_empty());
+
+        scheduler.close().await.unwrap();
+        server_handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn redis_scheduler_empty_take_ready_refreshes_registered_worker_runtime() {
+        let (url, _commands_rx, server_handle) = spawn_redis_server().await;
+        let scheduler = Redis::new(format!("redis://{url}"), "idle_refresh").with_worker(
+            Worker::new("worker-a").with_lease_timeout(SignedDuration::from_millis(20)),
+        );
+        scheduler
+            .enqueue(Task::new(Request::new("https://example.com/idle-refresh")))
+            .await
+            .unwrap();
+
+        let claimed = scheduler.take_ready().await.unwrap().unwrap();
+        scheduler.complete(&claimed.lease).await.unwrap();
+
+        let first_snapshot = scheduler.snapshot().await.unwrap();
+        assert_eq!(first_snapshot.workers.len(), 1);
+        let first_last_seen = first_snapshot.workers[0]
+            .last_seen
+            .expect("worker should have last_seen after complete");
+
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        assert!(scheduler.take_ready().await.unwrap().is_none());
+
+        let second_snapshot = scheduler.snapshot().await.unwrap();
+        assert_eq!(second_snapshot.workers.len(), 1);
+        let worker = &second_snapshot.workers[0];
+        let second_last_seen = worker.last_seen;
+        assert!(second_last_seen.is_some());
+        assert!(second_last_seen >= Some(first_last_seen));
+        assert!(!worker.is_stale);
+        assert_eq!(worker.inflight_count, 0);
+        assert_eq!(worker.active_lease_count, 0);
 
         scheduler.close().await.unwrap();
         server_handle.await.unwrap().unwrap();
