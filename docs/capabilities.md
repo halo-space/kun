@@ -175,6 +175,7 @@ browser 在这里的角色是“渲染型下载器”，不是另起一套通用
 - `scheduler::Redis` 是原生 Redis scheduler，并且现在带最小 `lease_timeout` stale inflight reclaim
 - `scheduler::checkpoint::Redis` 不是 scheduler，它只是 checkpoint 的 Redis 持久化实现
 - 如果用户要扩展自己的 scheduler / checkpoint 后端，分别实现 `scheduler::Scheduler` / `scheduler::checkpoint::Persist`
+- 如果要落地 `MySQL / PostgreSQL` 这类自定义 durable scheduler，先看 `docs/custom_scheduler_backend.md`，再参考 `examples/custom_scheduler_mysql.rs`
 
 ### 用户怎么指定 scheduler
 
@@ -223,6 +224,7 @@ browser 在这里的角色是“渲染型下载器”，不是另起一套通用
 - 如果需要优雅下线当前 worker、主动交回自己手里的 inflight task：`scheduler.release_inflight().await?`
 - 如果需要链式挂 checkpoint：`Engine::new().with_checkpoint(...)`
 - 如果需要链式从 checkpoint 恢复：`Engine::new().load_checkpoint(...).await?`
+- 如果要自己做 `MySQL / PostgreSQL` 这类 scheduler 后端，见 `docs/custom_scheduler_backend.md`
 - 更完整的分布式用法说明见 `docs/distributed_scheduler.md`
 
 最直接可以这样理解：
