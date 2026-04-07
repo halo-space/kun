@@ -599,6 +599,148 @@ let engine = Engine::new().with_signal_listener_for(
 - 当前也还没有持久化事件总线或跨进程分发
 - plugin 自动装载能力仍然只落在 `middleware` kind
 
+## Runtime 观测关系
+
+如果你在排查问题时不确定该看哪一层，可以先按下面理解：
+
+```text
+Engine runtime
+├─ stats
+│  └─ 单个 engine 实例生命周期内的累计计数
+├─ signals
+│  └─ 语义化 runtime 事件流
+├─ extensions
+│  └─ signals 的更友好封装
+├─ trace
+│  └─ 给人看的运行日志
+└─ telemetry
+   └─ 把 stats + scheduler runtime 导出到外部
+```
+
+- `stats` 适合回答“这个 engine 到现在累计发生了什么”
+- `signals` 适合回答“某个生命周期节点发生时，我想挂业务逻辑”
+- `extensions` 适合把常见 signal 监听封成更清晰的运行时模块
+- `trace` 适合排查单个 request、单轮任务提交、scheduler resolve 边界
+- `telemetry` 适合把 `stats + scheduler runtime` 统一接到 `Collector / File / Prometheus / OpenTelemetry`
+- 这几层不是互斥关系，而是面向不同读者和不同接线位置
+- 如果你什么都不配，engine 仍然能正常运行；只是没有额外日志、导出和监听
+
+最常见的判断方式：
+
+- 如果你想看“跑了多少条、失败了多少次”，先看 `Engine::stats()`
+- 如果你想在 `item_scraped`、`spider_closed`、`scheduler_event` 这些时机挂代码，优先用 `signals / extensions`
+- 如果你想排查“某个请求怎么走的、卡在 store 还是 scheduler resolve”，先看 `trace`
+- 如果你想接外部监控系统，再挂 `Engine::with_telemetry(...)`
+
+## 单次任务主线流转
+
+一条 task 在 engine 里的主线大致是：
+
+```text
+Engine::run
+-> open pipeline/store
+-> emit SpiderOpened
+-> enqueue start_requests
+-> scheduler.take_batch_ready()
+-> emit SchedulerEvent::Claimed
+-> run task with heartbeat
+   -> middleware(download)
+   -> robots check
+   -> stats.request_count++
+   -> trace request.start
+   -> http/browser fetch
+   -> stats.response_count++
+   -> trace request.ok / request.fail
+   -> emit ResponseReceived
+   -> middleware(spider)
+   -> spider.dispatch()
+   -> pipeline.process()
+   -> store.batch_write()
+   -> emit ItemScraped
+-> resolve scheduler transition
+   -> complete / complete_and_enqueue / requeue
+-> emit follow RequestScheduled
+-> loop ...
+-> emit SpiderClosed
+-> trace engine.stop
+-> scheduler.close()
+```
+
+更具体一点：
+
+- start requests 与 follow/retry request 在进入 scheduler 前，都会先过 dedup 和 allowed domain 检查
+- claim 成功后会立刻记录 `SchedulerEvent::Claimed`
+- 如果当前 backend 配了 heartbeat interval，任务执行期间会周期性 `heartbeat(lease)`；成功时会记录 `SchedulerEvent::Heartbeat`
+- `ResponseReceived` 发在 spider parse 前，方便调用方监听“下载成功，但业务还没处理”
+- item 只有在通过 pipeline 且成功写入 store 后，才会记录 `item_count` 并发 `ItemScraped`
+
+这里要特别注意提交边界：
+
+- 当前明确按 `store -> scheduler complete/complete_and_enqueue` 这条顺序提交任务结果
+- 这里不是跨 `store / scheduler` 的分布式事务
+- 如果 `store` 失败，这轮任务不会被静默标记成完成；日志里会出现 `engine.commit.store.fail`，并明确带 `scheduler_resolve=skipped`
+- 如果 `store` 已成功、但后续 `scheduler` resolve 失败，item 仍然已经写出；日志里会分别出现 `engine.commit.store.ok` 和 `engine.commit.scheduler_resolve.fail`
+
+## Task 结果分支
+
+任务执行结束后，统一会收口到 5 条结果分支：
+
+```text
+Success
+-> pipeline/store 成功
+-> scheduler.complete_and_enqueue(follows)
+-> SchedulerEvent::Completed
+-> emit follow RequestScheduled
+
+Retry
+-> stats.retry_count++
+-> scheduler.complete_and_enqueue(retry_task)
+-> SchedulerEvent::Completed
+-> emit retry RequestScheduled
+
+Drop
+-> scheduler.complete()
+-> SchedulerEvent::Completed
+
+Error
+-> stats.error_count++
+-> trace task.fail
+-> scheduler.requeue()
+-> SchedulerEvent::Requeued
+
+LeaseLost
+-> stats.error_count++
+-> trace task.lease_lost
+-> SchedulerEvent::LeaseLost
+```
+
+逐条理解：
+
+- `Success`
+  当前 task 已完成，follow request 会在同一次 scheduler resolve 里一起交给调度器
+- `Retry`
+  当前 task 逻辑上算这一轮结束，但会生成新的 retry task；它同样走 `complete_and_enqueue(...)`，只是 follow 变成 retry request
+- `Drop`
+  当前 task 被显式丢弃，不会再生成 follow / retry，也不会再回到 ready 队列
+- `Error`
+  当前 task 执行失败且当前 worker 仍然拥有 lease，于是会显式 `requeue()` 回调度器
+- `LeaseLost`
+  当前 worker 在 heartbeat 或 resolve 时已经失去 ownership；这时不会再假装自己成功提交，也不会继续替别的 worker resolve 这条 lease
+
+最常见的排查方法：
+
+- 看 `trace`：先确认是 `request.fail`、`spider.fail`、`engine.commit.store.fail` 还是 `engine.commit.scheduler_resolve.fail`
+- 看 `signals::SchedulerEvent`：确认当前 task 最终落到了 `Completed / Requeued / LeaseLost` 哪一支
+- 看 `Engine::stats()`：确认当前 engine 实例里 `error_count / retry_count / scheduler_*_count` 的累计变化
+- 看 `scheduler.snapshot()` / `scheduler.overview()`：确认这条 task 最后是在 `ready / delayed / inflight / completed` 哪个后端状态里
+
+对应代码入口：
+
+- task 主执行逻辑在 `engine/task.rs` 的 `TaskExecutor::run(...)`
+- pipeline/store 提交在 `process_spider_output(...)`
+- 结果收口在 `apply_task_run(...)`
+- scheduler resolve 边界在 `resolve_scheduler_transition(...)`
+
 ## Robots
 
 当前已经有一版更完整的 `robots.txt` 抓取策略。

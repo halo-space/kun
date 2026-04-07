@@ -198,6 +198,14 @@ let settings = Settings::default()
 - 完整 demo 见 `examples/custom_scheduler.rs`，里面现在同时包含 `scheduler::Memory`、`scheduler::Sqlite` 和 `scheduler::Redis` 的 `counts / snapshot / batch / control / scopes / snapshots / overview` 用法
 - 分布式运行说明见 `docs/distributed_scheduler.md`
 
+## Runtime 观测
+
+- `stats` 用来看单个 engine 实例的累计计数
+- `signals / extensions` 用来挂生命周期监听和运行时扩展
+- `trace` 用来排查单个 request、store 提交和 scheduler resolve 边界
+- `telemetry` 用来把 `stats + scheduler runtime` 统一导出到 `Collector / File / Prometheus / OpenTelemetry`
+- 更完整的运行流转图、`Success / Retry / Drop / Error / LeaseLost` 分支说明，以及排障建议见 `docs/capabilities.md`
+
 ```rust
 use halo_spider::dedup;
 use halo_spider::download::{Browser, Http};
