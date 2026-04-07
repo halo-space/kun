@@ -30,7 +30,10 @@ use url::Url;
 #[cfg(test)]
 use crate::engine::context::EngineContext;
 #[cfg(test)]
-use crate::engine::task::{TaskOutcome, run_middleware_request, run_middleware_response};
+use crate::engine::task::{
+    TaskOutcome, prepare_task_for_enqueue, resolve_scheduler_transition, run_middleware_request,
+    run_middleware_response,
+};
 #[cfg(test)]
 use crate::middleware::Stage;
 
@@ -1359,17 +1362,38 @@ where
 
         match outcome {
             TaskOutcome::Success(output) => {
+                let store_committed = !output.items.is_empty();
+                let mut scheduled_follows = Vec::new();
+                let mut follow_tasks = Vec::new();
                 for follow in &output.follows {
-                    let enqueued = enqueue_request(
-                        &mut self.scheduler,
+                    let task = prepare_task_for_enqueue(
                         &mut self.dedup,
-                        follow.clone(),
+                        Task::new(follow.clone()),
                         &[],
                         Some(self.stats.as_ref()),
                     )
                     .await?;
 
-                    if enqueued {
+                    if let Some(task) = task {
+                        scheduled_follows.push(follow.clone());
+                        follow_tasks.push(task);
+                    }
+                }
+                let committed = resolve_scheduler_transition(
+                    self.scheduler.complete_and_enqueue(&lease, follow_tasks),
+                    &lease,
+                    crate::signals::SchedulerEventKind::Completed,
+                    task_url.as_str(),
+                    spider.name(),
+                    self.stats.as_ref(),
+                    self.signals.as_ref(),
+                    "complete_and_enqueue",
+                    store_committed,
+                    scheduled_follows.len(),
+                )
+                .await?;
+                if committed {
+                    for follow in &scheduled_follows {
                         self.signals
                             .emit(crate::signals::Signal::request_scheduled(
                                 spider.name(),
@@ -1378,17 +1402,6 @@ where
                             .await;
                     }
                 }
-                self.scheduler.complete(&lease).await?;
-                record_scheduler_event(
-                    spider.name(),
-                    crate::signals::SchedulerEventKind::Completed,
-                    &lease,
-                    task_url.as_str(),
-                    self.stats.as_ref(),
-                    self.signals.as_ref(),
-                    None,
-                )
-                .await;
                 Ok(Some(crate::spider::Output {
                     items: output.items,
                     requests: output.follows,
@@ -1396,54 +1409,72 @@ where
             }
             TaskOutcome::Retry(retry_task) => {
                 self.stats.record_retry();
+                let retry_task = *retry_task;
                 let request = retry_task.request.clone();
-                self.scheduler.enqueue(*retry_task).await?;
-                self.signals
-                    .emit(crate::signals::Signal::request_scheduled(
-                        spider.name(),
-                        request,
-                    ))
-                    .await;
-                self.scheduler.complete(&lease).await?;
-                record_scheduler_event(
-                    spider.name(),
-                    crate::signals::SchedulerEventKind::Completed,
+                let retry_tasks = prepare_task_for_enqueue(
+                    &mut self.dedup,
+                    retry_task,
+                    &[],
+                    Some(self.stats.as_ref()),
+                )
+                .await?
+                .into_iter()
+                .collect::<Vec<_>>();
+                let queued_retry_tasks = retry_tasks.len();
+                let committed = resolve_scheduler_transition(
+                    self.scheduler.complete_and_enqueue(&lease, retry_tasks),
                     &lease,
+                    crate::signals::SchedulerEventKind::Completed,
                     task_url.as_str(),
+                    spider.name(),
                     self.stats.as_ref(),
                     self.signals.as_ref(),
-                    None,
+                    "complete_and_enqueue",
+                    false,
+                    queued_retry_tasks,
                 )
-                .await;
+                .await?;
+                if committed {
+                    self.signals
+                        .emit(crate::signals::Signal::request_scheduled(
+                            spider.name(),
+                            request,
+                        ))
+                        .await;
+                }
                 Ok(None)
             }
             TaskOutcome::Drop => {
-                self.scheduler.complete(&lease).await?;
-                record_scheduler_event(
-                    spider.name(),
-                    crate::signals::SchedulerEventKind::Completed,
+                resolve_scheduler_transition(
+                    self.scheduler.complete(&lease),
                     &lease,
+                    crate::signals::SchedulerEventKind::Completed,
                     task_url.as_str(),
+                    spider.name(),
                     self.stats.as_ref(),
                     self.signals.as_ref(),
-                    None,
+                    "complete",
+                    false,
+                    0,
                 )
-                .await;
+                .await?;
                 Ok(None)
             }
             TaskOutcome::Error(e) => {
                 self.stats.record_error();
-                self.scheduler.requeue(&lease).await?;
-                record_scheduler_event(
-                    spider.name(),
-                    crate::signals::SchedulerEventKind::Requeued,
+                resolve_scheduler_transition(
+                    self.scheduler.requeue(&lease),
                     &lease,
+                    crate::signals::SchedulerEventKind::Requeued,
                     task_url.as_str(),
+                    spider.name(),
                     self.stats.as_ref(),
                     self.signals.as_ref(),
-                    None,
+                    "requeue",
+                    false,
+                    0,
                 )
-                .await;
+                .await?;
                 Err(e)
             }
             TaskOutcome::LeaseLost(error) => Err(error),
@@ -2388,6 +2419,42 @@ mod tests {
                 store_error_count: 1,
                 scheduler_claim_count: 1,
                 scheduler_requeue_count: 1,
+                ..StatsSnapshot::default()
+            }
+        );
+    }
+
+    #[test]
+    fn engine_keeps_boundary_explicit_when_scheduler_resolve_fails_after_store_commit() {
+        let scheduler = FailCompleteAndEnqueueScheduler::default();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/item")))).unwrap();
+
+        let store = BatchOnlyStore::default();
+        let mut engine = Engine::from_parts(scheduler, StubHttp, StubBrowser)
+            .with_store(store.clone())
+            .with_pipeline(PassPipeline);
+        let mut step_chains = BTreeMap::new();
+
+        let error =
+            block_on(engine.execute_spider_once(&ItemSpider, None, &mut step_chains)).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("complete_and_enqueue failed after store commit"));
+        assert_eq!(store.items().len(), 1);
+
+        let checkpoint = block_on(Scheduler::checkpoint(&engine.scheduler)).unwrap();
+        assert!(checkpoint.ready.is_empty());
+        assert!(checkpoint.delayed.is_empty());
+        assert_eq!(checkpoint.inflight.len(), 1);
+        assert_eq!(checkpoint.inflight[0].request.url, "https://example.com/item");
+        assert_eq!(
+            engine.stats(),
+            StatsSnapshot {
+                request_count: 1,
+                response_count: 1,
+                item_count: 1,
+                scheduler_claim_count: 1,
                 ..StatsSnapshot::default()
             }
         );
@@ -3844,6 +3911,55 @@ mod tests {
             _spider_name: &str,
         ) -> Result<(), SpiderError> {
             Err(SpiderError::engine("store failed"))
+        }
+    }
+
+    #[derive(Default)]
+    struct FailCompleteAndEnqueueScheduler {
+        inner: Memory,
+    }
+
+    impl Scheduler for FailCompleteAndEnqueueScheduler {
+        async fn enqueue(&self, task: Task) -> Result<(), SpiderError> {
+            self.inner.enqueue(task).await
+        }
+
+        async fn checkpoint(&self) -> Result<Checkpoint, SpiderError> {
+            Scheduler::checkpoint(&self.inner).await
+        }
+
+        async fn counts(&self) -> Result<crate::scheduler::checkpoint::Counts, SpiderError> {
+            Scheduler::counts(&self.inner).await
+        }
+
+        async fn snapshot(&self) -> Result<crate::scheduler::Snapshot, SpiderError> {
+            self.inner.snapshot().await
+        }
+
+        async fn take_ready(&self) -> Result<Option<crate::scheduler::ClaimedTask>, SpiderError> {
+            self.inner.take_ready().await
+        }
+
+        async fn complete(&self, lease: &crate::scheduler::TaskLease) -> Result<(), SpiderError> {
+            self.inner.complete(lease).await
+        }
+
+        async fn complete_and_enqueue(
+            &self,
+            _lease: &crate::scheduler::TaskLease,
+            _tasks: Vec<Task>,
+        ) -> Result<(), SpiderError> {
+            Err(SpiderError::scheduler(
+                "complete_and_enqueue failed after store commit",
+            ))
+        }
+
+        async fn requeue(&self, lease: &crate::scheduler::TaskLease) -> Result<(), SpiderError> {
+            self.inner.requeue(lease).await
+        }
+
+        async fn has_pending(&self) -> Result<bool, SpiderError> {
+            self.inner.has_pending().await
         }
     }
 

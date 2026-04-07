@@ -204,6 +204,9 @@ browser 在这里的角色是“渲染型下载器”，不是另起一套通用
 - `scheduler::Redis` 默认会给 `inflight` task 建一个最小 lease；worker 崩溃或长时间不处理时，后续访问同 namespace 会把 stale `inflight` task 回收到 `ready / delayed`
 - `scheduler::Redis` 现在会通过 Redis 脚本原子完成 `enqueue / claim / complete / requeue / reclaim` 这类关键状态迁移；多个 worker 共享同一个 namespace 时，不会再因为“先读 ready 再分步迁移”而重复领取同一条 task
 - `scheduler::Redis` 现在还显式支持 `worker_id` ownership 校验，以及 engine 运行时的 heartbeat 续租
+- engine 当前已经把 `store -> scheduler complete/complete_and_enqueue` 这条提交边界显式化；这里不是跨 `store / scheduler` 的分布式事务
+- 如果 `store` 失败，日志会打出 `engine.commit.store.fail`，并明确标记 `scheduler_resolve=skipped`
+- 如果 `store` 已成功、但后续 `scheduler resolve` 失败，item 仍然已经写出；日志会分别出现 `engine.commit.store.ok` 和 `engine.commit.scheduler_resolve.fail`，这条边界按 at-least-once 理解
 - `scheduler::Scheduler` 现在统一还包含 `checkpoint() / counts() / snapshot() / scopes() / snapshots() / overview()` 这组读能力；共享后端可以返回多个 scope，本地后端则至少返回当前 scope
 - `scheduler::Memory` 现在在 active inflight task 上也会带出本地 `worker_id / lease_id`，所以 `snapshot.inflight_tasks`、`snapshot.workers` 与 `overview()` 在本地和共享后端上都是统一形状；`Redis` 额外再承担 stale reclaim、heartbeat 与跨 scope registry
 - `scheduler.snapshot().await?` 可以直接读取当前 scheduler scope 这一刻的运行时快照；对于 `scheduler::Redis` 来说，这个 scope 对应 Redis namespace
@@ -528,6 +531,7 @@ let engine = Engine::new().with_dedup(MethodUrlDedup {
 - `http_cache_store_count` 表示引擎把可缓存响应写入 http cache backend 的次数
 - `http_cache_miss_count` 表示可缓存请求在进入下载前没有命中可复用缓存条目的次数
 - `store_error_count` 表示最终写入 store 失败的次数
+- 如果需要排查 `store` 与 `scheduler` 之间哪一环失败，优先看 `engine.commit.store.ok / fail` 和 `engine.commit.scheduler_resolve.ok / fail` 这组日志
 - 如果需要流式观测，也可以通过 `Engine::with_stats_reporter(...)` 注册最小 reporter 钩子；如果想把 engine stats 和 scheduler runtime 一起导出，优先用 `Engine::with_telemetry(...)`
 
 当前边界也需要明确：

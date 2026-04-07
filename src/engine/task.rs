@@ -43,7 +43,7 @@ where
     Ok(true)
 }
 
-async fn prepare_task_for_enqueue<D>(
+pub(super) async fn prepare_task_for_enqueue<D>(
     dedup: &mut D,
     task: Task,
     allowed_domains: &[String],
@@ -116,6 +116,7 @@ where
     match run.outcome {
         TaskOutcome::Success(output) => {
             *round += 1;
+            let store_committed = !output.items.is_empty();
             let mut scheduled_follows = Vec::new();
             let mut follow_tasks = Vec::new();
             for follow in &output.follows {
@@ -140,6 +141,9 @@ where
                 spider_name,
                 stats,
                 signals,
+                "complete_and_enqueue",
+                store_committed,
+                scheduled_follows.len(),
             )
             .await?;
             if committed {
@@ -166,6 +170,7 @@ where
                     .await?
                     .into_iter()
                     .collect::<Vec<_>>();
+            let queued_retry_tasks = retry_tasks.len();
             let committed = resolve_scheduler_transition(
                 scheduler.complete_and_enqueue(&lease, retry_tasks),
                 &lease,
@@ -174,6 +179,9 @@ where
                 spider_name,
                 stats,
                 signals,
+                "complete_and_enqueue",
+                false,
+                queued_retry_tasks,
             )
             .await?;
             if committed {
@@ -194,6 +202,9 @@ where
                 spider_name,
                 stats,
                 signals,
+                "complete",
+                false,
+                0,
             )
             .await?;
         }
@@ -215,6 +226,9 @@ where
                 spider_name,
                 stats,
                 signals,
+                "requeue",
+                false,
+                0,
             )
             .await?;
         }
@@ -245,7 +259,7 @@ where
     Ok(())
 }
 
-async fn resolve_scheduler_transition(
+pub(super) async fn resolve_scheduler_transition(
     transition: impl std::future::Future<Output = Result<(), SpiderError>>,
     lease: &TaskLease,
     event: crate::signals::SchedulerEventKind,
@@ -253,9 +267,25 @@ async fn resolve_scheduler_transition(
     spider_name: &str,
     stats: &crate::stats::Tracker,
     signals: &crate::signals::Bus,
+    action: &'static str,
+    store_committed: bool,
+    queued_task_count: usize,
 ) -> Result<bool, SpiderError> {
     match transition.await {
         Ok(()) => {
+            crate::trace::info(
+                "engine.commit.scheduler_resolve.ok",
+                vec![
+                    crate::trace::prop("spider", spider_name),
+                    crate::trace::prop("action", action),
+                    crate::trace::prop("task", lease.task_id().as_str()),
+                    crate::trace::prop("worker", lease.worker_id()),
+                    crate::trace::prop("lease", lease.lease_id()),
+                    crate::trace::prop("url", url),
+                    crate::trace::prop("store_committed", store_committed),
+                    crate::trace::prop("queued_tasks", queued_task_count),
+                ],
+            );
             record_scheduler_event(spider_name, event, lease, url, stats, signals, None).await;
             Ok(true)
         }
@@ -277,14 +307,33 @@ async fn resolve_scheduler_transition(
                     crate::trace::prop("spider", spider_name),
                     crate::trace::prop("task", lease.task_id().as_str()),
                     crate::trace::prop("worker", lease.worker_id()),
-                    crate::trace::prop("action", scheduler_event_name(event)),
+                    crate::trace::prop("lease", lease.lease_id()),
+                    crate::trace::prop("action", action),
                     crate::trace::prop("url", url),
+                    crate::trace::prop("store_committed", store_committed),
+                    crate::trace::prop("queued_tasks", queued_task_count),
                     crate::trace::prop("error", &error),
                 ],
             );
             Ok(false)
         }
-        Err(error) => Err(error),
+        Err(error) => {
+            crate::trace::warn(
+                "engine.commit.scheduler_resolve.fail",
+                vec![
+                    crate::trace::prop("spider", spider_name),
+                    crate::trace::prop("action", action),
+                    crate::trace::prop("task", lease.task_id().as_str()),
+                    crate::trace::prop("worker", lease.worker_id()),
+                    crate::trace::prop("lease", lease.lease_id()),
+                    crate::trace::prop("url", url),
+                    crate::trace::prop("store_committed", store_committed),
+                    crate::trace::prop("queued_tasks", queued_task_count),
+                    crate::trace::prop("error", &error),
+                ],
+            );
+            Err(error)
+        }
     }
 }
 
@@ -308,16 +357,6 @@ impl TaskRunReservation {
             global_permit_guard,
             domain_semaphore,
         }
-    }
-}
-
-fn scheduler_event_name(event: crate::signals::SchedulerEventKind) -> &'static str {
-    match event {
-        crate::signals::SchedulerEventKind::Claimed => "claimed",
-        crate::signals::SchedulerEventKind::Completed => "completed",
-        crate::signals::SchedulerEventKind::Requeued => "requeued",
-        crate::signals::SchedulerEventKind::Heartbeat => "heartbeat",
-        crate::signals::SchedulerEventKind::LeaseLost => "lease_lost",
     }
 }
 
@@ -406,6 +445,14 @@ where
         if !kept_items.is_empty() {
             match self.store.batch_write(&kept_items, self.spider_name).await {
                 Ok(()) => {
+                    crate::trace::info(
+                        "engine.commit.store.ok",
+                        vec![
+                            crate::trace::prop("spider", self.spider_name),
+                            crate::trace::prop("url", request.url.as_str()),
+                            crate::trace::prop("items", kept_items.len()),
+                        ],
+                    );
                     for item in &kept_items {
                         self.stats.record_item();
                         self.signals
@@ -419,9 +466,12 @@ where
                 Err(error) => {
                     self.stats.record_store_error();
                     crate::trace::warn(
-                        "store.write_fail",
+                        "engine.commit.store.fail",
                         vec![
                             crate::trace::prop("spider", self.spider_name),
+                            crate::trace::prop("url", request.url.as_str()),
+                            crate::trace::prop("items", kept_items.len()),
+                            crate::trace::prop("scheduler_resolve", "skipped"),
                             crate::trace::prop("error", &error),
                         ],
                     );

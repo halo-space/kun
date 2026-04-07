@@ -255,3 +255,24 @@ scheduler.close().await?;
 - runtime reclaim
 
 这些都属于 `scheduler::Redis` 这种 durable scheduler 的运行时语义。
+
+## 和 store 的提交边界
+
+这一层也要明确：
+
+- `store` 和 `scheduler` 之间不是分布式事务
+- 当前 engine 会先写 `store`，再做 `scheduler complete / complete_and_enqueue`
+- 所以 `store` 成功但 `scheduler resolve` 失败时，item 仍然已经落出，这条边界按 at-least-once 理解
+
+排查时直接看这组日志就够了：
+
+- `engine.commit.store.ok`
+  - 表示 item 已经成功写入 store
+- `engine.commit.store.fail`
+  - 表示 store 失败，这时日志会带 `scheduler_resolve=skipped`
+- `engine.commit.scheduler_resolve.ok`
+  - 表示当前 lease 的 scheduler resolve 已经完成
+- `engine.commit.scheduler_resolve.fail`
+  - 表示 `store` 之后的 scheduler resolve 失败，需要看当前 lease、worker、url 再做恢复判断
+
+也就是说，这里追求的是“边界清楚、失败可诊断”，不是把 `store` 和 `scheduler` 强行做成一笔跨组件事务。

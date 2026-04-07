@@ -53,7 +53,7 @@ README 这里只保留总览；模块级细节统一放到 [docs/capabilities.md
 当前仍待补齐的底层能力：
 
 - 观测能力还不完整：虽然已经有细粒度 `stats`、`signals / extensions`、`Engine::with_stats_reporter(...)` 和统一 `telemetry` exporter 边界，也内置了 `telemetry::File`、`telemetry::Prometheus`、`telemetry::OpenTelemetry`，但还没有更完整的持久化事件总线聚合层，以及跨 job 运维控制面。
-- durable scheduler 已经覆盖 worker ownership、heartbeat、stale reclaim、scope snapshot、跨 scope `overview()` 与 worker 运行态运维视图；当前剩余缺口主要是更强的分布式协调、事务边界，以及更完整的 exporter / 事件总线 / 自动化运维能力。
+- durable scheduler 已经覆盖 worker ownership、heartbeat、stale reclaim、scope snapshot、跨 scope `overview()` 与 worker 运行态运维视图；`store -> scheduler resolve` 的提交边界也已经显式收口，但它不是跨组件分布式事务；当前剩余缺口主要是更强的分布式协调，以及更完整的 exporter / 事件总线 / 自动化运维能力。
 - `store` 边界已经建立，但更丰富的文件格式、更高阶消息语义和更多内置外部系统适配还没有继续铺开。
 - browser 已经支持内置 profile、结构化自定义 profile 与显式 `session_reuse`；当前剩余缺口主要是更高阶第三方 stealth 套件与跨 engine 更完整的品牌级指纹伪装。
 - validation 本身已经比较完整，但“校验失败如何映射到 runtime 行为”这层统一策略还没完全收口。
@@ -167,6 +167,9 @@ let settings = Settings::default()
 - `scheduler::Redis` 默认会给 `inflight` task 一个最小 `lease_timeout`，worker 崩溃或长时间失联后，后续访问同 namespace 时会把 stale `inflight` task 回收到 `ready / delayed`
 - `scheduler::Redis` 现在会通过 Redis 脚本原子完成 `claim / complete / requeue / reclaim` 这类关键迁移；多个 worker 共享同一个 namespace 时，不会再因为本地“先读 ready 再分步搬运”而重复领取同一条 task
 - `scheduler::Redis` 现在还显式支持 `worker_id`、runtime lease ownership 校验，以及 engine 运行中的 heartbeat 续租
+- engine 当前明确按 `store -> scheduler complete/complete_and_enqueue` 这条顺序提交任务结果；这里不是跨 `store / scheduler` 的分布式事务
+- 如果 `store` 失败，这轮任务不会被静默标记成完成；日志会打出 `engine.commit.store.fail`，并明确标记 `scheduler_resolve=skipped`
+- 如果 `store` 已成功、但后续 `scheduler complete / complete_and_enqueue` 失败，item 仍然已经写出；日志会分别出现 `engine.commit.store.ok` 和 `engine.commit.scheduler_resolve.fail`，这条边界按 at-least-once 理解
 - `scheduler.snapshot().await?` 读取的是当前 scheduler scope 这一刻的即时状态；对 `scheduler::Redis` 来说，这个 scope 对应 Redis namespace；它和 `Engine::stats()` 不一样，后者仍然是单个 engine 实例生命周期内的累计计数
 - `Engine::stats()` 里的 `scheduler_claim_count / scheduler_complete_count / scheduler_requeue_count / scheduler_heartbeat_count / scheduler_lease_lost_count` 反映的是当前 engine 实例实际参与到的 scheduler runtime 流转，不是后端全局聚合值；跨 scope / 跨 worker 运维视角仍然优先看 `scheduler.snapshot()` / `scheduler.overview()`
 - `scheduler::Memory` 现在在 active inflight task 上也会带出本地 `worker_id / lease_id`，所以 `snapshot.inflight_tasks`、`snapshot.workers`、`overview()` 这套读视图在本地和共享后端上都是同一形状；`Redis` 额外提供 stale reclaim、heartbeat 与跨 scope registry
