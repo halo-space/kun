@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 
 use fastrace::collector::{Reporter, SpanRecord};
+use jiff::{Timestamp, tz::TimeZone};
 
 pub use fastrace::collector::Config;
 pub use fastrace::prelude::{Span, SpanContext};
@@ -12,7 +13,7 @@ pub type Properties = Vec<Property>;
 /// Initialize a compact single-line console reporter for `fastrace`.
 ///
 /// Call this once during application startup if you want runtime logs printed
-/// to stderr in a concise `level name key=value` format. For OpenTelemetry
+/// to stderr in a concise `time level name key=value` format. For OpenTelemetry
 /// Collector deployment, use
 /// `trace::set_reporter(...)` with a `fastrace-opentelemetry` reporter instead.
 pub fn init_console() {
@@ -51,13 +52,29 @@ impl Reporter for CompactReporter {
 }
 
 fn format_span_line(span: &SpanRecord) -> String {
+    format_span_line_with_tz(span, TimeZone::system())
+}
+
+fn format_span_line_with_tz(span: &SpanRecord, time_zone: TimeZone) -> String {
+    let timestamp = format_timestamp(span.begin_time_unix_ns, time_zone);
     let level = property(span.properties.as_slice(), "level").unwrap_or("info");
     let fields = format_properties(span.properties.as_slice());
     if fields.is_empty() {
-        format!("{level} {}", span.name)
+        format!("{timestamp} {level} {}", span.name)
     } else {
-        format!("{level} {} {fields}", span.name)
+        format!("{timestamp} {level} {} {fields}", span.name)
     }
+}
+
+fn format_timestamp(nanoseconds: u64, time_zone: TimeZone) -> String {
+    Timestamp::from_nanosecond(i128::from(nanoseconds))
+        .map(|timestamp| {
+            timestamp
+                .to_zoned(time_zone)
+                .strftime("%Y-%m-%d %H:%M:%S%.3f")
+                .to_string()
+        })
+        .unwrap_or_else(|_| format!("ts={nanoseconds}"))
 }
 
 fn format_properties(properties: &[(Cow<'static, str>, Cow<'static, str>)]) -> String {
@@ -115,23 +132,36 @@ mod tests {
 
     #[test]
     fn formats_compact_line() {
-        let line = format_span_line(&span(
-            "request.ok",
-            &[
-                ("url", "https://example.com"),
-                ("status", "200"),
-                ("level", "info"),
-            ],
-        ));
-        assert_eq!(line, "info request.ok url=https://example.com status=200");
+        let line = format_span_line_with_tz(
+            &span(
+                "request.ok",
+                &[
+                    ("url", "https://example.com"),
+                    ("status", "200"),
+                    ("level", "info"),
+                ],
+            ),
+            TimeZone::UTC,
+        );
+        assert_eq!(
+            line,
+            "1970-01-01 00:00:00.000 info request.ok url=https://example.com status=200"
+        );
     }
 
     #[test]
     fn quotes_values_with_spaces() {
-        let line = format_span_line(&span(
-            "request.fail",
-            &[("error", "connection reset by peer"), ("level", "warn")],
-        ));
-        assert_eq!(line, "warn request.fail error=\"connection reset by peer\"");
+        let line = format_span_line_with_tz(
+            &span(
+                "request.fail",
+                &[("error", "connection reset by peer"), ("level", "warn")],
+            ),
+            TimeZone::UTC,
+        );
+        assert_eq!(
+            line,
+            "1970-01-01 00:00:00.000 warn request.fail error=\"connection reset by peer\""
+        );
     }
+
 }
