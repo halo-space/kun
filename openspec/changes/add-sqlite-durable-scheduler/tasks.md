@@ -14,8 +14,8 @@
 
 ## 3. 示例与文档
 
-- [ ] 3.1 在 `examples/custom_scheduler.rs` 增加 `scheduler::Sqlite` 使用示例。
-- [ ] 3.2 同步 `README.md`、`docs/capabilities.md` 与 `docs/distributed_scheduler.md`，说明 `Memory / Sqlite / Redis` 的选择边界。
+- [x] 3.1 在 `examples/custom_scheduler.rs` 增加 `scheduler::Sqlite` 使用示例。
+- [x] 3.2 同步 `README.md`、`docs/capabilities.md` 与 `docs/distributed_scheduler.md`，说明 `Memory / Sqlite / Redis` 的选择边界。
 
 ## 4. 验证
 

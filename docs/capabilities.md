@@ -147,6 +147,7 @@ browser 在这里的角色是“渲染型下载器”，不是另起一套通用
 当前对外更推荐直接使用 `scheduler` 根导出的类型：
 
 - `scheduler::Memory`
+- `scheduler::Sqlite`
 - `scheduler::Redis`
 - `scheduler::checkpoint::File`
 - `scheduler::checkpoint::Redis`
@@ -162,6 +163,7 @@ browser 在这里的角色是“渲染型下载器”，不是另起一套通用
   - `scheduler::Task`
   - `scheduler::Scheduler`
   - `scheduler::Memory`
+  - `scheduler::Sqlite`
   - `scheduler::Redis`
   - 这一层只关心 task 如何在 `ready / delayed / inflight` 之间流转
 - checkpoint 持久化层
@@ -171,8 +173,9 @@ browser 在这里的角色是“渲染型下载器”，不是另起一套通用
 所以：
 
 - `scheduler::Memory` 是纯内存 scheduler
+- `scheduler::Sqlite` 是单机 durable scheduler
 - `scheduler::checkpoint::Memory` 是 `scheduler::Memory + Persist` 的包装
-- `scheduler::Redis` 是原生 Redis scheduler，并且现在带最小 `lease_timeout` stale inflight reclaim
+- `scheduler::Redis` 是共享 durable scheduler，并且现在带最小 `lease_timeout` stale inflight reclaim
 - `scheduler::checkpoint::Redis` 不是 scheduler，它只是 checkpoint 的 Redis 持久化实现
 - 如果用户要扩展自己的 scheduler / checkpoint 后端，分别实现 `scheduler::Scheduler` / `scheduler::checkpoint::Persist`
 - 如果要落地 `MySQL / PostgreSQL` 这类自定义 durable scheduler，先看 `docs/custom_scheduler_backend.md`，再参考 `examples/custom_scheduler_mysql.rs`
@@ -201,20 +204,22 @@ browser 在这里的角色是“渲染型下载器”，不是另起一套通用
 - 默认 checkpoint 文件路径是 `output/scheduler-checkpoint.json`
 - `scheduler::checkpoint::Memory::default()` 只是“memory scheduler + file checkpoint”的便捷组合
 - 如果需要从默认 checkpoint 文件恢复：`scheduler::checkpoint::Memory::load_default().await?`
-- 如果需要原生 durable scheduler：直接传 `scheduler::Redis::new(...)`
+- 如果需要单机 durable scheduler：直接传 `scheduler::Sqlite::new("output/scheduler.db", "jobs:news")`
+- 如果需要共享 durable scheduler：直接传 `scheduler::Redis::new(...)`
+- `scheduler::Sqlite` 适合单机部署、需要持久化恢复、但不想依赖额外 Redis 服务的场景
 - `scheduler::Redis` 默认会给 `inflight` task 建一个最小 lease；worker 崩溃或长时间不处理时，后续访问同 namespace 会把 stale `inflight` task 回收到 `ready / delayed`
 - `scheduler::Redis` 现在会通过 Redis 脚本原子完成 `enqueue / claim / complete / requeue / reclaim` 这类关键状态迁移；多个 worker 共享同一个 namespace 时，不会再因为“先读 ready 再分步迁移”而重复领取同一条 task
 - `scheduler::Redis` 现在还显式支持 `worker_id` ownership 校验，以及 engine 运行时的 heartbeat 续租
 - engine 当前已经把 `store -> scheduler complete/complete_and_enqueue` 这条提交边界显式化；这里不是跨 `store / scheduler` 的分布式事务
 - 如果 `store` 失败，日志会打出 `engine.commit.store.fail`，并明确标记 `scheduler_resolve=skipped`
 - 如果 `store` 已成功、但后续 `scheduler resolve` 失败，item 仍然已经写出；日志会分别出现 `engine.commit.store.ok` 和 `engine.commit.scheduler_resolve.fail`，这条边界按 at-least-once 理解
-- `scheduler::Scheduler` 现在统一还包含 `checkpoint() / counts() / snapshot() / scopes() / snapshots() / overview()` 这组读能力；共享后端可以返回多个 scope，本地后端则至少返回当前 scope
-- `scheduler::Control` 现在统一包含 `pause_scope() / resume_scope() / release_scope() / purge_scope()` 这组运维控制入口；共享后端可以控制多个可见 scope，本地后端则控制当前 scope
-- `scheduler::Memory` 现在在 active inflight task 上也会带出本地 `worker_id / lease_id`，所以 `snapshot.inflight_tasks`、`snapshot.workers` 与 `overview()` 在本地和共享后端上都是统一形状；`Redis` 额外再承担 stale reclaim、heartbeat 与跨 scope registry
-- `scheduler.snapshot().await?` 可以直接读取当前 scheduler scope 这一刻的运行时快照；对于 `scheduler::Redis` 来说，这个 scope 对应 Redis namespace
+- `scheduler::Scheduler` 现在统一还包含 `checkpoint() / counts() / snapshot() / scopes() / snapshots() / overview()` 这组读能力；`Sqlite / Redis` 这类 durable backend 可以返回多个 scope，本地后端则至少返回当前 scope
+- `scheduler::Control` 现在统一包含 `pause_scope() / resume_scope() / release_scope() / purge_scope()` 这组运维控制入口；`Sqlite / Redis` 这类 durable backend 可以控制多个可见 scope，本地后端则控制当前 scope
+- `scheduler::Memory`、`scheduler::Sqlite`、`scheduler::Redis` 现在在 active inflight task 上都会带出 `worker_id / lease_id`，所以 `snapshot.inflight_tasks`、`snapshot.workers` 与 `overview()` 在本地和 durable backend 上都是统一形状；`Sqlite / Redis` 额外再承担 reclaim、heartbeat 与多 scope 运维
+- `scheduler.snapshot().await?` 可以直接读取当前 scheduler scope 这一刻的运行时快照；对于 `scheduler::Sqlite` 来说，这个 scope 对应当前数据库文件里的逻辑 scope；对于 `scheduler::Redis` 来说，这个 scope 对应 Redis namespace
 - `snapshot.inflight_tasks` 会直接带出每条 inflight task 的 task id、url、worker、lease、deadline 与 priority/depth 元信息
 - 如果同一个后端里有多个 job / scope，可以用 `scheduler.scopes_with_prefix(...)` 和 `scheduler.snapshots_with_prefix(...)` 做跨 job 运维读取；如果只想先看聚合摘要，可以直接读 `scheduler.overview()` 或 `scheduler.overview_with_prefix(...)`
-- 如果想让 `Memory / Redis / 以后其它后端` 共用同一套 worker 配置，统一传 `scheduler::Worker::new(...)` 给 `.with_worker(...)`
+- 如果想让 `Memory / Sqlite / Redis / 以后其它后端` 共用同一套 worker 配置，统一传 `scheduler::Worker::new(...)` 给 `.with_worker(...)`
 - 如果需要调整恢复窗口：`scheduler::Worker::new(...).with_lease_timeout(...)`
 - 如果需要显式指定 worker 或 heartbeat：`scheduler::Worker::new(...).with_heartbeat_interval(...)`
 - 如果明确不想启用这层自动回收：`scheduler::Worker::new(...).without_lease_timeout()`

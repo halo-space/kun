@@ -2,6 +2,25 @@
 
 `scheduler::Redis` 是运行时调度器，不是 checkpoint。
 
+如果你只是想要单机 durable scheduler，优先用 `scheduler::Sqlite`。
+如果你需要多 worker / 多机共享同一个任务池，再用 `scheduler::Redis`。
+
+可以先按这三个内置后端来选：
+
+- `scheduler::Memory`
+  - 纯本地内存
+  - 最轻量
+  - 进程退出后状态不会保留
+- `scheduler::Sqlite`
+  - 单机 durable scheduler
+  - 同一份 SQLite 文件里可以管理多个 scope
+  - 支持 `snapshot / scopes / overview / Control / ownership / heartbeat / reclaim`
+  - 适合单机常驻、需要恢复，但不需要跨多机共享的场景
+- `scheduler::Redis`
+  - 共享 durable scheduler
+  - 多 worker / 多进程 / 多机可共享同一个任务池
+  - 适合真正的分布式协调场景
+
 只要某个 `scheduler::Redis` 真正参与过 enqueue / claim / snapshot / counts 这类访问，
 它的 namespace 就会自动登记到同一个 Redis 里的 durable scheduler registry。
 
@@ -158,7 +177,9 @@ for snapshot in snapshots {
 这层边界也要明确：
 
 - `scopes_with_prefix(...)` / `snapshots_with_prefix(...)` / `overview_with_prefix(...)` 现在属于统一的 `scheduler::Scheduler` 读能力
-- 对 `scheduler::Redis` 来说，它们会读 Redis 里共享 registry 下的多个 scope；对本地 `scheduler::Memory`，默认只会返回当前 scope
+- 对 `scheduler::Redis` 来说，它们会读 Redis 里共享 registry 下的多个 scope
+- 对 `scheduler::Sqlite` 来说，它们会读同一 SQLite 文件里已存在的多个 scope
+- 对本地 `scheduler::Memory`，默认只会返回当前 scope
 - `overview_with_prefix(...)` 底层也是从 `snapshots_with_prefix(...)` 聚合出来的，所以它同样看到的是“这次读取后”的即时状态
 - `snapshots_with_prefix(...)` 读取时会顺带刷新各 scope 的 stale reclaim，所以它看到的是“这次读取后”的即时状态
 
@@ -215,6 +236,7 @@ ops.resume_scope("jobs:news").await?;
 - 读入口继续是 `Scheduler`
 - 改状态入口统一是 `Control`
 - 对 `scheduler::Memory`，`Control` 只能控制当前这一个 scope
+- 对 `scheduler::Sqlite`，`Control` 可以操作同一 SQLite 文件里已经可见的其它 scope
 - 对 `scheduler::Redis`，`Control` 可以操作当前 backend 里已经可见的其它 scope
 - 这套抽象是后端无关的，后面接 `sqlite` 或其它 backend 也继续走这组名字
 
@@ -345,7 +367,7 @@ scheduler.close().await?;
 - heartbeat
 - runtime reclaim
 
-这些都属于 `scheduler::Redis` 这种 durable scheduler 的运行时语义。
+这些都属于 `scheduler::Sqlite` / `scheduler::Redis` 这种 durable scheduler 的运行时语义；区别只是 `Redis` 是共享分布式后端，`Sqlite` 是单机 durable 后端。
 
 ## 和 store 的提交边界
 

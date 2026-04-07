@@ -3,8 +3,12 @@ use halo_spider::error::SpiderError;
 use halo_spider::request::Request;
 use halo_spider::scheduler::checkpoint::{Checkpoint, Persist};
 use halo_spider::scheduler::{self, Control, Scheduler, Task, TaskLease, TaskResolution};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Mutex;
+
+static NEXT_SQLITE_DEMO_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Custom scheduler example.
 ///
@@ -114,6 +118,10 @@ async fn main() -> Result<(), SpiderError> {
     memory_batch_demo().await?;
     memory_control_demo().await?;
     memory_scope_overview_demo().await?;
+    sqlite_snapshot_demo().await?;
+    sqlite_batch_demo().await?;
+    sqlite_control_demo().await?;
+    sqlite_scope_overview_demo().await?;
     redis_snapshot_demo().await?;
     redis_batch_demo().await?;
     redis_control_demo().await?;
@@ -344,6 +352,198 @@ async fn memory_batch_demo() -> Result<(), SpiderError> {
     Ok(())
 }
 
+async fn sqlite_snapshot_demo() -> Result<(), SpiderError> {
+    println!("== sqlite scheduler snapshot demo ==");
+
+    let path = sqlite_demo_path("snapshot");
+    let scheduler = scheduler::Sqlite::new(&path, "examples:custom-scheduler:sqlite")
+        .with_worker(scheduler::Worker::new("example-sqlite-worker"));
+    scheduler
+        .enqueue(
+            Task::new(Request::new("https://example.com/sqlite/ready"))
+                .with_priority(5)
+                .with_depth(1),
+        )
+        .await?;
+    scheduler
+        .enqueue(Task::with_delay(
+            Request::new("https://example.com/sqlite/delayed"),
+            500,
+        ))
+        .await?;
+
+    let claimed = scheduler
+        .take_ready()
+        .await?
+        .expect("sqlite task should exist");
+
+    let counts = Scheduler::counts(&scheduler).await?;
+    let snapshot = scheduler.snapshot().await?;
+
+    println!("db path: {}", path.display());
+    println!("counts: {:?}", counts);
+    println!("scope: {}", snapshot.scope);
+    println!("workers: {:?}", snapshot.worker_ids);
+    println!(
+        "reclaimed_total={}, reclaimed_in_refresh={}",
+        snapshot.reclaimed_total, snapshot.reclaimed_in_refresh
+    );
+    for task in &snapshot.inflight_tasks {
+        println!(
+            "inflight task={} url={} worker={:?} lease={:?}",
+            task.task_id.as_str(),
+            task.url,
+            task.worker_id,
+            task.lease_id
+        );
+    }
+
+    scheduler.complete(&claimed.lease).await?;
+    scheduler.close().await?;
+    cleanup_sqlite_demo(&path);
+    Ok(())
+}
+
+async fn sqlite_batch_demo() -> Result<(), SpiderError> {
+    println!("== sqlite scheduler batch demo ==");
+
+    let path = sqlite_demo_path("batch");
+    let scheduler = scheduler::Sqlite::new(&path, "examples:custom-scheduler:sqlite-batch")
+        .with_worker(scheduler::Worker::new("example-sqlite-batch-worker"));
+    scheduler
+        .enqueue(Task::new(Request::new("https://example.com/sqlite-batch/a")))
+        .await?;
+    scheduler
+        .enqueue(Task::new(Request::new("https://example.com/sqlite-batch/b")))
+        .await?;
+    scheduler
+        .enqueue(Task::new(Request::new("https://example.com/sqlite-batch/c")))
+        .await?;
+
+    let claimed = scheduler.take_batch_ready(2).await?;
+    println!(
+        "sqlite claimed batch urls: {:?}",
+        claimed
+            .iter()
+            .map(|task| task.task.request.url.as_str())
+            .collect::<Vec<_>>()
+    );
+    scheduler
+        .complete_batch(claimed.iter().map(|task| task.lease.clone()).collect())
+        .await?;
+
+    let remaining = scheduler.take_batch_ready(1).await?;
+    scheduler
+        .complete_and_enqueue_batch(vec![TaskResolution::new(
+            remaining[0].lease.clone(),
+            vec![Task::new(Request::new(
+                "https://example.com/sqlite-batch/follow",
+            ))],
+        )])
+        .await?;
+
+    println!(
+        "sqlite batch counts: {:?}",
+        Scheduler::counts(&scheduler).await?
+    );
+
+    scheduler.close().await?;
+    cleanup_sqlite_demo(&path);
+    Ok(())
+}
+
+async fn sqlite_control_demo() -> Result<(), SpiderError> {
+    println!("== sqlite scheduler control demo ==");
+
+    let path = sqlite_demo_path("control");
+    let scheduler = scheduler::Sqlite::new(&path, "examples:custom-scheduler:sqlite-control")
+        .with_worker(scheduler::Worker::new("example-sqlite-control-worker"));
+    scheduler
+        .enqueue(Task::new(Request::new(
+            "https://example.com/sqlite-control/ready",
+        )))
+        .await?;
+
+    scheduler
+        .pause_scope("examples:custom-scheduler:sqlite-control")
+        .await?;
+    println!(
+        "take while paused: {:?}",
+        scheduler
+            .take_ready()
+            .await?
+            .as_ref()
+            .map(|task| task.task.request.url.as_str())
+    );
+
+    scheduler
+        .resume_scope("examples:custom-scheduler:sqlite-control")
+        .await?;
+    let claimed = scheduler
+        .take_ready()
+        .await?
+        .expect("sqlite control task should exist");
+    println!("claimed after resume: {}", claimed.task.request.url);
+
+    let released = scheduler
+        .release_scope("examples:custom-scheduler:sqlite-control")
+        .await?;
+    println!("released via control: {released}");
+
+    let removed = scheduler
+        .purge_scope("examples:custom-scheduler:sqlite-control")
+        .await?;
+    println!("purged counts: {:?}", removed);
+
+    scheduler.close().await?;
+    cleanup_sqlite_demo(&path);
+    Ok(())
+}
+
+async fn sqlite_scope_overview_demo() -> Result<(), SpiderError> {
+    println!("== sqlite scheduler multi-scope overview demo ==");
+
+    let path = sqlite_demo_path("overview");
+    let news = scheduler::Sqlite::new(&path, "examples:custom-scheduler:sqlite-news")
+        .with_worker(scheduler::Worker::new("example-sqlite-news-worker"));
+    let blog = scheduler::Sqlite::new(&path, "examples:custom-scheduler:sqlite-blog")
+        .with_worker(scheduler::Worker::new("example-sqlite-blog-worker"));
+
+    news.enqueue(Task::new(Request::new(
+        "https://example.com/sqlite-overview/news",
+    )))
+    .await?;
+    blog.enqueue(Task::with_delay(
+        Request::new("https://example.com/sqlite-overview/blog"),
+        500,
+    ))
+    .await?;
+    let _claimed = news.take_ready().await?;
+
+    let scopes = news
+        .scopes_with_prefix("examples:custom-scheduler:sqlite-")
+        .await?;
+    println!("visible scopes: {:?}", scopes);
+
+    let snapshots = news
+        .snapshots_with_prefix("examples:custom-scheduler:sqlite-")
+        .await?;
+    for snapshot in snapshots {
+        println!("scope: {}", snapshot.scope);
+        println!("counts: {:?}", snapshot.counts);
+        println!("workers: {:?}", snapshot.worker_ids);
+    }
+    let overview = news
+        .overview_with_prefix("examples:custom-scheduler:sqlite-")
+        .await?;
+    println!("overview: {:?}", overview);
+
+    news.close().await?;
+    blog.close().await?;
+    cleanup_sqlite_demo(&path);
+    Ok(())
+}
+
 async fn redis_snapshot_demo() -> Result<(), SpiderError> {
     println!("== redis scheduler snapshot demo ==");
 
@@ -487,4 +687,20 @@ async fn redis_batch_demo() -> Result<(), SpiderError> {
     );
     scheduler.close().await?;
     Ok(())
+}
+
+fn sqlite_demo_path(name: &str) -> PathBuf {
+    let mut path = std::env::temp_dir();
+    path.push(format!(
+        "halo-spider-example-{name}-{}-{}.db",
+        std::process::id(),
+        NEXT_SQLITE_DEMO_ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    path
+}
+
+fn cleanup_sqlite_demo(path: &Path) {
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+    let _ = std::fs::remove_file(format!("{}-shm", path.display()));
 }
