@@ -67,6 +67,12 @@
 - **THEN** engine 在任务仍然运行时会继续 heartbeat 当前 lease
 - **AND** 其它 worker 不会把这条 task 提前回收到 `ready` 或 `delayed`
 
+#### Scenario: Durable scheduler snapshot remains an operational view
+
+- **WHEN** 调用方通过 `scheduler::Sqlite::snapshot()` 或 `scheduler::Redis::snapshot()` 读取某个 scope 的即时状态
+- **THEN** 它除了 ready / delayed / inflight 聚合计数外，还能看到当前 inflight ownership 明细
+- **AND** 这份视图继续表示 durable scheduler 的当前运行态，而不是 checkpoint 快照
+
 #### Scenario: Checkpoint restore does not pretend to be runtime reclaim
 
 - **WHEN** 调用方通过 `scheduler::checkpoint::Memory` 从 checkpoint 恢复状态
@@ -78,7 +84,108 @@
 
 - **WHEN** 调用方需要自定义 scheduler 或 checkpoint 持久化后端
 - **THEN** 它可以分别实现 `scheduler::Scheduler` 或 `scheduler::checkpoint::Persist`
-- **AND** 继续复用共享的 task state 与 checkpoint 边界
+- **AND** 当前内置 scheduler 后端至少包含 `Memory`、`Redis` 与 `Sqlite`
+- **AND** 它们继续复用共享的 task state、worker、control 与 checkpoint 边界
+
+### Requirement: SQLite durable scheduler backend is available
+
+系统 MUST 提供内置 `scheduler::Sqlite`，作为共享 `Scheduler` 抽象下的 durable scheduler 后端，而不是让持久化调度只停留在 Redis 一种实现。
+
+#### Scenario: Callers can use SQLite as a durable scheduler backend
+
+- **WHEN** 调用方使用内置 `scheduler::Sqlite`
+- **THEN** 它直接以 SQLite 持久化 `ready`、`delayed` 与 `inflight` 任务状态
+- **AND** 它继续遵守共享的 task identity、priority、depth 与 requeue 语义
+
+#### Scenario: SQLite scheduler supports the same worker runtime semantics
+
+- **WHEN** 调用方给 `scheduler::Sqlite` 配置 `worker_id`、`lease_timeout` 与 `heartbeat_interval`
+- **THEN** 它也支持 worker ownership 校验、heartbeat 续租与 stale inflight reclaim
+- **AND** engine 不需要为 SQLite 单独增加另一套调度接线
+
+#### Scenario: SQLite scheduler participates in the same read and control APIs
+
+- **WHEN** 调用方使用 `scheduler::Sqlite`
+- **THEN** 它也通过共享 `Scheduler` 提供 `checkpoint()`、`counts()`、`snapshot()`、`scopes()`、`snapshots()`、`overview()`
+- **AND** 通过共享 `Control` 提供 `pause_scope()`、`resume_scope()`、`release_scope()`、`purge_scope()`
+
+### Requirement: Engine Defines Explicit Scheduler Transaction Boundaries
+
+系统 MUST 明确任务执行完成后 `store`、follow/retry enqueue 与 scheduler resolve 的提交边界，而不是只依赖“单条 scheduler 状态迁移原子”来隐含整个引擎事务语义。
+
+#### Scenario: Successful task completion has an explicit commit boundary
+
+- **WHEN** 某条任务成功执行并产出 item 与 follow request
+- **THEN** 系统对 `store`、follow enqueue 与 scheduler complete 的顺序和失败语义是明确、可测试的
+- **AND** 调用方可以从文档和运行结果中理解这条路径的 at-least-once 边界
+
+#### Scenario: Store failure does not silently commit scheduler completion
+
+- **WHEN** 某条任务已经完成解析，但 `store` 写入失败
+- **THEN** 系统不会把该任务静默当成已成功完成
+- **AND** 调用方可以稳定区分这是 store failure，而不是 scheduler completion
+
+#### Scenario: Scheduler resolve failure after store commit stays diagnosable
+
+- **WHEN** 某条任务已经成功写入 `store`，但后续 `scheduler complete / complete-and-enqueue` 失败
+- **THEN** 已写出的 item 不会被回滚
+- **AND** 调用方可以通过测试、文档与日志明确理解这条 at-least-once 边界
+
+### Requirement: Shared scheduler trait supports batch operations
+
+系统 MUST 为共享 `scheduler::Scheduler` trait 提供统一 batch 调度接口，并统一使用 `batch` 命名，而不是只让高吞吐路径依赖单条接口并发堆叠。
+
+#### Scenario: Backends can claim ready tasks in batch
+
+- **WHEN** 调用方对某个 scheduler 请求一批 ready task
+- **THEN** `Memory`、`Sqlite`、`Redis` 以及后续其它后端都可以通过统一 batch API 返回这批 claim 结果
+
+#### Scenario: Backends can resolve multiple leases in one batch API
+
+- **WHEN** 调用方需要批量 complete、requeue，或 complete-and-enqueue 多条任务
+- **THEN** 共享 scheduler trait 提供统一的 batch 入口
+- **AND** 默认实现允许旧后端先回退到单条接口循环执行
+
+### Requirement: Scheduler operations plane is distinct from batch execution
+
+系统 MUST 把跨 job 运维控制动作与 batch 执行接口区分开，不把 `pause / resume / release / purge` 这类运维动作混入 batch 调度 API。
+
+#### Scenario: Control actions are not modeled as batch task resolution
+
+- **WHEN** 调用方需要对 scope、worker 或 job 执行运维动作
+- **THEN** 这些动作通过独立的运维控制入口暴露
+- **AND** 它们不与 `take_batch_ready / complete_batch / requeue_batch` 混成同一组接口
+
+### Requirement: Cross-job scheduler control is explicit
+
+系统 MUST 为多 job / 多 scope 的 scheduler 运行提供统一、明确的运维控制入口，而不是只提供快照读取。
+
+#### Scenario: Multiple scopes can be inspected through one control interface
+
+- **WHEN** 调用方在同一个 backend 上运行多个 job / scope
+- **THEN** 它可以通过统一入口读取 scopes、overview、workers 等跨 job 视图
+
+#### Scenario: Cross-job control actions have concrete examples
+
+- **WHEN** 调用方需要暂停、恢复、释放 worker 持有任务，或清理某个 scope
+- **THEN** 文档和示例提供具体操作方式
+- **AND** 这些动作的边界与影响范围是明确、可测试的
+
+### Requirement: Durable scheduler snapshot exposes inflight ownership details
+
+系统 MUST 让内置 durable scheduler 的运行时 snapshot 不仅返回 scope 级聚合计数，也能返回当前 inflight task 的 ownership / lease / deadline 明细。
+
+#### Scenario: Durable scheduler snapshot shows inflight lease ownership
+
+- **WHEN** 某个 `scheduler::Sqlite` 或 `scheduler::Redis` scope 当前存在 inflight task
+- **THEN** `snapshot()` 返回的结构里包含这条 inflight task 的 task identity、worker identity、lease identity 与当前 deadline
+- **AND** 调用方不需要手工回读底层后端状态才能定位 ownership 状态
+
+#### Scenario: Cross-scope snapshots keep per-task ownership visibility
+
+- **WHEN** 调用方读取 `snapshots_with_prefix(...)`
+- **THEN** 每个 scope snapshot 都继续包含对应 inflight task 的 ownership / lease 明细
+- **AND** 这些明细与 scope 级 ready / delayed / inflight 聚合计数保持一致
 
 ### Requirement: Engine Defines Validation And Item Pipeline Failure Semantics
 
@@ -246,6 +353,38 @@
 - **WHEN** 调用方调用 `Engine::with_downloaders(http, browser)`
 - **THEN** 它继续表示“默认 memory scheduler + 一次替换两个 downloader”的快捷写法
 - **AND** 其它默认 engine 组件保持不变
+
+### Requirement: Browser request supports structured custom fingerprint profiles
+
+系统 MUST 允许 browser request 除了使用内置 `fingerprint_profile` 名称外，还能声明结构化自定义 fingerprint profile。
+
+#### Scenario: Browser request can provide a custom structured profile
+
+- **WHEN** 调用方对 browser request 显式提供结构化 fingerprint profile
+- **THEN** browser downloader 使用这份 profile 生成执行计划
+- **AND** 调用方不需要强行把自定义 profile 挂成新的内置 preset 名称
+
+#### Scenario: Builtin profile names remain available
+
+- **WHEN** 调用方继续使用内置 `fingerprint_profile` 名称
+- **THEN** browser downloader 继续解析这些稳定 preset
+- **AND** 新的结构化 profile 能力不会破坏现有 preset 路径
+
+### Requirement: Browser session reuse policy is explicit
+
+系统 MUST 让 browser `session` 的 live reuse 策略成为显式配置，而不是只隐含在稳定 user data dir 复用里。
+
+#### Scenario: Browser request can choose a session reuse policy
+
+- **WHEN** 调用方对 browser request 显式声明 session reuse 策略
+- **THEN** browser runtime 按该策略决定是否复用 live context 或 page
+- **AND** 旧的仅 user data dir 复用路径仍然可以继续保留
+
+#### Scenario: Session reuse stays scoped to one logical session
+
+- **WHEN** 两个 browser request 使用不同的 session id
+- **THEN** 它们不会意外共享同一个 live context 或 live page
+- **AND** reuse 仍然受 session identity 边界约束
 
 ### Requirement: Engine Supports Minimal AutoThrottle
 
