@@ -3,7 +3,8 @@
 //! Shows:
 //! - built-in browser request path
 //! - structured fingerprint profile
-//! - explicit live runtime keep-alive policy
+//! - optional external stealth script injection
+//! - explicit keep_alive policy
 //! - stable session id plus optional origin-scoped live reuse boundaries
 //!
 //! Run:
@@ -18,6 +19,7 @@ fn main() {
             browser::Config::default()
                 .with_engine(browser::Engine::Chromium)
                 .with_stealth(true)
+                .with_stealth_script("window.__thirdPartyStealth = true;")
                 .with_fingerprint_profile(
                     browser::FingerprintProfile::new()
                         .with_user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36")

@@ -33,7 +33,7 @@ README 这里只保留总览；模块级细节统一放到 [docs/capabilities.md
 - `download::Browser` 已具备最小可用浏览器下载能力，并支持统一 `Request` 上的 `method` / `body` / `headers` / `timeout` / `proxy` / cookies / `session`
 - `Response.body` 与 `Response.text` 的语义已经明确并统一解码
 - Spider 现在除了 `start_urls()` / `build_start_urls()`，也可以直接覆写 `build_start_requests()` 返回完整 `Request`；默认仍然是把 URL 自动包成 `Request::new(...)`
-- `scheduler::Memory`、`scheduler::Sqlite` 与 `scheduler::Redis` 已把任务状态收口为 `ready / delayed / inflight`，并支持 `priority / depth` 排序；其中 `scheduler::Memory` 仍支持 `scheduler::checkpoint::Checkpoint` 导出/恢复，`scheduler::Sqlite` 提供单机 durable scheduler，`scheduler::Redis` 提供共享 durable scheduler；现在所有 scheduler 后端统一通过 `Scheduler` 暴露 `checkpoint() / counts() / snapshot() / scopes() / snapshots() / overview()` 这组读能力，并通过 `scheduler::Control` 暴露 `pause_scope() / resume_scope() / release_scope() / purge_scope()` 这组运维控制入口；`Sqlite / Redis` 这类可见多 scope 的 durable backend 可以返回/控制多个 scope，本地 `Memory` 则返回/控制当前 scope
+- `scheduler::Memory`、`scheduler::Sqlite` 与 `scheduler::Redis` 已把任务状态收口为 `ready / delayed / inflight`，并支持 `priority / depth` 排序；其中 `scheduler::Memory` 仍支持 `scheduler::checkpoint::Checkpoint` 导出/恢复，`scheduler::Sqlite` 提供单机 durable scheduler，`scheduler::Redis` 提供共享 durable scheduler；现在所有 scheduler 后端统一通过 `Scheduler` 暴露 `checkpoint() / counts() / snapshot() / scopes() / snapshots() / overview()` 这组读能力，并通过 `scheduler::Control` 暴露 `pause_scope() / resume_scope() / release_scope() / purge_scope()` 这组运维控制入口；`Sqlite / Redis` 这类可见多 scope 的 durable backend 可以返回/控制多个 scope，本地 `Memory` 则返回/控制当前 scope；如果需要更多后端扩展支持，可以参考 `examples/custom_scheduler_mysql.rs` 自定义实现
 - `scheduler::checkpoint::File`、`scheduler::checkpoint::Redis` 与 `scheduler::checkpoint::Memory` 用于文件、Redis 的 scheduler checkpoint 持久化；也支持直接基于 Redis 的 durable scheduler
 - `dedup` 已从默认 middleware 收口为显式 engine 组件；当前默认使用精确 `dedup::Memory`，也内置可选 `dedup::Bloom`，并可以通过 `Engine::with_dedup(...)` 切换为其它实现
 - `robots` 已提升为显式 engine 组件；当前默认使用 `robots::Memory`，也可以通过 `Engine::with_robots(...)` 切换为其它实现
@@ -53,8 +53,8 @@ README 这里只保留总览；模块级细节统一放到 [docs/capabilities.md
 当前仍待补齐的底层能力：
 
 - 观测剩余缺口：持久化事件总线聚合层、跨 job 仪表盘/巡检视图，以及更系统的运维自动化。
-- durable scheduler 剩余缺口：更强的分布式协调后端、后台运维服务层，以及更丰富的 exporter / 自动化接线。
-- browser 剩余缺口：第三方 stealth 套件接入、更高阶浏览器指纹伪装，以及更细粒度的 session/context/page 复用策略。
+- durable scheduler 剩余缺口：后台运维服务层，以及更丰富的 exporter / 自动化接线。
+- browser 剩余缺口：更高阶浏览器指纹伪装，以及更细粒度的 session/context/page 复用策略。
 - validation 剩余缺口：校验失败如何统一映射到 runtime 行为。
 - plugin 自动装载这条线当前仍只自动接 `middleware`；`store`、`scheduler`、`dedup`、`robots`、`http`、`browser` 这些 kind 还没有完成真正的 engine 自动接线。
 - DSL 继续后置；当前它已经共享底层 `Request / parse / scheduler / validation` 模型，但整体能力面仍然没有完全追平代码爬虫主线。
@@ -623,22 +623,23 @@ Spider / rules
 - explicit `keep_alive = isolated | context | page`
 - optional `keep_alive_scope = session | origin`
 - `stealth = true` bootstrap
+- optional external `stealth_script`
 - browser response status / headers
 - 页面渲染后的 HTML 抓取
 
 其中 browser `session` 当前会把同一个 session id 映射到稳定的 Playwright user data dir，
-用于复用 cookies 和 local storage 这类浏览器态数据；live runtime 是否进一步保留，则由 `keep_alive` 显式控制：
+用于复用 cookies 和 local storage 这类浏览器态数据；是否继续保留 `keep_alive` 这层浏览器态，由 `keep_alive` 显式控制：
 
 - `isolated`：只复用稳定 user data dir，每次请求仍新建并关闭 context/page
 - `context`：同一 session 复用 live context，但每次请求新建 page
 - `page`：同一 session 复用 live context 和同一张 live page
 
-如果你希望把 live runtime 再按更小范围隔离，还可以显式设置：
+如果你希望把 `keep_alive` 再按更小范围隔离，还可以显式设置：
 
-- `keep_alive_scope = session`：同一个 session 共用一份 live runtime
-- `keep_alive_scope = origin`：同一个 session 下，按 URL origin 分开维护 live runtime
+- `keep_alive_scope = session`：同一个 session 共用一份 `keep_alive`
+- `keep_alive_scope = origin`：同一个 session 下，按 URL origin 分开维护 `keep_alive`
 
-user data dir、临时 profile 目录和会话锁这条实现路径也已经收口到更适合 async runtime 的处理方式；相同 session id 的实际浏览器执行仍会按 session 串行化，避免共享 profile 目录或 live runtime 时出现竞态。
+user data dir、临时 profile 目录和会话锁这条实现路径也已经收口到更适合 async runtime 的处理方式；相同 session id 的实际浏览器执行仍会按 session 串行化，避免共享 profile 目录或 `keep_alive` 时出现竞态。
 
 当前 browser `Response` 会带上真实的导航 `status` 与响应头；`protocol` 继续表示
 browser 执行路径，`ip_address` 与 `certificate` 由于 Playwright 当前接口限制仍保持为空。
@@ -652,12 +653,13 @@ browser 执行路径，`ip_address` 与 `certificate` 由于 Playwright 当前�
 - `fingerprint_profile` 可以直接传结构化 profile，不必先注册新的内置 preset 名称
 - `fingerprint_preset` 会稳定映射 `locale`、`timezone`、`accept-language`、`languages`，同时按当前 `engine` 选择对应浏览器族的 `user_agent / platform / vendor`
 - `stealth = true` 当前会注入 bootstrap，覆盖 `navigator.webdriver`、`navigator.language(s)`、`navigator.platform`、`navigator.vendor`、`hardwareConcurrency`、`deviceMemory`、`maxTouchPoints`、`plugins`、`mimeTypes`、`pdfViewerEnabled`、screen depth、notifications permissions 查询补丁，以及 Chromium 路线上的最小 `window.chrome` / `navigator.userAgentData`
-- 这组 preset 和 stealth 现在已经会跟随 `engine` 切到 Chromium / Firefox / WebKit 对应的浏览器族，但仍然不追求完整第三方 stealth 套件或更高阶的品牌级伪装能力
+- `stealth_script` 可以把外部 stealth JS 叠加到内置 bootstrap 后面；如果只想注入外部脚本，也可以不打开 `stealth = true`
+- 这组 preset 和 stealth 现在已经会跟随 `engine` 切到 Chromium / Firefox / WebKit 对应的浏览器族，但仍然不追求更高阶的品牌级伪装能力
 
 当前仍未实现、并且会继续显式报错的能力：
 
 - 自定义 `fingerprint_preset` 名称注册机制
-- 更完整的第三方 stealth 套件或更高阶浏览器指纹伪装能力
+- 更高阶浏览器指纹伪装能力
 
 如果当前构建没有启用 `browser` feature，browser request 会直接返回显式错误，不会再返回 stub response。
 
@@ -686,6 +688,8 @@ let request = Request::browser("https://example.com/app")
         browser::Config::default()
             .with_engine(browser::Engine::Chromium)
             .with_wait_for_selector("#app")
+            .with_stealth(true)
+            .with_stealth_script("window.__thirdPartyStealth = true;")
             .with_fingerprint_profile(
                 browser::FingerprintProfile::new()
                     .with_locale("ja-JP")
@@ -694,8 +698,7 @@ let request = Request::browser("https://example.com/app")
                     .with_languages(["ja-JP", "ja", "en-US", "en"]),
             )
             .with_keep_alive(browser::KeepAlive::Context)
-            .with_keep_alive_scope(browser::KeepAliveScope::Origin)
-            .with_stealth(true),
+            .with_keep_alive_scope(browser::KeepAliveScope::Origin),
     );
 ```
 

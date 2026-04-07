@@ -256,6 +256,8 @@ pub struct Config {
     pub engine: Engine,
     pub headless: bool,
     pub stealth: bool,
+    #[serde(default)]
+    pub stealth_scripts: Vec<String>,
     pub fingerprint_preset: Option<String>,
     #[serde(default)]
     pub fingerprint_profile: Option<FingerprintProfile>,
@@ -274,6 +276,7 @@ impl Default for Config {
             engine: Engine::default(),
             headless: true,
             stealth: false,
+            stealth_scripts: Vec::new(),
             fingerprint_preset: None,
             fingerprint_profile: None,
             wait_for_selector: None,
@@ -302,6 +305,20 @@ impl Config {
 
     pub fn with_stealth(mut self, stealth: bool) -> Self {
         self.stealth = stealth;
+        self
+    }
+
+    pub fn with_stealth_script(mut self, script: impl Into<String>) -> Self {
+        self.stealth_scripts.push(script.into());
+        self
+    }
+
+    pub fn with_stealth_scripts<I, S>(mut self, scripts: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.stealth_scripts = scripts.into_iter().map(Into::into).collect();
         self
     }
 
@@ -350,6 +367,7 @@ mod tests {
         assert_eq!(config.engine, Engine::Chromium);
         assert!(config.headless);
         assert!(!config.stealth);
+        assert!(config.stealth_scripts.is_empty());
         assert_eq!(config.fingerprint_preset, None);
         assert_eq!(config.fingerprint_profile, None);
         assert_eq!(config.wait_for_selector, None);
@@ -362,6 +380,7 @@ mod tests {
         let config = Config::default()
             .with_engine(Engine::Firefox)
             .with_stealth(true)
+            .with_stealth_script("window.__thirdPartyStealth = true;")
             .with_fingerprint_preset("desktop_zh_cn")
             .with_wait_for_selector("#app")
             .with_keep_alive(KeepAlive::Context)
@@ -369,6 +388,10 @@ mod tests {
 
         assert_eq!(config.engine, Engine::Firefox);
         assert!(config.stealth);
+        assert_eq!(
+            config.stealth_scripts,
+            vec!["window.__thirdPartyStealth = true;".to_string()]
+        );
         assert_eq!(config.fingerprint_preset.as_deref(), Some("desktop_zh_cn"));
         assert_eq!(config.fingerprint_profile, None);
         assert_eq!(config.wait_for_selector.as_deref(), Some("#app"));
@@ -389,6 +412,21 @@ mod tests {
 
         assert_eq!(config.fingerprint_preset, None);
         assert_eq!(config.fingerprint_profile, Some(profile));
+    }
+
+    #[test]
+    fn config_can_replace_external_stealth_scripts() {
+        let config = Config::default()
+            .with_stealth_script("window.__stealthA = true;")
+            .with_stealth_scripts(["window.__stealthB = true;", "window.__stealthC = true;"]);
+
+        assert_eq!(
+            config.stealth_scripts,
+            vec![
+                "window.__stealthB = true;".to_string(),
+                "window.__stealthC = true;".to_string(),
+            ]
+        );
     }
 
     #[test]

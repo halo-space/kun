@@ -2,11 +2,11 @@ use crate::download::traits::Downloader;
 use crate::error::SpiderError;
 #[cfg(any(feature = "browser", test))]
 use crate::request::Headers;
+#[cfg(any(feature = "browser", test))]
+use crate::request::browser::KeepAliveScope;
 use crate::request::browser::{
     Config as BrowserConfig, Engine as BrowserEngine, FingerprintProfile, KeepAlive,
 };
-#[cfg(any(feature = "browser", test))]
-use crate::request::browser::KeepAliveScope;
 use crate::request::{Request, RequestMode};
 use crate::response::Response;
 #[cfg(feature = "browser")]
@@ -104,8 +104,23 @@ fn validate_browser_request_contract(
     config: &BrowserConfig,
 ) -> Result<(), SpiderError> {
     resolve_fingerprint_profile(config).map(|_| ())?;
+    validate_browser_stealth_scripts(config)?;
     validate_browser_wait_for_selector(config)?;
     validate_browser_keep_alive(request, config)?;
+
+    Ok(())
+}
+
+fn validate_browser_stealth_scripts(config: &BrowserConfig) -> Result<(), SpiderError> {
+    if config
+        .stealth_scripts
+        .iter()
+        .any(|script| script.trim().is_empty())
+    {
+        return Err(SpiderError::download(
+            "browser stealth_scripts must not contain empty scripts",
+        ));
+    }
 
     Ok(())
 }
@@ -365,7 +380,7 @@ fn build_browser_init_script(
     config: &BrowserConfig,
     profile: Option<&FingerprintProfile>,
 ) -> Option<String> {
-    if !config.stealth && profile.is_none() {
+    if !config.stealth && profile.is_none() && config.stealth_scripts.is_empty() {
         return None;
     }
 
@@ -479,7 +494,13 @@ fn build_browser_init_script(
         }
     }
 
-    Some(format!("(() => {{\n{}\n}})();", lines.join("\n")))
+    let mut sections = Vec::new();
+    if !lines.is_empty() {
+        sections.push(format!("(() => {{\n{}\n}})();", lines.join("\n")));
+    }
+    sections.extend(config.stealth_scripts.iter().cloned());
+
+    Some(sections.join("\n"))
 }
 
 #[cfg(any(feature = "browser", test))]
@@ -611,6 +632,7 @@ struct BrowserSessionSignature {
     headless: bool,
     viewport: crate::request::browser::Viewport,
     stealth: bool,
+    stealth_scripts: Vec<String>,
     keep_alive: KeepAlive,
     keep_alive_scope: KeepAliveScope,
     profile: Option<FingerprintProfile>,
@@ -629,6 +651,7 @@ impl BrowserSessionSignature {
             headless: config.headless,
             viewport: config.viewport.clone(),
             stealth: config.stealth,
+            stealth_scripts: config.stealth_scripts.clone(),
             keep_alive: execution_plan.keep_alive,
             keep_alive_scope: execution_plan.keep_alive_scope,
             profile: execution_plan.profile.clone(),
@@ -638,10 +661,10 @@ impl BrowserSessionSignature {
 }
 
 #[cfg(feature = "browser")]
-struct BrowserLiveSession {
+struct BrowserKeepAlive {
     signature: BrowserSessionSignature,
     #[allow(dead_code)]
-    // Keeps the underlying Playwright server process alive for this live session.
+    // Keeps the underlying Playwright server process alive for this keep_alive entry.
     playwright: Playwright,
     context: BrowserContext,
     page: Option<Page>,
@@ -656,7 +679,7 @@ async fn fetch_with_playwright_inner(
     let execution_plan = BrowserExecutionPlan::from_config(config)?;
 
     if request.session.is_some() && execution_plan.keep_alive != KeepAlive::Isolated {
-        return fetch_with_playwright_live_session(request, config, &execution_plan).await;
+        return fetch_with_playwright_keep_alive(request, config, &execution_plan).await;
     }
 
     fetch_with_playwright_isolated_session(request, config, &execution_plan).await
@@ -702,7 +725,7 @@ async fn fetch_with_playwright_isolated_session(
 }
 
 #[cfg(feature = "browser")]
-async fn fetch_with_playwright_live_session(
+async fn fetch_with_playwright_keep_alive(
     request: &Request,
     config: &BrowserConfig,
     execution_plan: &BrowserExecutionPlan,
@@ -711,21 +734,21 @@ async fn fetch_with_playwright_live_session(
         .session
         .as_ref()
         .map(|session| session.id.clone())
-        .ok_or_else(|| SpiderError::download("browser live session requires request.session"))?;
-    let cache_key = browser_live_session_cache_key(request, execution_plan)?;
+        .ok_or_else(|| SpiderError::download("browser keep_alive requires request.session"))?;
+    let cache_key = browser_keep_alive_cache_key(request, execution_plan)?;
     let signature = BrowserSessionSignature::for_request(request, config, execution_plan);
-    let mut session = match take_browser_live_session(&cache_key).await {
+    let mut session = match take_browser_keep_alive(&cache_key).await {
         Some(session) => {
             if session.signature != signature {
-                store_browser_live_session(&cache_key, session).await;
-                return Err(browser_live_session_mismatch_error(&session_id));
+                store_browser_keep_alive(&cache_key, session).await;
+                return Err(browser_keep_alive_mismatch_error(&session_id));
             }
             session
         }
         None => {
             let (playwright, context, _user_data_dir) =
                 launch_browser_context(request, config, execution_plan).await?;
-            BrowserLiveSession {
+            BrowserKeepAlive {
                 signature: signature.clone(),
                 playwright,
                 context,
@@ -749,21 +772,21 @@ async fn fetch_with_playwright_live_session(
     match outcome {
         Ok((result, page)) => {
             session.page = page;
-            store_browser_live_session(&cache_key, session).await;
+            store_browser_keep_alive(&cache_key, session).await;
             Ok(result)
         }
         Err(error) => {
             session.page = None;
-            store_browser_live_session(&cache_key, session).await;
+            store_browser_keep_alive(&cache_key, session).await;
             Err(error)
         }
     }
 }
 
 #[cfg(feature = "browser")]
-fn browser_live_session_mismatch_error(session_id: &str) -> SpiderError {
+fn browser_keep_alive_mismatch_error(session_id: &str) -> SpiderError {
     SpiderError::download(format!(
-        "browser live session `{session_id}` requires stable engine/headless/viewport/stealth/fingerprint_preset/fingerprint_profile/proxy/keep_alive/keep_alive_scope across requests"
+        "browser keep_alive `{session_id}` requires stable engine/headless/viewport/stealth/stealth_scripts/fingerprint_preset/fingerprint_profile/proxy/keep_alive/keep_alive_scope across requests"
     ))
 }
 
@@ -1178,16 +1201,15 @@ async fn acquire_browser_session_execution_guard(
 }
 
 #[cfg(feature = "browser")]
-fn browser_live_session_cache() -> &'static tokio::sync::Mutex<BTreeMap<String, BrowserLiveSession>>
-{
-    static LIVE_SESSIONS: OnceLock<tokio::sync::Mutex<BTreeMap<String, BrowserLiveSession>>> =
+fn browser_keep_alive_cache() -> &'static tokio::sync::Mutex<BTreeMap<String, BrowserKeepAlive>> {
+    static KEEP_ALIVE: OnceLock<tokio::sync::Mutex<BTreeMap<String, BrowserKeepAlive>>> =
         OnceLock::new();
 
-    LIVE_SESSIONS.get_or_init(|| tokio::sync::Mutex::new(BTreeMap::new()))
+    KEEP_ALIVE.get_or_init(|| tokio::sync::Mutex::new(BTreeMap::new()))
 }
 
 #[cfg(any(feature = "browser", test))]
-fn browser_live_session_scope_origin(url: &str) -> Result<String, SpiderError> {
+fn browser_keep_alive_scope_origin(url: &str) -> Result<String, SpiderError> {
     let parsed = Url::parse(url).map_err(|error| {
         SpiderError::download(format!(
             "invalid browser URL for keep_alive_scope=origin: {error}"
@@ -1203,7 +1225,7 @@ fn browser_live_session_scope_origin(url: &str) -> Result<String, SpiderError> {
 }
 
 #[cfg(any(feature = "browser", test))]
-fn browser_live_session_cache_key(
+fn browser_keep_alive_cache_key(
     request: &Request,
     execution_plan: &BrowserExecutionPlan,
 ) -> Result<String, SpiderError> {
@@ -1211,27 +1233,27 @@ fn browser_live_session_cache_key(
         .session
         .as_ref()
         .map(|session| session.id.as_str())
-        .ok_or_else(|| SpiderError::download("browser live session requires request.session"))?;
+        .ok_or_else(|| SpiderError::download("browser keep_alive requires request.session"))?;
 
     match execution_plan.keep_alive_scope {
         KeepAliveScope::Session => Ok(session_id.to_string()),
         KeepAliveScope::Origin => {
-            let origin = browser_live_session_scope_origin(&request.url)?;
+            let origin = browser_keep_alive_scope_origin(&request.url)?;
             Ok(format!("{session_id}::{origin}"))
         }
     }
 }
 
 #[cfg(feature = "browser")]
-async fn take_browser_live_session(cache_key: &str) -> Option<BrowserLiveSession> {
-    let cache = browser_live_session_cache();
+async fn take_browser_keep_alive(cache_key: &str) -> Option<BrowserKeepAlive> {
+    let cache = browser_keep_alive_cache();
     let mut cache = cache.lock().await;
     cache.remove(cache_key)
 }
 
 #[cfg(feature = "browser")]
-async fn store_browser_live_session(cache_key: &str, session: BrowserLiveSession) {
-    let cache = browser_live_session_cache();
+async fn store_browser_keep_alive(cache_key: &str, session: BrowserKeepAlive) {
+    let cache = browser_keep_alive_cache();
     let mut cache = cache.lock().await;
     cache.insert(cache_key.to_string(), session);
 }
@@ -1494,21 +1516,21 @@ mod tests {
     }
 
     #[test]
-    fn browser_live_session_cache_key_uses_session_scope_by_default() {
+    fn browser_keep_alive_cache_key_uses_session_scope_by_default() {
         let request = Request::browser("https://news.example.com/list").with_session("shared");
         let execution_plan = BrowserExecutionPlan::from_config(
             &BrowserConfig::default().with_keep_alive(KeepAlive::Context),
         )
         .expect("execution plan should build");
 
-        let key = browser_live_session_cache_key(&request, &execution_plan)
+        let key = browser_keep_alive_cache_key(&request, &execution_plan)
             .expect("cache key should build");
 
         assert_eq!(key, "shared");
     }
 
     #[test]
-    fn browser_live_session_cache_key_can_scope_by_origin() {
+    fn browser_keep_alive_cache_key_can_scope_by_origin() {
         let request =
             Request::browser("https://news.example.com/list?page=1").with_session("shared");
         let execution_plan = BrowserExecutionPlan::from_config(
@@ -1518,7 +1540,7 @@ mod tests {
         )
         .expect("execution plan should build");
 
-        let key = browser_live_session_cache_key(&request, &execution_plan)
+        let key = browser_keep_alive_cache_key(&request, &execution_plan)
             .expect("cache key should build");
 
         assert_eq!(key, "shared::https://news.example.com");
@@ -1583,6 +1605,43 @@ mod tests {
         );
 
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn browser_request_contract_allows_external_stealth_script() {
+        let request = Request::browser("https://example.com").with_browser(
+            BrowserConfig::default().with_stealth_script("window.__thirdPartyStealth = true;"),
+        );
+
+        let result = validate_browser_request_contract(
+            &request,
+            request
+                .browser
+                .as_ref()
+                .expect("browser config should exist"),
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn browser_request_contract_rejects_empty_external_stealth_script() {
+        let request = Request::browser("https://example.com")
+            .with_browser(BrowserConfig::default().with_stealth_script("   "));
+
+        let error = validate_browser_request_contract(
+            &request,
+            request
+                .browser
+                .as_ref()
+                .expect("browser config should exist"),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            SpiderError::download("browser stealth_scripts must not contain empty scripts")
+        );
     }
 
     #[test]
@@ -1836,6 +1895,7 @@ mod tests {
     fn build_browser_init_script_supports_profile_and_stealth() {
         let config = BrowserConfig::default()
             .with_stealth(true)
+            .with_stealth_script("window.__thirdPartyStealth = true;")
             .with_fingerprint_preset("desktop_en_us");
         let profile = resolve_fingerprint_profile(&config)
             .unwrap()
@@ -1851,6 +1911,26 @@ mod tests {
         assert!(init_script.contains("navigator.permissions.query"));
         assert!(init_script.contains("en-US"));
         assert!(init_script.contains("Win32"));
+        assert!(init_script.contains("window.__thirdPartyStealth = true;"));
+        assert!(
+            init_script
+                .find("Object.defineProperty(navigator, 'webdriver'")
+                .expect("builtin stealth bootstrap should exist")
+                < init_script
+                    .find("window.__thirdPartyStealth = true;")
+                    .expect("external stealth script should exist")
+        );
+    }
+
+    #[test]
+    fn build_browser_init_script_supports_external_stealth_script_without_builtin_stealth() {
+        let config =
+            BrowserConfig::default().with_stealth_script("window.__externalStealth = true;");
+
+        let init_script =
+            build_browser_init_script(&config, None).expect("init script should exist");
+
+        assert_eq!(init_script, "window.__externalStealth = true;");
     }
 
     #[test]

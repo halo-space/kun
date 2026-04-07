@@ -60,7 +60,7 @@ README 负责总览，这里负责把每个模块现在到底能做什么、还�
 - 已支持显式 `keep_alive = isolated | context | page`
 - 已支持显式 `keep_alive_scope = session | origin`
 - 已支持更完整但仍然克制的 `stealth = true` bootstrap，覆盖 `navigator.webdriver`、`navigator.language(s)`、`navigator.platform`、`navigator.vendor`、`hardwareConcurrency`、`deviceMemory`、`maxTouchPoints`、`plugins`、`mimeTypes`、`pdfViewerEnabled`、screen depth、notifications permissions 查询补丁，以及 Chromium 路线的最小 `window.chrome` / `navigator.userAgentData`
-- 同一个 browser session 会复用稳定的 user data dir，并做最小串行化；如果显式启用 `keep_alive`，还可以进一步复用 live context 或 live page；如果再配 `keep_alive_scope = origin`，则会按同一 session 下的 URL origin 分开维护 live runtime
+- 同一个 browser session 会复用稳定的 user data dir，并做最小串行化；如果显式启用 `keep_alive`，还可以进一步复用 live context 或 live page；如果再配 `keep_alive_scope = origin`，则会按同一 session 下的 URL origin 分开维护 `keep_alive`
 - user data dir、临时 profile 目录与会话锁这条路径已经改成 async runtime 更友好的实现，不再依赖明显的同步文件 I/O 热路径
 
 内置 `fingerprint_preset` 的稳定映射：
@@ -83,13 +83,14 @@ README 负责总览，这里负责把每个模块现在到底能做什么、还�
 当前仍未收敛、并会继续显式报错或保留空白的部分：
 
 - 自定义 `fingerprint_preset` 名称注册机制
-- 更完整的第三方 stealth 套件或更高阶浏览器指纹伪装能力
+- 更高阶浏览器指纹伪装能力
 - `ip_address`、`certificate` 这类 Playwright 当前接口拿不到的响应侧字段
 
 这里刻意保持一个边界：
 
 - browser 仍然只是渲染型下载器，不扩成通用自动化框架
-- fingerprint preset 现在会跟随 `engine` 切到对应浏览器族，但仍不承诺完整第三方 stealth 套件或“品牌级完美伪装”
+- fingerprint preset 现在会跟随 `engine` 切到对应浏览器族
+- `stealth_script` 可以继续叠加外部 stealth JS，但仍不承诺“品牌级完美伪装”
 
 这部分的设计目标是：HTTP 和 browser 只是两种下载方式，最终都回到统一请求语义。
 browser 在这里的角色是“渲染型下载器”，不是另起一套通用浏览器自动化 runtime；当前只保留导航、等待页面就绪和返回最终 HTML 这类爬虫抓取直接需要的能力。
