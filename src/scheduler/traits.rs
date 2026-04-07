@@ -1,5 +1,6 @@
 use crate::error::SpiderError;
 use crate::scheduler::checkpoint::{Checkpoint, Counts};
+use crate::scheduler::runtime::RuntimeEvent;
 use crate::scheduler::snapshot::{Overview, Snapshot};
 use crate::scheduler::{ClaimedTask, Task, TaskLease};
 use jiff::SignedDuration;
@@ -121,6 +122,24 @@ pub trait Scheduler: Send + Sync {
     /// shutdown cleanup.
     async fn close(&self) -> Result<(), SpiderError> {
         Ok(())
+    }
+
+    /// Returns the logical scheduler scope used for runtime observability, if
+    /// the backend exposes one.
+    fn runtime_scope(&self) -> Option<String> {
+        None
+    }
+
+    /// Returns the logical worker id used by this scheduler runtime, if the
+    /// backend exposes one.
+    fn runtime_worker_id(&self) -> Option<String> {
+        None
+    }
+
+    /// Drains backend-native runtime events accumulated since the previous
+    /// drain call.
+    fn drain_runtime_events(&self) -> Vec<RuntimeEvent> {
+        Vec::new()
     }
 
     /// Returns whether any task still remains in the scheduler.

@@ -1,5 +1,6 @@
 use crate::error::{SchedulerError, SpiderError};
 use crate::scheduler::checkpoint::{Checkpoint, Counts};
+use crate::scheduler::runtime::RuntimeEvent;
 use crate::scheduler::snapshot::{InflightTaskSnapshot, Snapshot, WorkerSnapshot};
 use crate::scheduler::{ClaimedTask, Scheduler, Task, TaskLease, Worker};
 use jiff::{SignedDuration, Timestamp};
@@ -12,6 +13,7 @@ pub struct Memory {
     scope: String,
     worker: Worker,
     state: Mutex<State>,
+    runtime_events: Mutex<Vec<RuntimeEvent>>,
 }
 
 #[derive(Default)]
@@ -38,6 +40,7 @@ impl Memory {
             scope: next_memory_scope(),
             worker: Worker::new(next_memory_worker_id()),
             state: Mutex::new(State::default()),
+            runtime_events: Mutex::new(Vec::new()),
         }
     }
 
@@ -78,6 +81,7 @@ impl Memory {
                     .collect(),
                 worker_last_seen: None,
             }),
+            runtime_events: Mutex::new(Vec::new()),
         }
     }
 
@@ -204,6 +208,12 @@ impl Memory {
             .lease_timeout()
             .map(|timeout| default_heartbeat_interval(timeout.as_millis()));
         self.worker.effective_heartbeat_interval(default)
+    }
+
+    fn push_runtime_event(&self, event: RuntimeEvent) {
+        if let Ok(mut events) = self.runtime_events.lock() {
+            events.push(event);
+        }
     }
 }
 
@@ -390,6 +400,13 @@ impl Scheduler for Memory {
             state.push_task(task);
         }
         state.reset_worker_if_idle();
+        if released > 0 {
+            self.push_runtime_event(RuntimeEvent::released(
+                Some(self.scope().to_string()),
+                Some(self.worker_id().to_string()),
+                released,
+            ));
+        }
         Ok(released)
     }
 
@@ -414,7 +431,26 @@ impl Scheduler for Memory {
     }
 
     async fn close(&self) -> Result<(), SpiderError> {
+        self.push_runtime_event(RuntimeEvent::closed(
+            Some(self.scope().to_string()),
+            Some(self.worker_id().to_string()),
+        ));
         Ok(())
+    }
+
+    fn runtime_scope(&self) -> Option<String> {
+        Some(self.scope().to_string())
+    }
+
+    fn runtime_worker_id(&self) -> Option<String> {
+        Some(self.worker_id().to_string())
+    }
+
+    fn drain_runtime_events(&self) -> Vec<RuntimeEvent> {
+        self.runtime_events
+            .lock()
+            .map(|mut events| std::mem::take(&mut *events))
+            .unwrap_or_default()
     }
 
     async fn has_pending(&self) -> Result<bool, SpiderError> {

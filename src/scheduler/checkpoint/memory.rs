@@ -2,6 +2,7 @@ use crate::error::SpiderError;
 use crate::scheduler::checkpoint::File;
 use crate::scheduler::checkpoint::{Checkpoint, Counts, Persist};
 use crate::scheduler::memory::Memory as CoreMemory;
+use crate::scheduler::runtime::RuntimeEvent;
 use crate::scheduler::{ClaimedTask, Scheduler, Snapshot, Task, TaskLease};
 
 /// Memory scheduler with automatic checkpoint persistence.
@@ -109,6 +110,18 @@ where
     async fn close(&self) -> Result<(), SpiderError> {
         self.scheduler.close().await?;
         self.save_checkpoint().await
+    }
+
+    fn runtime_scope(&self) -> Option<String> {
+        self.scheduler.runtime_scope()
+    }
+
+    fn runtime_worker_id(&self) -> Option<String> {
+        self.scheduler.runtime_worker_id()
+    }
+
+    fn drain_runtime_events(&self) -> Vec<RuntimeEvent> {
+        self.scheduler.drain_runtime_events()
     }
 
     async fn has_pending(&self) -> Result<bool, SpiderError> {

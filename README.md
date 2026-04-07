@@ -153,6 +153,7 @@ let settings = Settings::default()
 - 如果你只关心部分 signal kind，可以用 `.with_signal_listener_for([...], ...)`
 - 如果你只关心 scheduler runtime 流转，可以直接过滤 `signals::Kind::SchedulerEvent`；事件体里会带 `Claimed / Completed / Requeued / Heartbeat / LeaseLost`、`task_id / worker_id / lease_id / url`
 - 如果你想挂语义更清楚的运行时扩展，可以显式用 `.with_extension(...)` 或 `.with_extension_for([...], ...)`；它底层复用同一条 signal bus
+- 如果你想观测 scheduler 后端自己触发的 runtime 事件，比如 `reclaim / release_inflight / close`，可以用 `scheduler::Observed::new(...)` 包一层，再挂 `scheduler::RuntimeReporter`；这层事件统一收口为 `Claimed / Completed / Requeued / Heartbeat / LeaseLost / Reclaimed / Released / Closed`
 - `checkpoint` 本身没有单独的 runtime 默认值；只有你显式启用 checkpoint 时，默认内置后端才是 `scheduler::checkpoint::File::default()`，路径是 `output/scheduler-checkpoint.json`
 - 如果你想要“内存调度 + 文件 checkpoint”的便捷组合，可以直接用 `scheduler::checkpoint::Memory::default()`
 - 如果你要从默认 checkpoint 文件恢复到 memory scheduler，使用 `scheduler::checkpoint::Memory::load_default().await?`
@@ -266,7 +267,13 @@ let engine = Engine::new().with_signal_listener_for(
     my_listener,
 );
 
-// 16. 如果要自定义全部底层组件，用 from_parts(...)
+// 16. 如果要单独观测 scheduler runtime 事件，可以包一层 Observed
+let scheduler = scheduler::Observed::new(
+    scheduler::Redis::new("redis://127.0.0.1:6379", "kun:scheduler"),
+)
+.with_reporter(my_scheduler_reporter);
+
+// 17. 如果要自定义全部底层组件，用 from_parts(...)
 let engine = Engine::from_parts(
     scheduler::Redis::new("redis://127.0.0.1:6379", "kun:scheduler"),
     Http::default(),

@@ -11,6 +11,7 @@
 pub mod checkpoint;
 pub mod memory;
 pub mod redis;
+pub mod runtime;
 pub mod snapshot;
 pub mod task;
 pub mod traits;
@@ -18,6 +19,7 @@ pub mod worker;
 
 pub use memory::Memory;
 pub use redis::Redis;
+pub use runtime::{Observed, RuntimeEvent, RuntimeEventKind, RuntimeReporter};
 pub use snapshot::{InflightTaskSnapshot, Overview, Snapshot, WorkerSnapshot};
 pub use task::{ClaimedTask, Task, TaskId, TaskLease};
 pub use traits::Scheduler;

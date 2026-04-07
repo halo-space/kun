@@ -1,14 +1,15 @@
 use crate::error::SpiderError;
 use crate::redis::{Connection, ErrorContext, connect, query, validate_url};
 use crate::scheduler::checkpoint::{Checkpoint, Counts};
+use crate::scheduler::runtime::RuntimeEvent;
 use crate::scheduler::snapshot::{InflightTaskSnapshot, Snapshot, WorkerSnapshot};
 use crate::scheduler::{ClaimedTask, Scheduler, Task, TaskId, TaskLease, Worker};
 use jiff::{SignedDuration, Timestamp};
 use redis::FromRedisValue;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex;
 
 const DEFAULT_LEASE_TIMEOUT: u64 = 300_000;
@@ -617,6 +618,7 @@ pub struct Redis {
     namespace: String,
     worker: Worker,
     connection: Arc<Mutex<Option<Connection>>>,
+    runtime_events: Arc<StdMutex<Vec<RuntimeEvent>>>,
 }
 
 impl Redis {
@@ -628,6 +630,7 @@ impl Redis {
                 i64::try_from(DEFAULT_LEASE_TIMEOUT).unwrap_or(i64::MAX),
             )),
             connection: Arc::new(Mutex::new(None)),
+            runtime_events: Arc::new(StdMutex::new(Vec::new())),
         }
     }
 
@@ -762,6 +765,22 @@ impl Redis {
             .map(non_negative_milliseconds)
     }
 
+    fn push_runtime_event(&self, event: RuntimeEvent) {
+        if let Ok(mut events) = self.runtime_events.lock() {
+            events.push(event);
+        }
+    }
+
+    fn push_reclaimed_runtime_event(&self, scope: &str, reclaimed: u64) {
+        if reclaimed == 0 {
+            return;
+        }
+        self.push_runtime_event(RuntimeEvent::reclaimed(
+            Some(scope.to_string()),
+            usize::try_from(reclaimed).unwrap_or_default(),
+        ));
+    }
+
     async fn read_checkpoint(&self) -> Result<Checkpoint, SpiderError> {
         let mut guard = self.connection().await?;
         let connection = self.connection_mut(&mut guard)?;
@@ -814,7 +833,9 @@ impl Redis {
         let mut guard = self.connection().await?;
         let connection = self.connection_mut(&mut guard)?;
         self.sync_namespace_metadata(connection).await?;
-        read_scope_snapshot(connection, self.scope()).await
+        let snapshot = read_scope_snapshot(connection, self.scope()).await?;
+        self.push_reclaimed_runtime_event(&snapshot.scope, snapshot.reclaimed_in_refresh);
+        Ok(snapshot)
     }
 
     async fn read_scopes_with_prefix(&self, prefix: &str) -> Result<Vec<String>, SpiderError> {
@@ -829,7 +850,9 @@ impl Redis {
         let scopes = load_registry_namespaces(connection, prefix).await?;
         let mut snapshots = Vec::with_capacity(scopes.len());
         for scope in scopes {
-            snapshots.push(read_scope_snapshot(connection, &scope).await?);
+            let snapshot = read_scope_snapshot(connection, &scope).await?;
+            self.push_reclaimed_runtime_event(&snapshot.scope, snapshot.reclaimed_in_refresh);
+            snapshots.push(snapshot);
         }
         Ok(snapshots)
     }
@@ -842,6 +865,10 @@ impl Redis {
         let keys = self.keys();
         clear_worker_runtime_if_idle(connection, &keys, self.worker_id()).await?;
         guard.take();
+        self.push_runtime_event(RuntimeEvent::closed(
+            Some(self.scope().to_string()),
+            Some(self.worker_id().to_string()),
+        ));
         Ok(())
     }
 
@@ -933,6 +960,8 @@ impl Redis {
         for _ in 0..usize::try_from(reclaimed).unwrap_or_default() {
             tracing::warn!("redis scheduler reclaimed stale inflight task");
         }
+
+        self.push_reclaimed_runtime_event(self.scope(), reclaimed);
 
         Ok(reclaimed)
     }
@@ -1225,7 +1254,15 @@ impl Scheduler for Redis {
         )
         .await?;
         clear_worker_runtime_if_idle(connection, &keys, self.worker_id()).await?;
-        Ok(usize::try_from(released).unwrap_or_default())
+        let released = usize::try_from(released).unwrap_or_default();
+        if released > 0 {
+            self.push_runtime_event(RuntimeEvent::released(
+                Some(self.scope().to_string()),
+                Some(self.worker_id().to_string()),
+                released,
+            ));
+        }
+        Ok(released)
     }
 
     async fn heartbeat(&self, lease: &TaskLease) -> Result<(), SpiderError> {
@@ -1245,6 +1282,21 @@ impl Scheduler for Redis {
 
     async fn close(&self) -> Result<(), SpiderError> {
         self.close_runtime().await
+    }
+
+    fn runtime_scope(&self) -> Option<String> {
+        Some(self.scope().to_string())
+    }
+
+    fn runtime_worker_id(&self) -> Option<String> {
+        Some(self.worker_id().to_string())
+    }
+
+    fn drain_runtime_events(&self) -> Vec<RuntimeEvent> {
+        self.runtime_events
+            .lock()
+            .map(|mut events| std::mem::take(&mut *events))
+            .unwrap_or_default()
     }
 
     async fn has_pending(&self) -> Result<bool, SpiderError> {
