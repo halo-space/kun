@@ -145,12 +145,18 @@ impl Sqlite {
             .max_connections(1)
             .connect_with(options)
             .await
-            .map_err(|error| SpiderError::engine(format!("failed to open sqlite scheduler database: {error}")))?;
+            .map_err(|error| {
+                SpiderError::engine(format!("failed to open sqlite scheduler database: {error}"))
+            })?;
 
         sqlx::query("PRAGMA foreign_keys = ON")
             .execute(&pool)
             .await
-            .map_err(|error| SpiderError::engine(format!("failed to enable sqlite scheduler foreign_keys: {error}")))?;
+            .map_err(|error| {
+                SpiderError::engine(format!(
+                    "failed to enable sqlite scheduler foreign_keys: {error}"
+                ))
+            })?;
 
         for statement in schema_statements() {
             sqlx::query(statement)
@@ -175,9 +181,11 @@ impl Sqlite {
     }
 
     fn heartbeat_interval_millis(&self) -> Option<u64> {
-        let default = self
-            .lease_timeout_millis()
-            .map(|timeout| SignedDuration::from_millis(i64::try_from(default_heartbeat_interval(timeout)).unwrap_or(i64::MAX)));
+        let default = self.lease_timeout_millis().map(|timeout| {
+            SignedDuration::from_millis(
+                i64::try_from(default_heartbeat_interval(timeout)).unwrap_or(i64::MAX),
+            )
+        });
         self.worker
             .effective_heartbeat_interval(default)
             .map(non_negative_milliseconds)
@@ -231,7 +239,9 @@ impl Sqlite {
         .bind(pattern)
         .fetch_all(&pool)
         .await
-        .map_err(|error| SpiderError::scheduler(format!("failed to read sqlite scheduler scopes: {error}")))?;
+        .map_err(|error| {
+            SpiderError::scheduler(format!("failed to read sqlite scheduler scopes: {error}"))
+        })?;
 
         Ok(rows
             .into_iter()
@@ -253,10 +263,7 @@ impl Sqlite {
 
         let reclaimed = reclaim_expired_tasks(&pool, scope).await?;
         if reclaimed > 0 {
-            self.push_runtime_event(RuntimeEvent::reclaimed(
-                Some(scope.to_string()),
-                reclaimed,
-            ));
+            self.push_runtime_event(RuntimeEvent::reclaimed(Some(scope.to_string()), reclaimed));
         }
         promote_delayed_tasks(&pool, scope).await?;
 
@@ -277,10 +284,7 @@ impl Sqlite {
 
         let reclaimed = reclaim_expired_tasks(&pool, scope).await?;
         if reclaimed > 0 {
-            self.push_runtime_event(RuntimeEvent::reclaimed(
-                Some(scope.to_string()),
-                reclaimed,
-            ));
+            self.push_runtime_event(RuntimeEvent::reclaimed(Some(scope.to_string()), reclaimed));
         }
         promote_delayed_tasks(&pool, scope).await?;
 
@@ -293,7 +297,9 @@ impl Sqlite {
         .bind(scope)
         .fetch_all(&pool)
         .await
-        .map_err(|error| SpiderError::scheduler(format!("failed to read sqlite ready checkpoint: {error}")))?;
+        .map_err(|error| {
+            SpiderError::scheduler(format!("failed to read sqlite ready checkpoint: {error}"))
+        })?;
 
         let delayed_rows = sqlx::query(
             "SELECT task_json
@@ -304,7 +310,9 @@ impl Sqlite {
         .bind(scope)
         .fetch_all(&pool)
         .await
-        .map_err(|error| SpiderError::scheduler(format!("failed to read sqlite delayed checkpoint: {error}")))?;
+        .map_err(|error| {
+            SpiderError::scheduler(format!("failed to read sqlite delayed checkpoint: {error}"))
+        })?;
 
         let inflight_rows = sqlx::query(
             "SELECT task_json
@@ -315,7 +323,11 @@ impl Sqlite {
         .bind(scope)
         .fetch_all(&pool)
         .await
-        .map_err(|error| SpiderError::scheduler(format!("failed to read sqlite inflight checkpoint: {error}")))?;
+        .map_err(|error| {
+            SpiderError::scheduler(format!(
+                "failed to read sqlite inflight checkpoint: {error}"
+            ))
+        })?;
 
         Ok(Checkpoint {
             ready: decode_task_rows(ready_rows)?,
@@ -353,7 +365,11 @@ impl Sqlite {
         .bind(scope)
         .fetch_one(&pool)
         .await
-        .map_err(|error| SpiderError::scheduler(format!("failed to read sqlite scheduler scope metadata: {error}")))?;
+        .map_err(|error| {
+            SpiderError::scheduler(format!(
+                "failed to read sqlite scheduler scope metadata: {error}"
+            ))
+        })?;
 
         let counts = read_counts_no_refresh(&pool, scope).await?;
 
@@ -366,7 +382,11 @@ impl Sqlite {
         .bind(scope)
         .fetch_all(&pool)
         .await
-        .map_err(|error| SpiderError::scheduler(format!("failed to read sqlite inflight snapshot rows: {error}")))?;
+        .map_err(|error| {
+            SpiderError::scheduler(format!(
+                "failed to read sqlite inflight snapshot rows: {error}"
+            ))
+        })?;
 
         let mut worker_task_ids: BTreeMap<String, Vec<crate::scheduler::TaskId>> = BTreeMap::new();
         let mut worker_deadlines: BTreeMap<String, Vec<Timestamp>> = BTreeMap::new();
@@ -427,7 +447,11 @@ impl Sqlite {
         .bind(scope)
         .fetch_all(&pool)
         .await
-        .map_err(|error| SpiderError::scheduler(format!("failed to read sqlite worker snapshot rows: {error}")))?;
+        .map_err(|error| {
+            SpiderError::scheduler(format!(
+                "failed to read sqlite worker snapshot rows: {error}"
+            ))
+        })?;
 
         let now_millis = now_i64();
         let mut workers = Vec::with_capacity(worker_rows.len());
@@ -477,7 +501,8 @@ impl Sqlite {
             worker_ids: worker_ids.into_iter().collect(),
             active_lease_count,
             deadline_count,
-            reclaimed_total: u64::try_from(meta.get::<i64, _>("reclaimed_total")).unwrap_or_default(),
+            reclaimed_total: u64::try_from(meta.get::<i64, _>("reclaimed_total"))
+                .unwrap_or_default(),
             reclaimed_in_refresh: u64::try_from(reclaimed_in_refresh).unwrap_or_default(),
             inflight_tasks,
             workers,
@@ -497,7 +522,9 @@ impl Sqlite {
         prefix: &str,
         sync_current_scope: bool,
     ) -> Result<Vec<Snapshot>, SpiderError> {
-        let scopes = self.read_scopes_with_prefix(prefix, sync_current_scope).await?;
+        let scopes = self
+            .read_scopes_with_prefix(prefix, sync_current_scope)
+            .await?;
         let mut snapshots = Vec::with_capacity(scopes.len());
         for scope in scopes {
             snapshots.push(
@@ -566,7 +593,9 @@ impl Scheduler for Sqlite {
         .bind(self.scope())
         .fetch_optional(&pool)
         .await
-        .map_err(|error| SpiderError::scheduler(format!("failed to read sqlite paused scope flag: {error}")))?;
+        .map_err(|error| {
+            SpiderError::scheduler(format!("failed to read sqlite paused scope flag: {error}"))
+        })?;
 
         if paused.unwrap_or_default() != 0 {
             refresh_registered_worker(&pool, self.scope(), self.worker_id()).await?;
@@ -603,7 +632,9 @@ impl Scheduler for Sqlite {
         .bind(self.scope())
         .execute(&pool)
         .await
-        .map_err(|error| SpiderError::scheduler(format!("failed to claim sqlite ready task: {error}")))?;
+        .map_err(|error| {
+            SpiderError::scheduler(format!("failed to claim sqlite ready task: {error}"))
+        })?;
 
         if claimed.rows_affected() == 0 {
             refresh_registered_worker(&pool, self.scope(), self.worker_id()).await?;
@@ -630,7 +661,9 @@ impl Scheduler for Sqlite {
         .bind(&lease_id)
         .fetch_one(&pool)
         .await
-        .map_err(|error| SpiderError::scheduler(format!("failed to load claimed sqlite task: {error}")))?;
+        .map_err(|error| {
+            SpiderError::scheduler(format!("failed to load claimed sqlite task: {error}"))
+        })?;
 
         let task = decode_task_json(row.get::<String, _>("task_json"))?;
         Ok(Some(ClaimedTask::new(
@@ -674,7 +707,11 @@ impl Scheduler for Sqlite {
         sqlx::query("BEGIN IMMEDIATE")
             .execute(&pool)
             .await
-            .map_err(|error| SpiderError::scheduler(format!("failed to begin sqlite completion transaction: {error}")))?;
+            .map_err(|error| {
+                SpiderError::scheduler(format!(
+                    "failed to begin sqlite completion transaction: {error}"
+                ))
+            })?;
 
         let result = async {
             for task in tasks {
@@ -782,7 +819,11 @@ impl Scheduler for Sqlite {
         .bind(self.worker_id())
         .fetch_all(&pool)
         .await
-        .map_err(|error| SpiderError::scheduler(format!("failed to read sqlite inflight release rows: {error}")))?;
+        .map_err(|error| {
+            SpiderError::scheduler(format!(
+                "failed to read sqlite inflight release rows: {error}"
+            ))
+        })?;
 
         let mut released = 0usize;
         for row in rows {
@@ -811,7 +852,9 @@ impl Scheduler for Sqlite {
             .bind(self.worker_id())
             .execute(&pool)
             .await
-            .map_err(|error| SpiderError::scheduler(format!("failed to release sqlite inflight task: {error}")))?;
+            .map_err(|error| {
+                SpiderError::scheduler(format!("failed to release sqlite inflight task: {error}"))
+            })?;
             released += usize::try_from(updated.rows_affected()).unwrap_or_default();
         }
 
@@ -925,7 +968,9 @@ impl Control for Sqlite {
         .bind(scope)
         .execute(&pool)
         .await
-        .map_err(|error| SpiderError::scheduler(format!("failed to pause sqlite scheduler scope: {error}")))?;
+        .map_err(|error| {
+            SpiderError::scheduler(format!("failed to pause sqlite scheduler scope: {error}"))
+        })?;
 
         Ok(result.rows_affected() == 1)
     }
@@ -944,7 +989,9 @@ impl Control for Sqlite {
         .bind(scope)
         .execute(&pool)
         .await
-        .map_err(|error| SpiderError::scheduler(format!("failed to resume sqlite scheduler scope: {error}")))?;
+        .map_err(|error| {
+            SpiderError::scheduler(format!("failed to resume sqlite scheduler scope: {error}"))
+        })?;
 
         Ok(result.rows_affected() == 1)
     }
@@ -962,7 +1009,9 @@ impl Control for Sqlite {
         .bind(scope)
         .fetch_all(&pool)
         .await
-        .map_err(|error| SpiderError::scheduler(format!("failed to read sqlite scope release rows: {error}")))?;
+        .map_err(|error| {
+            SpiderError::scheduler(format!("failed to read sqlite scope release rows: {error}"))
+        })?;
 
         let mut released = 0usize;
         for row in rows {
@@ -990,7 +1039,11 @@ impl Control for Sqlite {
             .bind(task_id)
             .execute(&pool)
             .await
-            .map_err(|error| SpiderError::scheduler(format!("failed to release sqlite scope inflight task: {error}")))?;
+            .map_err(|error| {
+                SpiderError::scheduler(format!(
+                    "failed to release sqlite scope inflight task: {error}"
+                ))
+            })?;
             released += usize::try_from(updated.rows_affected()).unwrap_or_default();
         }
 
@@ -1015,12 +1068,16 @@ impl Control for Sqlite {
             .bind(scope)
             .execute(&pool)
             .await
-            .map_err(|error| SpiderError::scheduler(format!("failed to purge sqlite scheduler tasks: {error}")))?;
+            .map_err(|error| {
+                SpiderError::scheduler(format!("failed to purge sqlite scheduler tasks: {error}"))
+            })?;
         sqlx::query("DELETE FROM scheduler_workers WHERE scope = ?")
             .bind(scope)
             .execute(&pool)
             .await
-            .map_err(|error| SpiderError::scheduler(format!("failed to purge sqlite scheduler workers: {error}")))?;
+            .map_err(|error| {
+                SpiderError::scheduler(format!("failed to purge sqlite scheduler workers: {error}"))
+            })?;
         sqlx::query(
             "UPDATE scheduler_scopes
              SET is_paused = 0,
@@ -1032,7 +1089,11 @@ impl Control for Sqlite {
         .bind(scope)
         .execute(&pool)
         .await
-        .map_err(|error| SpiderError::scheduler(format!("failed to reset sqlite scheduler scope metadata: {error}")))?;
+        .map_err(|error| {
+            SpiderError::scheduler(format!(
+                "failed to reset sqlite scheduler scope metadata: {error}"
+            ))
+        })?;
 
         Ok(counts)
     }
@@ -1122,7 +1183,11 @@ async fn ensure_visible_scope(pool: &SqlitePool, scope: &str) -> Result<(), Spid
     .bind(scope)
     .fetch_optional(pool)
     .await
-    .map_err(|error| SpiderError::scheduler(format!("failed to validate sqlite scheduler scope visibility: {error}")))?;
+    .map_err(|error| {
+        SpiderError::scheduler(format!(
+            "failed to validate sqlite scheduler scope visibility: {error}"
+        ))
+    })?;
 
     if exists.is_some() {
         Ok(())
@@ -1144,7 +1209,11 @@ async fn reserve_sequence(pool: &SqlitePool, scope: &str) -> Result<i64, SpiderE
     .bind(scope)
     .execute(pool)
     .await
-    .map_err(|error| SpiderError::scheduler(format!("failed to reserve sqlite scheduler sequence: {error}")))?;
+    .map_err(|error| {
+        SpiderError::scheduler(format!(
+            "failed to reserve sqlite scheduler sequence: {error}"
+        ))
+    })?;
 
     sqlx::query_scalar(
         "SELECT next_sequence
@@ -1154,7 +1223,9 @@ async fn reserve_sequence(pool: &SqlitePool, scope: &str) -> Result<i64, SpiderE
     .bind(scope)
     .fetch_one(pool)
     .await
-    .map_err(|error| SpiderError::scheduler(format!("failed to load sqlite scheduler sequence: {error}")))
+    .map_err(|error| {
+        SpiderError::scheduler(format!("failed to load sqlite scheduler sequence: {error}"))
+    })
 }
 
 async fn insert_task(
@@ -1197,7 +1268,9 @@ async fn promote_delayed_tasks(pool: &SqlitePool, scope: &str) -> Result<(), Spi
     .bind(now_i64())
     .execute(pool)
     .await
-    .map_err(|error| SpiderError::scheduler(format!("failed to promote sqlite delayed tasks: {error}")))?;
+    .map_err(|error| {
+        SpiderError::scheduler(format!("failed to promote sqlite delayed tasks: {error}"))
+    })?;
     Ok(())
 }
 
@@ -1212,7 +1285,11 @@ async fn reclaim_expired_tasks(pool: &SqlitePool, scope: &str) -> Result<usize, 
     .bind(now_i64())
     .fetch_all(pool)
     .await
-    .map_err(|error| SpiderError::scheduler(format!("failed to read sqlite expired inflight rows: {error}")))?;
+    .map_err(|error| {
+        SpiderError::scheduler(format!(
+            "failed to read sqlite expired inflight rows: {error}"
+        ))
+    })?;
 
     let mut reclaimed = 0usize;
     for row in rows {
@@ -1240,7 +1317,9 @@ async fn reclaim_expired_tasks(pool: &SqlitePool, scope: &str) -> Result<usize, 
         .bind(task_id)
         .execute(pool)
         .await
-        .map_err(|error| SpiderError::scheduler(format!("failed to reclaim sqlite inflight task: {error}")))?;
+        .map_err(|error| {
+            SpiderError::scheduler(format!("failed to reclaim sqlite inflight task: {error}"))
+        })?;
         reclaimed += usize::try_from(updated.rows_affected()).unwrap_or_default();
     }
 
@@ -1256,7 +1335,11 @@ async fn reclaim_expired_tasks(pool: &SqlitePool, scope: &str) -> Result<usize, 
         .bind(scope)
         .execute(pool)
         .await
-        .map_err(|error| SpiderError::scheduler(format!("failed to increment sqlite reclaimed counter: {error}")))?;
+        .map_err(|error| {
+            SpiderError::scheduler(format!(
+                "failed to increment sqlite reclaimed counter: {error}"
+            ))
+        })?;
     }
 
     Ok(reclaimed)
@@ -1285,7 +1368,9 @@ async fn upsert_worker_runtime(
     .bind(heartbeat_interval_ms.and_then(|value| i64::try_from(value).ok()))
     .execute(pool)
     .await
-    .map_err(|error| SpiderError::scheduler(format!("failed to upsert sqlite worker runtime: {error}")))?;
+    .map_err(|error| {
+        SpiderError::scheduler(format!("failed to upsert sqlite worker runtime: {error}"))
+    })?;
     Ok(())
 }
 
@@ -1303,7 +1388,11 @@ async fn refresh_registered_worker(
     .bind(worker_id)
     .fetch_optional(pool)
     .await
-    .map_err(|error| SpiderError::scheduler(format!("failed to check sqlite worker runtime presence: {error}")))?;
+    .map_err(|error| {
+        SpiderError::scheduler(format!(
+            "failed to check sqlite worker runtime presence: {error}"
+        ))
+    })?;
 
     if exists.is_some() {
         sqlx::query(
@@ -1316,7 +1405,9 @@ async fn refresh_registered_worker(
         .bind(worker_id)
         .execute(pool)
         .await
-        .map_err(|error| SpiderError::scheduler(format!("failed to refresh sqlite worker runtime: {error}")))?;
+        .map_err(|error| {
+            SpiderError::scheduler(format!("failed to refresh sqlite worker runtime: {error}"))
+        })?;
     }
 
     Ok(())
@@ -1336,7 +1427,11 @@ async fn clear_worker_runtime_if_idle(
     .bind(worker_id)
     .fetch_one(pool)
     .await
-    .map_err(|error| SpiderError::scheduler(format!("failed to count sqlite inflight worker tasks: {error}")))?;
+    .map_err(|error| {
+        SpiderError::scheduler(format!(
+            "failed to count sqlite inflight worker tasks: {error}"
+        ))
+    })?;
 
     if inflight == 0 {
         sqlx::query(
@@ -1347,7 +1442,9 @@ async fn clear_worker_runtime_if_idle(
         .bind(worker_id)
         .execute(pool)
         .await
-        .map_err(|error| SpiderError::scheduler(format!("failed to clear sqlite worker runtime: {error}")))?;
+        .map_err(|error| {
+            SpiderError::scheduler(format!("failed to clear sqlite worker runtime: {error}"))
+        })?;
     }
 
     Ok(())
@@ -1367,7 +1464,11 @@ async fn prune_idle_workers_in_scope(pool: &SqlitePool, scope: &str) -> Result<(
     .bind(scope)
     .execute(pool)
     .await
-    .map_err(|error| SpiderError::scheduler(format!("failed to prune sqlite idle worker runtime: {error}")))?;
+    .map_err(|error| {
+        SpiderError::scheduler(format!(
+            "failed to prune sqlite idle worker runtime: {error}"
+        ))
+    })?;
     Ok(())
 }
 
@@ -1381,7 +1482,9 @@ async fn read_counts_no_refresh(pool: &SqlitePool, scope: &str) -> Result<Counts
     .bind(scope)
     .fetch_all(pool)
     .await
-    .map_err(|error| SpiderError::scheduler(format!("failed to read sqlite scheduler counts: {error}")))?;
+    .map_err(|error| {
+        SpiderError::scheduler(format!("failed to read sqlite scheduler counts: {error}"))
+    })?;
 
     let mut counts = Counts::default();
     for row in rows {
@@ -1479,9 +1582,11 @@ async fn ensure_parent_dir(path: &Path) -> Result<(), SpiderError> {
         return Ok(());
     }
 
-    tokio::fs::create_dir_all(parent)
-        .await
-        .map_err(|error| SpiderError::engine(format!("failed to create sqlite scheduler directory: {error}")))?;
+    tokio::fs::create_dir_all(parent).await.map_err(|error| {
+        SpiderError::engine(format!(
+            "failed to create sqlite scheduler directory: {error}"
+        ))
+    })?;
     Ok(())
 }
 
@@ -1564,8 +1669,8 @@ mod tests {
     #[tokio::test]
     async fn sqlite_scheduler_supports_basic_durable_flow() {
         let path = test_db_path("basic_flow");
-        let scheduler = Sqlite::new(&path, "jobs:sqlite-basic")
-            .with_worker(Worker::new("sqlite-worker-a"));
+        let scheduler =
+            Sqlite::new(&path, "jobs:sqlite-basic").with_worker(Worker::new("sqlite-worker-a"));
 
         scheduler
             .enqueue(Task::new(Request::new("https://example.com/a")).with_priority(10))
@@ -1667,7 +1772,10 @@ mod tests {
         let claimed = news.take_ready().await.unwrap().unwrap();
 
         let scopes = news.scopes_with_prefix("jobs:").await.unwrap();
-        assert_eq!(scopes, vec!["jobs:blog".to_string(), "jobs:news".to_string()]);
+        assert_eq!(
+            scopes,
+            vec!["jobs:blog".to_string(), "jobs:news".to_string()]
+        );
 
         let snapshots = news.snapshots_with_prefix("jobs:").await.unwrap();
         assert_eq!(snapshots.len(), 2);
@@ -1705,10 +1813,12 @@ mod tests {
     #[tokio::test]
     async fn sqlite_scheduler_reclaims_stale_leases_and_respects_heartbeat() {
         let path = test_db_path("lease_heartbeat");
-        let first = Sqlite::new(&path, "jobs:lease")
-            .with_worker(Worker::new("worker-a").with_lease_timeout(SignedDuration::from_millis(40)));
-        let second = Sqlite::new(&path, "jobs:lease")
-            .with_worker(Worker::new("worker-b").with_lease_timeout(SignedDuration::from_millis(40)));
+        let first = Sqlite::new(&path, "jobs:lease").with_worker(
+            Worker::new("worker-a").with_lease_timeout(SignedDuration::from_millis(40)),
+        );
+        let second = Sqlite::new(&path, "jobs:lease").with_worker(
+            Worker::new("worker-b").with_lease_timeout(SignedDuration::from_millis(40)),
+        );
 
         first
             .enqueue(Task::new(Request::new("https://example.com/stale")))

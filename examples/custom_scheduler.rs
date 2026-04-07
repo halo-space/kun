@@ -4,8 +4,8 @@ use halo_spider::request::Request;
 use halo_spider::scheduler::checkpoint::{Checkpoint, Persist};
 use halo_spider::scheduler::{self, Control, Scheduler, Task, TaskLease, TaskResolution};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex as StdMutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::Mutex;
 
 static NEXT_SQLITE_DEMO_ID: AtomicU64 = AtomicU64::new(1);
@@ -411,13 +411,19 @@ async fn sqlite_batch_demo() -> Result<(), SpiderError> {
     let scheduler = scheduler::Sqlite::new(&path, "examples:custom-scheduler:sqlite-batch")
         .with_worker(scheduler::Worker::new("example-sqlite-batch-worker"));
     scheduler
-        .enqueue(Task::new(Request::new("https://example.com/sqlite-batch/a")))
+        .enqueue(Task::new(Request::new(
+            "https://example.com/sqlite-batch/a",
+        )))
         .await?;
     scheduler
-        .enqueue(Task::new(Request::new("https://example.com/sqlite-batch/b")))
+        .enqueue(Task::new(Request::new(
+            "https://example.com/sqlite-batch/b",
+        )))
         .await?;
     scheduler
-        .enqueue(Task::new(Request::new("https://example.com/sqlite-batch/c")))
+        .enqueue(Task::new(Request::new(
+            "https://example.com/sqlite-batch/c",
+        )))
         .await?;
 
     let claimed = scheduler.take_batch_ready(2).await?;

@@ -816,7 +816,8 @@ where
                 let available_slots = max_concurrent - inflight.len();
                 let mut permits = Vec::with_capacity(available_slots);
                 while permits.len() < available_slots {
-                    let Ok(global_permit_guard) = global_semaphore.clone().try_acquire_owned() else {
+                    let Ok(global_permit_guard) = global_semaphore.clone().try_acquire_owned()
+                    else {
                         break;
                     };
                     permits.push(global_permit_guard);
@@ -2458,16 +2459,21 @@ mod tests {
         let error =
             block_on(engine.execute_spider_once(&ItemSpider, None, &mut step_chains)).unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("complete_and_enqueue failed after store commit"));
+        assert!(
+            error
+                .to_string()
+                .contains("complete_and_enqueue failed after store commit")
+        );
         assert_eq!(store.items().len(), 1);
 
         let checkpoint = block_on(Scheduler::checkpoint(&engine.scheduler)).unwrap();
         assert!(checkpoint.ready.is_empty());
         assert!(checkpoint.delayed.is_empty());
         assert_eq!(checkpoint.inflight.len(), 1);
-        assert_eq!(checkpoint.inflight[0].request.url, "https://example.com/item");
+        assert_eq!(
+            checkpoint.inflight[0].request.url,
+            "https://example.com/item"
+        );
         assert_eq!(
             engine.stats(),
             StatsSnapshot {
