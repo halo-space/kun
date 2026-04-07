@@ -188,10 +188,7 @@ impl Pipeline for StopAfterFirst {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_target(false)
-        .with_level(true)
-        .init();
+    halo_spider::trace::init_console();
 
     let base_url =
         std::env::var("HALO_SPIDER_ES_URL").unwrap_or_else(|_| "http://127.0.0.1:9200".into());

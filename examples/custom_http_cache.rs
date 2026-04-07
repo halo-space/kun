@@ -36,14 +36,23 @@ impl Cache for DemoCache {
     fn load<'a>(&'a self, key: &'a str) -> BoxFuture<'a, Result<Option<Entry>, SpiderError>> {
         Box::pin(async move {
             let entry = self.entries.lock().await.get(key).cloned();
-            tracing::info!(key, hit = entry.is_some(), "[custom_http_cache] load");
+            halo_spider::trace::info(
+                "custom_http_cache.load",
+                vec![
+                    halo_spider::trace::prop("key", key),
+                    halo_spider::trace::prop("hit", entry.is_some()),
+                ],
+            );
             Ok(entry)
         })
     }
 
     fn save<'a>(&'a self, entry: &'a Entry) -> BoxFuture<'a, Result<(), SpiderError>> {
         Box::pin(async move {
-            tracing::info!(key = entry.key.as_str(), "[custom_http_cache] save");
+            halo_spider::trace::info(
+                "custom_http_cache.save",
+                vec![halo_spider::trace::prop("key", entry.key.as_str())],
+            );
             self.entries
                 .lock()
                 .await
@@ -54,7 +63,10 @@ impl Cache for DemoCache {
 
     fn remove<'a>(&'a self, key: &'a str) -> BoxFuture<'a, Result<(), SpiderError>> {
         Box::pin(async move {
-            tracing::info!(key, "[custom_http_cache] remove");
+            halo_spider::trace::info(
+                "custom_http_cache.remove",
+                vec![halo_spider::trace::prop("key", key)],
+            );
             self.entries.lock().await.remove(key);
             Ok(())
         })
@@ -164,10 +176,7 @@ impl Pipeline for StopAfter {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_target(false)
-        .with_level(true)
-        .init();
+    halo_spider::trace::init_console();
 
     let settings = Settings::default().with_idle_timeout(SignedDuration::from_millis(200));
     let custom_http_cache = HttpCache::default()

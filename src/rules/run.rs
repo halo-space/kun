@@ -146,15 +146,8 @@ async fn build_request_from_next_url_config(
         return Ok(vec![]);
     }
 
-    tracing::info!(
-        step_id = current_step.id.as_str(),
-        current_url = response.url.as_str(),
-        "开始构造 next_urls"
-    );
-
     // 构造 URLs
     let urls = build_next_urls(response, &parse.next_url_config, parsed_fields)?;
-    tracing::info!(urls_count = urls.len(), urls = ?urls, "构造的 URLs");
 
     // 找到下一个 step
     let current_idx = all_steps.iter().position(|s| s.id == current_step.id);
@@ -164,7 +157,6 @@ async fn build_request_from_next_url_config(
 
     let next_step = next_step_id.as_deref();
 
-    tracing::debug!(requests_count = urls.len(), "生成 requests");
     Ok(urls
         .into_iter()
         .map(|url| {
@@ -207,7 +199,6 @@ fn build_request_meta(
     meta.extend(extra_meta.clone());
 
     if let Some(next_step) = next_step {
-        tracing::debug!(next_step_id = next_step, "设置 next_step");
         meta.insert(
             "next_step".to_string(),
             Value::String(next_step.to_string()),
@@ -321,19 +312,12 @@ fn select_css(response: &Response, selector: &str, attribute: &str) -> Vec<Strin
 }
 
 fn select_xpath(response: &Response, selector: &str, attribute: &str) -> Vec<String> {
-    let result = match attribute {
+    match attribute {
         "text" => response.xpath(selector).text().all(),
         "html" => response.xpath(selector).html().all(),
         value if value.starts_with("attr:") => response.xpath(selector).attr(&value[5..]).all(),
         _ => response.xpath(selector).all(),
-    };
-    tracing::debug!(
-        selector = selector,
-        attribute = attribute,
-        result_count = result.len(),
-        "XPath 提取结果"
-    );
-    result
+    }
 }
 
 fn select_xml(response: &Response, selector: &str, attribute: &str) -> Vec<String> {
@@ -503,11 +487,6 @@ fn build_from_template(
         }
     }
 
-    tracing::info!(
-        template = template,
-        result_url = url.as_str(),
-        "TEMPLATE 模式构造 URL"
-    );
     Ok(vec![url])
 }
 

@@ -108,7 +108,7 @@ impl Spider for MySpider {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt().init();
+    halo_spider::trace::init_console();
 
 let settings = Settings::default()
         .with_download_delay(SignedDuration::from_millis(200))

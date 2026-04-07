@@ -83,10 +83,7 @@ impl Pipeline for StopAfterFirst {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_target(false)
-        .with_level(true)
-        .init();
+    halo_spider::trace::init_console();
 
     let (webhook_url, request_rx, server_handle) = spawn_webhook_server().await;
     let webhook = Webhook::new(webhook_url)

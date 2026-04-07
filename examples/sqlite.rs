@@ -82,10 +82,7 @@ impl Pipeline for StopAfterFirst {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_target(false)
-        .with_level(true)
-        .init();
+    halo_spider::trace::init_console();
 
     let output_path = std::env::temp_dir().join("halo-spider-period-items.db");
     let sqlite = SqliteStore::new(output_path.clone())

@@ -958,7 +958,10 @@ impl Redis {
         let reclaimed = reclaim_expired_inflight_for_keys(connection, &keys).await?;
 
         for _ in 0..usize::try_from(reclaimed).unwrap_or_default() {
-            tracing::warn!("redis scheduler reclaimed stale inflight task");
+            crate::trace::warn(
+                "scheduler.redis.reclaimed_stale_inflight",
+                vec![crate::trace::prop("scope", self.scope())],
+            );
         }
 
         self.push_reclaimed_runtime_event(self.scope(), reclaimed);

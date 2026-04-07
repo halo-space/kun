@@ -36,7 +36,7 @@ impl Spider for AiSpider {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt::init();
+    halo_spider::trace::init_console();
 
     let settings = Settings::default()
         .with_openai_api_key(std::env::var("OPENAI_API_KEY").ok().unwrap())

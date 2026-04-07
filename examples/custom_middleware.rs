@@ -68,11 +68,13 @@ impl Middleware for RequestLoggerMiddleware {
         context: &'a mut EngineContext,
     ) -> BoxFuture<'a, Result<Flow, SpiderError>> {
         Box::pin(async move {
-            tracing::info!(
-                url = context.request.url.as_str(),
-                method = context.request.method.as_str(),
-                headers = ?context.request.headers,
-                "[RequestLogger] sending request"
+            halo_spider::trace::info(
+                "request_logger.request",
+                vec![
+                    halo_spider::trace::prop("url", context.request.url.as_str()),
+                    halo_spider::trace::prop("method", context.request.method.as_str()),
+                    halo_spider::trace::prop("headers", format!("{:?}", context.request.headers)),
+                ],
             );
             Ok(Flow::Continue)
         })
@@ -84,11 +86,13 @@ impl Middleware for RequestLoggerMiddleware {
     ) -> BoxFuture<'a, Result<Flow, SpiderError>> {
         Box::pin(async move {
             if let Some(ref resp) = context.response {
-                tracing::info!(
-                    url = context.request.url.as_str(),
-                    status = resp.status,
-                    body_len = resp.body.len(),
-                    "[RequestLogger] received response"
+                halo_spider::trace::info(
+                    "request_logger.response",
+                    vec![
+                        halo_spider::trace::prop("url", context.request.url.as_str()),
+                        halo_spider::trace::prop("status", resp.status),
+                        halo_spider::trace::prop("body_len", resp.body.len()),
+                    ],
                 );
             }
             Ok(Flow::Continue)
@@ -127,10 +131,12 @@ impl Middleware for StatsMiddleware {
     ) -> BoxFuture<'a, Result<Flow, SpiderError>> {
         Box::pin(async move {
             let n = self.request_count.fetch_add(1, Ordering::Relaxed) + 1;
-            tracing::info!(
-                label = self.label.as_str(),
-                count = n,
-                "[Stats] request count"
+            halo_spider::trace::info(
+                "stats.request",
+                vec![
+                    halo_spider::trace::prop("label", self.label.as_str()),
+                    halo_spider::trace::prop("count", n),
+                ],
             );
             Ok(Flow::Continue)
         })
@@ -142,10 +148,12 @@ impl Middleware for StatsMiddleware {
     ) -> BoxFuture<'a, Result<Flow, SpiderError>> {
         Box::pin(async move {
             let n = self.response_count.fetch_add(1, Ordering::Relaxed) + 1;
-            tracing::info!(
-                label = self.label.as_str(),
-                count = n,
-                "[Stats] response count"
+            halo_spider::trace::info(
+                "stats.response",
+                vec![
+                    halo_spider::trace::prop("label", self.label.as_str()),
+                    halo_spider::trace::prop("count", n),
+                ],
             );
             Ok(Flow::Continue)
         })
@@ -188,7 +196,13 @@ impl PeriodDemoSpider {
             .unwrap_or("unknown");
         let title = response.css("h2.S10_bb").text().one().unwrap_or_default();
 
-        tracing::info!(period_date, title = title.as_str(), "parsed edition page");
+        halo_spider::trace::info(
+            "period_demo.edition_parsed",
+            vec![
+                halo_spider::trace::prop("period_date", period_date),
+                halo_spider::trace::prop("title", title.as_str()),
+            ],
+        );
 
         Ok(Output {
             items: vec![
@@ -206,10 +220,7 @@ impl PeriodDemoSpider {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_target(false)
-        .with_level(true)
-        .init();
+    halo_spider::trace::init_console();
 
     let settings = Settings::default()
         .with_download_delay(SignedDuration::from_millis(500))
@@ -277,7 +288,7 @@ async fn main() {
     let handle = engine.shutdown_handle();
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.ok();
-        tracing::info!("received Ctrl+C, stopping engine...");
+        println!("received Ctrl+C, stopping engine...");
         handle.stop();
     });
 

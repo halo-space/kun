@@ -456,12 +456,6 @@ where
                     manifest.name, manifest.entry, manifest.name
                 )));
             }
-            tracing::info!(
-                plugin = manifest.name.as_str(),
-                kind = "middleware",
-                entry = manifest.entry.as_str(),
-                "plugin loaded"
-            );
         }
         Ok(self)
     }
@@ -499,12 +493,6 @@ where
             .into_iter()
             .map(|request| apply_compiled_fetch_to_request(request, compiled))
             .collect::<Result<Vec<_>, _>>()?;
-
-        tracing::info!(
-            spider = spider.name(),
-            count = start_requests.len(),
-            "enqueueing start URLs"
-        );
 
         for request in &start_requests {
             let enqueued = enqueue_request(
@@ -563,10 +551,12 @@ where
                     for sitemap in sitemaps {
                         let Some(resolved) = resolve_url(request.url.as_str(), sitemap.as_str())
                         else {
-                            tracing::warn!(
-                                spider = spider_name,
-                                sitemap = sitemap.as_str(),
-                                "skipping invalid sitemap URL declared by robots"
+                            crate::trace::warn(
+                                "robots.sitemap.invalid",
+                                vec![
+                                    crate::trace::prop("spider", spider_name),
+                                    crate::trace::prop("sitemap", sitemap.as_str()),
+                                ],
                             );
                             continue;
                         };
@@ -577,11 +567,13 @@ where
                     }
                 }
                 Err(error) => {
-                    tracing::warn!(
-                        spider = spider_name,
-                        url = request.url.as_str(),
-                        error = %error,
-                        "failed to read sitemap URLs from robots"
+                    crate::trace::warn(
+                        "robots.sitemap.read_failed",
+                        vec![
+                            crate::trace::prop("spider", spider_name),
+                            crate::trace::prop("url", request.url.as_str()),
+                            crate::trace::prop("error", error),
+                        ],
                     );
                 }
             }
@@ -591,8 +583,6 @@ where
             return Ok(());
         }
 
-        let mut seed_count = 0usize;
-
         while let Some((sitemap_url, representative_request)) = pending_sitemaps.pop_front() {
             let sitemap_request =
                 build_robots_sitemap_fetch_request(&representative_request, sitemap_url.clone());
@@ -600,22 +590,26 @@ where
             let response = match self.http.fetch(&sitemap_request).await {
                 Ok(response) => response,
                 Err(error) => {
-                    tracing::warn!(
-                        spider = spider_name,
-                        sitemap = sitemap_url.as_str(),
-                        error = %error,
-                        "failed to fetch sitemap"
+                    crate::trace::warn(
+                        "robots.sitemap.fetch_failed",
+                        vec![
+                            crate::trace::prop("spider", spider_name),
+                            crate::trace::prop("sitemap", sitemap_url.as_str()),
+                            crate::trace::prop("error", error),
+                        ],
                     );
                     continue;
                 }
             };
 
             if !(200..300).contains(&response.status) {
-                tracing::warn!(
-                    spider = spider_name,
-                    sitemap = sitemap_url.as_str(),
-                    status = response.status,
-                    "skipping sitemap because fetch did not return success"
+                crate::trace::warn(
+                    "robots.sitemap.unsuccessful_status",
+                    vec![
+                        crate::trace::prop("spider", spider_name),
+                        crate::trace::prop("sitemap", sitemap_url.as_str()),
+                        crate::trace::prop("status", response.status),
+                    ],
                 );
                 continue;
             }
@@ -625,11 +619,13 @@ where
             for nested_sitemap in entries.sitemaps {
                 let Some(resolved) = resolve_url(sitemap_url.as_str(), nested_sitemap.as_str())
                 else {
-                    tracing::warn!(
-                        spider = spider_name,
-                        sitemap = nested_sitemap.as_str(),
-                        parent = sitemap_url.as_str(),
-                        "skipping invalid nested sitemap URL"
+                    crate::trace::warn(
+                        "robots.sitemap.nested_invalid",
+                        vec![
+                            crate::trace::prop("spider", spider_name),
+                            crate::trace::prop("sitemap", nested_sitemap.as_str()),
+                            crate::trace::prop("parent", sitemap_url.as_str()),
+                        ],
                     );
                     continue;
                 };
@@ -641,11 +637,13 @@ where
 
             for page_url in entries.urls {
                 let Some(resolved) = resolve_url(sitemap_url.as_str(), page_url.as_str()) else {
-                    tracing::warn!(
-                        spider = spider_name,
-                        url = page_url.as_str(),
-                        sitemap = sitemap_url.as_str(),
-                        "skipping invalid sitemap URL entry"
+                    crate::trace::warn(
+                        "robots.sitemap.entry_invalid",
+                        vec![
+                            crate::trace::prop("spider", spider_name),
+                            crate::trace::prop("url", page_url.as_str()),
+                            crate::trace::prop("sitemap", sitemap_url.as_str()),
+                        ],
                     );
                     continue;
                 };
@@ -664,7 +662,6 @@ where
                 )
                 .await?
                 {
-                    seed_count += 1;
                     self.signals
                         .emit(crate::signals::Signal::request_scheduled(
                             spider_name,
@@ -674,12 +671,6 @@ where
                 }
             }
         }
-
-        tracing::info!(
-            spider = spider_name,
-            count = seed_count,
-            "enqueueing robots sitemap seed URLs"
-        );
 
         Ok(())
     }
@@ -696,16 +687,12 @@ where
     /// 2. Ctrl+C triggers a stop signal
     pub async fn run<Sp: Spider>(&mut self, spider: &Sp) -> Result<Vec<SpiderOutput>, SpiderError> {
         let spider_name = spider.name();
-        tracing::info!(spider = spider_name, "engine started");
+        crate::trace::info(
+            "engine.started",
+            vec![crate::trace::prop("spider", spider_name)],
+        );
 
         let allowed_domains = spider.allowed_domains();
-        if !allowed_domains.is_empty() {
-            tracing::info!(
-                spider = spider_name,
-                domains = ?allowed_domains,
-                "allowed domain filter enabled"
-            );
-        }
 
         self.pipeline.open(spider_name).await?;
         self.store.open(spider_name).await?;
@@ -714,10 +701,7 @@ where
             .await;
 
         let compiled = match spider.rules() {
-            Some(config) => {
-                tracing::info!(spider = spider_name, "loading DSL rules");
-                Some(crate::rules::load(&config).await?)
-            }
+            Some(config) => Some(crate::rules::load(&config).await?),
             None => None,
         };
 
@@ -737,13 +721,6 @@ where
                     SpiderError::engine(format!("invalid idle_timeout: {error}"))
                 })?)
             };
-
-        tracing::info!(
-            spider = spider_name,
-            concurrent = max_concurrent,
-            per_domain = per_domain_limit,
-            "concurrency settings"
-        );
 
         let global_semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
         let mut domain_semaphores: BTreeMap<String, Arc<tokio::sync::Semaphore>> = BTreeMap::new();
@@ -771,11 +748,6 @@ where
 
         loop {
             if shutdown.load(Ordering::Relaxed) {
-                tracing::info!(
-                    spider = spider_name,
-                    "received stop signal, waiting for {} in-flight tasks to finish...",
-                    inflight.len()
-                );
                 while let Some(result) = inflight.next().await {
                     apply_task_run(
                         result,
@@ -822,7 +794,6 @@ where
 
                 let step_id = step_id_from_request(&task.task.request);
                 let step_chain = step_chains.get(&step_id).unwrap_or(&default_step_chain);
-
                 let task_executor = TaskExecutor {
                     scheduler,
                     http,
@@ -854,11 +825,6 @@ where
 
             if inflight.is_empty() {
                 if let Some(idle_timeout_std) = idle_timeout_std {
-                    tracing::debug!(
-                        spider = spider_name,
-                        idle_timeout = idle_timeout.as_millis(),
-                        "queue is empty, waiting for new tasks..."
-                    );
                     tokio::time::sleep(idle_timeout_std).await;
                 } else {
                     tokio::task::yield_now().await;
@@ -892,16 +858,19 @@ where
             .await;
 
         let total_items: usize = outputs.iter().map(|o| o.items.len()).sum();
-        tracing::info!(
-            spider = spider_name,
-            rounds = round,
-            total_items,
-            request_count = stats.snapshot().request_count,
-            response_count = stats.snapshot().response_count,
-            error_count = stats.snapshot().error_count,
-            retry_count = stats.snapshot().retry_count,
-            pipeline_drop_count = stats.snapshot().pipeline_drop_count,
-            "engine stopped"
+        let snapshot = stats.snapshot();
+        crate::trace::info(
+            "engine.stopped",
+            vec![
+                crate::trace::prop("spider", spider_name),
+                crate::trace::prop("rounds", round),
+                crate::trace::prop("total_items", total_items),
+                crate::trace::prop("request_count", snapshot.request_count),
+                crate::trace::prop("response_count", snapshot.response_count),
+                crate::trace::prop("error_count", snapshot.error_count),
+                crate::trace::prop("retry_count", snapshot.retry_count),
+                crate::trace::prop("pipeline_drop_count", snapshot.pipeline_drop_count),
+            ],
         );
 
         self.scheduler.close().await?;

@@ -79,10 +79,7 @@ impl Pipeline for StopAfterFirst {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_target(false)
-        .with_level(true)
-        .init();
+    halo_spider::trace::init_console();
 
     let brokers =
         std::env::var("HALO_SPIDER_KAFKA_BROKERS").unwrap_or_else(|_| "127.0.0.1:9092".to_string());

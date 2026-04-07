@@ -29,7 +29,7 @@ reqwest = { version = "0.13.2", features = ["json", "cookies"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "signal", "time"] }
 quick-xml = { version = "0.39.2", features = ["serialize"] }
 xrust = "2.0.3"
-tracing = "0.1"
+fastrace = { version = "0.7", features = ["enable"] }
 url = "2.5"
 playwright-rs = { version = "0.8.7", optional = true }
 webbrowser = { version = "1", optional = true }
@@ -42,6 +42,3 @@ flate2 = "1.1.9"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "json"] }
 rdkafka = { version = "0.39", features = ["cmake-build"] }
 redis = { version = "1", default-features = false, features = ["aio", "tokio-comp"] }
-
-[dev-dependencies]
-tracing-subscriber = { version = "0.3", features = ["fmt"] }

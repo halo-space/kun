@@ -77,10 +77,7 @@ impl Pipeline for StopAfterFirst {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_target(false)
-        .with_level(true)
-        .init();
+    halo_spider::trace::init_console();
 
     let stored = MemoryStore::default();
     let settings = Settings::default().with_idle_timeout(SignedDuration::from_millis(200));

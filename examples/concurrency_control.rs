@@ -73,7 +73,7 @@ impl PeriodConcurrencySpider {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt::init();
+    halo_spider::trace::init_console();
 
     let settings = Settings::default()
         .with_concurrent_requests(3)

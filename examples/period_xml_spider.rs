@@ -41,11 +41,13 @@ impl Spider for PeriodSpider {
         );
         meta.insert("front_page".to_string(), Value::String(front_page.clone()));
 
-        tracing::info!(
-            period_date = period_date.as_str(),
-            front_page = front_page.as_str(),
-            list_url = list_url.as_str(),
-            "resolved latest edition"
+        halo_spider::trace::info(
+            "period.latest_edition_resolved",
+            vec![
+                halo_spider::trace::prop("period_date", period_date.as_str()),
+                halo_spider::trace::prop("front_page", front_page.as_str()),
+                halo_spider::trace::prop("list_url", list_url.as_str()),
+            ],
         );
 
         let req = response
@@ -74,11 +76,13 @@ impl PeriodSpider {
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
 
-        tracing::info!(
-            period_date,
-            front_page,
-            url = response.url.as_str(),
-            "parsed edition page"
+        halo_spider::trace::info(
+            "period.edition_parsed",
+            vec![
+                halo_spider::trace::prop("period_date", period_date),
+                halo_spider::trace::prop("front_page", front_page),
+                halo_spider::trace::prop("url", response.url.as_str()),
+            ],
         );
 
         let links = extract_article_links(response);
@@ -104,7 +108,10 @@ impl PeriodSpider {
     }
 
     async fn parse_detail(&self, response: &Response) -> Result<Output, SpiderError> {
-        tracing::info!(url = response.url.as_str(), "parsed detail page");
+        halo_spider::trace::info(
+            "period.detail_parsed",
+            vec![halo_spider::trace::prop("url", response.url.as_str())],
+        );
 
         let title = response
             .css("p.title1")
@@ -151,10 +158,7 @@ impl PeriodSpider {
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt()
-        .with_target(false)
-        .with_level(true)
-        .init();
+    halo_spider::trace::init_console();
 
     let settings = Settings::default()
         .with_download_delay(SignedDuration::from_millis(0)) // 移除延迟，展示并发

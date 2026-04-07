@@ -81,10 +81,7 @@ impl Pipeline for StopAfterFirst {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_target(false)
-        .with_level(true)
-        .init();
+    halo_spider::trace::init_console();
 
     let (redis_url, commands_rx, server_handle) = spawn_fake_redis_server().await;
     let redis = Redis::new(redis_url, "period_items");

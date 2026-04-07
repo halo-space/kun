@@ -134,10 +134,7 @@ impl Pipeline for StopAfter {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_target(false)
-        .with_level(true)
-        .init();
+    halo_spider::trace::init_console();
 
     let cache_path = unique_cache_path();
     let store = MemoryStore::default();

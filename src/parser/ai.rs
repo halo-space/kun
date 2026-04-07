@@ -106,11 +106,13 @@ impl AiQuery {
                 Ok(Ok(text)) => return Ok(text),
                 Ok(Err(e)) if is_retryable(&e) && attempt < self.max_retries => {
                     attempt += 1;
-                    tracing::warn!(
-                        "AI request failed (attempt {}/{}): {}",
-                        attempt,
-                        self.max_retries + 1,
-                        e
+                    crate::trace::warn(
+                        "parser.ai.request_failed",
+                        vec![
+                            crate::trace::prop("attempt", attempt),
+                            crate::trace::prop("max_attempts", self.max_retries + 1),
+                            crate::trace::prop("error", e),
+                        ],
                     );
                     sleep(
                         std::time::Duration::try_from(SignedDuration::from_secs(
@@ -123,10 +125,12 @@ impl AiQuery {
                 Ok(Err(e)) => return Err(e),
                 Err(_) if attempt < self.max_retries => {
                     attempt += 1;
-                    tracing::warn!(
-                        "AI request timeout (attempt {}/{})",
-                        attempt,
-                        self.max_retries + 1
+                    crate::trace::warn(
+                        "parser.ai.request_timeout",
+                        vec![
+                            crate::trace::prop("attempt", attempt),
+                            crate::trace::prop("max_attempts", self.max_retries + 1),
+                        ],
                     );
                     sleep(
                         std::time::Duration::try_from(SignedDuration::from_secs(

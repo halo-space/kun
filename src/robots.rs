@@ -444,9 +444,9 @@ impl<C: Cache> Memory<C> {
                 if let Some(entry) = cached_entry {
                     self.remember_unavailable_retry(origin.as_str(), current_time)
                         .await;
-                    tracing::warn!(
-                        origin = origin.as_str(),
-                        "failed to refresh stale robots cache, reusing previous policy"
+                    crate::trace::warn(
+                        "robots.cache.refresh_failed_reuse",
+                        vec![crate::trace::prop("origin", origin.as_str())],
                     );
                     let policy = Arc::new(Policy::from_cache_policy(&entry.policy));
                     self.remember_policy(origin.as_str(), entry.fetched_at, policy.clone())
@@ -459,10 +459,12 @@ impl<C: Cache> Memory<C> {
                 let unavailable_policy = site_policy
                     .unavailable_policy
                     .unwrap_or(self.unavailable_policy);
-                tracing::warn!(
-                    origin = origin.as_str(),
-                    unavailable_policy = ?unavailable_policy,
-                    "failed to fetch robots.txt, applying configured unavailable policy without caching fallback"
+                crate::trace::warn(
+                    "robots.fetch_unavailable_policy_applied",
+                    vec![
+                        crate::trace::prop("origin", origin.as_str()),
+                        crate::trace::prop("unavailable_policy", format!("{unavailable_policy:?}")),
+                    ],
                 );
                 Ok(Arc::new(unavailable_policy.policy()))
             }
@@ -939,10 +941,12 @@ async fn fetch_policy_entry(
     let response = match request_builder.send().await {
         Ok(response) => response,
         Err(error) => {
-            tracing::warn!(
-                robots_url = robots_url.as_str(),
-                error = %error,
-                "failed to fetch robots.txt"
+            crate::trace::warn(
+                "robots.fetch_failed",
+                vec![
+                    crate::trace::prop("robots_url", robots_url.as_str()),
+                    crate::trace::prop("error", error),
+                ],
             );
             return Ok(FetchResult::Unavailable);
         }
@@ -953,10 +957,12 @@ async fn fetch_policy_entry(
             let body = match response.text().await {
                 Ok(body) => body,
                 Err(error) => {
-                    tracing::warn!(
-                        robots_url = robots_url.as_str(),
-                        error = %error,
-                        "failed to read robots.txt response body"
+                    crate::trace::warn(
+                        "robots.body_read_failed",
+                        vec![
+                            crate::trace::prop("robots_url", robots_url.as_str()),
+                            crate::trace::prop("error", error),
+                        ],
                     );
                     return Ok(FetchResult::Unavailable);
                 }
@@ -978,10 +984,12 @@ async fn fetch_policy_entry(
             cache::Policy::AllowAll,
         ))),
         status => {
-            tracing::warn!(
-                robots_url = robots_url.as_str(),
-                status,
-                "robots.txt returned a non-success status"
+            crate::trace::warn(
+                "robots.unsuccessful_status",
+                vec![
+                    crate::trace::prop("robots_url", robots_url.as_str()),
+                    crate::trace::prop("status", status),
+                ],
             );
             Ok(FetchResult::Unavailable)
         }
