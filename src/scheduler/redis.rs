@@ -1013,40 +1013,32 @@ impl Redis {
             return Ok(());
         };
 
-        let _ = heartbeat_interval;
         let keys = self.keys();
-        let current_time = now();
-        let worker_seen = current_time.to_string();
-        let deadline = current_time
-            .saturating_add(i64::try_from(lease_timeout).unwrap_or(i64::MAX))
-            .to_string();
-        let lease_timeout = lease_timeout.to_string();
-        let heartbeat_interval = heartbeat_interval.to_string();
-        let result: i64 = scheduler_eval(
+        let script_keys = keys.heartbeat_keys();
+        let args = RedisScriptArgs::heartbeat(lease, now(), lease_timeout, heartbeat_interval);
+        self.run_lease_transition(
             connection,
             SCHEDULER_HEARTBEAT_SCRIPT,
-            &[
-                keys.inflight.as_str(),
-                keys.inflight_deadlines.as_str(),
-                keys.inflight_workers.as_str(),
-                keys.inflight_leases.as_str(),
-                keys.workers.as_str(),
-                keys.worker_seen.as_str(),
-                keys.worker_lease_timeout.as_str(),
-                keys.worker_heartbeat_interval.as_str(),
-            ],
-            &[
-                lease.task_id().as_str(),
-                deadline.as_str(),
-                lease.worker_id(),
-                lease.lease_id(),
-                worker_seen.as_str(),
-                lease_timeout.as_str(),
-                heartbeat_interval.as_str(),
-            ],
+            &script_keys,
+            &args,
+            "heartbeat",
+            lease,
         )
-        .await?;
-        ensure_lease_transition("heartbeat", lease, result)
+        .await
+    }
+
+    async fn run_lease_transition(
+        &self,
+        connection: &mut Connection,
+        script: &str,
+        keys: &[&str],
+        args: &RedisScriptArgs,
+        action: &'static str,
+        lease: &TaskLease,
+    ) -> Result<(), SpiderError> {
+        let arg_refs = args.refs();
+        let result: i64 = scheduler_eval(connection, script, keys, &arg_refs).await?;
+        ensure_lease_transition(action, lease, result)
     }
 }
 
@@ -1154,43 +1146,17 @@ impl Scheduler for Redis {
         let connection = self.connection_mut(&mut guard)?;
         self.sync_scope_metadata(connection).await?;
         let keys = self.keys();
-        let worker_seen = now().to_string();
-        let lease_timeout = self
-            .lease_timeout_millis()
-            .map(|value| value.to_string())
-            .unwrap_or_default();
-        let heartbeat_interval = self
-            .heartbeat_interval_millis()
-            .map(|value| value.to_string())
-            .unwrap_or_default();
-        let result: i64 = scheduler_eval(
+        let script_keys = keys.complete_keys();
+        let args = RedisScriptArgs::complete(self, lease);
+        self.run_lease_transition(
             connection,
             SCHEDULER_COMPLETE_SCRIPT,
-            &[
-                keys.tasks.as_str(),
-                keys.ready.as_str(),
-                keys.ready_order.as_str(),
-                keys.delayed.as_str(),
-                keys.inflight.as_str(),
-                keys.inflight_deadlines.as_str(),
-                keys.inflight_workers.as_str(),
-                keys.inflight_leases.as_str(),
-                keys.workers.as_str(),
-                keys.worker_seen.as_str(),
-                keys.worker_lease_timeout.as_str(),
-                keys.worker_heartbeat_interval.as_str(),
-            ],
-            &[
-                lease.task_id().as_str(),
-                lease.worker_id(),
-                lease.lease_id(),
-                worker_seen.as_str(),
-                lease_timeout.as_str(),
-                heartbeat_interval.as_str(),
-            ],
+            &script_keys,
+            &args,
+            "complete",
+            lease,
         )
-        .await?;
-        ensure_lease_transition("complete", lease, result)
+        .await
     }
 
     async fn complete_and_enqueue(
@@ -1203,47 +1169,17 @@ impl Scheduler for Redis {
         let connection = self.connection_mut(&mut guard)?;
         self.sync_scope_metadata(connection).await?;
         let keys = self.keys();
-        let worker_seen = now().to_string();
-        let lease_timeout = self
-            .lease_timeout_millis()
-            .map(|value| value.to_string())
-            .unwrap_or_default();
-        let heartbeat_interval = self
-            .heartbeat_interval_millis()
-            .map(|value| value.to_string())
-            .unwrap_or_default();
-        let mut args = vec![
-            lease.task_id().as_str().to_string(),
-            lease.worker_id().to_string(),
-            lease.lease_id().to_string(),
-            worker_seen,
-            lease_timeout,
-            heartbeat_interval,
-        ];
-        args.extend(encode_enqueue_args(&tasks)?);
-        let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
-        let result: i64 = scheduler_eval(
+        let script_keys = keys.complete_and_enqueue_keys();
+        let args = RedisScriptArgs::complete_and_enqueue(self, lease, &tasks)?;
+        self.run_lease_transition(
             connection,
             SCHEDULER_COMPLETE_AND_ENQUEUE_SCRIPT,
-            &[
-                keys.tasks.as_str(),
-                keys.ready.as_str(),
-                keys.ready_order.as_str(),
-                keys.delayed.as_str(),
-                keys.inflight.as_str(),
-                keys.inflight_deadlines.as_str(),
-                keys.inflight_workers.as_str(),
-                keys.inflight_leases.as_str(),
-                keys.sequence.as_str(),
-                keys.workers.as_str(),
-                keys.worker_seen.as_str(),
-                keys.worker_lease_timeout.as_str(),
-                keys.worker_heartbeat_interval.as_str(),
-            ],
-            &arg_refs,
+            &script_keys,
+            &args,
+            "complete",
+            lease,
         )
-        .await?;
-        ensure_lease_transition("complete", lease, result)
+        .await
     }
 
     async fn requeue(&self, lease: &TaskLease) -> Result<(), SpiderError> {
@@ -1252,46 +1188,17 @@ impl Scheduler for Redis {
         let connection = self.connection_mut(&mut guard)?;
         self.sync_scope_metadata(connection).await?;
         let keys = self.keys();
-        let now = now().to_string();
-        let worker_seen = now.clone();
-        let lease_timeout = self
-            .lease_timeout_millis()
-            .map(|value| value.to_string())
-            .unwrap_or_default();
-        let heartbeat_interval = self
-            .heartbeat_interval_millis()
-            .map(|value| value.to_string())
-            .unwrap_or_default();
-        let result: i64 = scheduler_eval(
+        let script_keys = keys.requeue_keys();
+        let args = RedisScriptArgs::requeue(self, lease);
+        self.run_lease_transition(
             connection,
             SCHEDULER_REQUEUE_SCRIPT,
-            &[
-                keys.tasks.as_str(),
-                keys.ready.as_str(),
-                keys.ready_order.as_str(),
-                keys.delayed.as_str(),
-                keys.inflight.as_str(),
-                keys.inflight_deadlines.as_str(),
-                keys.inflight_workers.as_str(),
-                keys.inflight_leases.as_str(),
-                keys.sequence.as_str(),
-                keys.workers.as_str(),
-                keys.worker_seen.as_str(),
-                keys.worker_lease_timeout.as_str(),
-                keys.worker_heartbeat_interval.as_str(),
-            ],
-            &[
-                lease.task_id().as_str(),
-                now.as_str(),
-                lease.worker_id(),
-                lease.lease_id(),
-                worker_seen.as_str(),
-                lease_timeout.as_str(),
-                heartbeat_interval.as_str(),
-            ],
+            &script_keys,
+            &args,
+            "requeue",
+            lease,
         )
-        .await?;
-        ensure_lease_transition("requeue", lease, result)
+        .await
     }
 
     async fn release_inflight(&self) -> Result<usize, SpiderError> {
@@ -1384,12 +1291,177 @@ impl Keys {
             worker_heartbeat_interval: format!("{namespace}:worker_heartbeat_interval"),
         }
     }
+
+    fn complete_keys(&self) -> [&str; 12] {
+        [
+            self.tasks.as_str(),
+            self.ready.as_str(),
+            self.ready_order.as_str(),
+            self.delayed.as_str(),
+            self.inflight.as_str(),
+            self.inflight_deadlines.as_str(),
+            self.inflight_workers.as_str(),
+            self.inflight_leases.as_str(),
+            self.workers.as_str(),
+            self.worker_seen.as_str(),
+            self.worker_lease_timeout.as_str(),
+            self.worker_heartbeat_interval.as_str(),
+        ]
+    }
+
+    fn complete_and_enqueue_keys(&self) -> [&str; 13] {
+        [
+            self.tasks.as_str(),
+            self.ready.as_str(),
+            self.ready_order.as_str(),
+            self.delayed.as_str(),
+            self.inflight.as_str(),
+            self.inflight_deadlines.as_str(),
+            self.inflight_workers.as_str(),
+            self.inflight_leases.as_str(),
+            self.sequence.as_str(),
+            self.workers.as_str(),
+            self.worker_seen.as_str(),
+            self.worker_lease_timeout.as_str(),
+            self.worker_heartbeat_interval.as_str(),
+        ]
+    }
+
+    fn requeue_keys(&self) -> [&str; 13] {
+        [
+            self.tasks.as_str(),
+            self.ready.as_str(),
+            self.ready_order.as_str(),
+            self.delayed.as_str(),
+            self.inflight.as_str(),
+            self.inflight_deadlines.as_str(),
+            self.inflight_workers.as_str(),
+            self.inflight_leases.as_str(),
+            self.sequence.as_str(),
+            self.workers.as_str(),
+            self.worker_seen.as_str(),
+            self.worker_lease_timeout.as_str(),
+            self.worker_heartbeat_interval.as_str(),
+        ]
+    }
+
+    fn heartbeat_keys(&self) -> [&str; 8] {
+        [
+            self.inflight.as_str(),
+            self.inflight_deadlines.as_str(),
+            self.inflight_workers.as_str(),
+            self.inflight_leases.as_str(),
+            self.workers.as_str(),
+            self.worker_seen.as_str(),
+            self.worker_lease_timeout.as_str(),
+            self.worker_heartbeat_interval.as_str(),
+        ]
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
 struct NamespaceMeta {
     lease_timeout: Option<u64>,
     heartbeat_interval: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct RedisScriptArgs {
+    values: Vec<String>,
+}
+
+impl RedisScriptArgs {
+    fn complete(scheduler: &Redis, lease: &TaskLease) -> Self {
+        Self {
+            values: vec![
+                lease.task_id().as_str().to_string(),
+                lease.worker_id().to_string(),
+                lease.lease_id().to_string(),
+                now().to_string(),
+                scheduler
+                    .lease_timeout_millis()
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+                scheduler
+                    .heartbeat_interval_millis()
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+            ],
+        }
+    }
+
+    fn complete_and_enqueue(
+        scheduler: &Redis,
+        lease: &TaskLease,
+        tasks: &[Task],
+    ) -> Result<Self, SpiderError> {
+        let mut args = Self::complete(scheduler, lease);
+        args.push_tasks(tasks)?;
+        Ok(args)
+    }
+
+    fn requeue(scheduler: &Redis, lease: &TaskLease) -> Self {
+        let current_time = now().to_string();
+        Self {
+            values: vec![
+                lease.task_id().as_str().to_string(),
+                current_time.clone(),
+                lease.worker_id().to_string(),
+                lease.lease_id().to_string(),
+                current_time,
+                scheduler
+                    .lease_timeout_millis()
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+                scheduler
+                    .heartbeat_interval_millis()
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+            ],
+        }
+    }
+
+    fn heartbeat(
+        lease: &TaskLease,
+        current_time: i64,
+        lease_timeout: u64,
+        heartbeat_interval: u64,
+    ) -> Self {
+        Self {
+            values: vec![
+                lease.task_id().as_str().to_string(),
+                current_time
+                    .saturating_add(i64::try_from(lease_timeout).unwrap_or(i64::MAX))
+                    .to_string(),
+                lease.worker_id().to_string(),
+                lease.lease_id().to_string(),
+                current_time.to_string(),
+                lease_timeout.to_string(),
+                heartbeat_interval.to_string(),
+            ],
+        }
+    }
+
+    fn refs(&self) -> Vec<&str> {
+        self.values.iter().map(String::as_str).collect()
+    }
+
+    fn push_tasks(&mut self, tasks: &[Task]) -> Result<(), SpiderError> {
+        self.values.reserve(tasks.len() * 3);
+        for task in tasks {
+            let task_json = serde_json::to_string(task).map_err(|error| {
+                SpiderError::scheduler(format!("failed to encode redis scheduler task: {error}"))
+            })?;
+            self.values.push(task.id.as_str().to_string());
+            self.values.push(task_json);
+            self.values.push(
+                task.ready_at
+                    .map(|value| value.to_string())
+                    .unwrap_or_default(),
+            );
+        }
+        Ok(())
+    }
 }
 
 fn ready_task_ordering(left: &(Task, i64), right: &(Task, i64)) -> Ordering {
@@ -1421,23 +1493,6 @@ fn default_heartbeat_interval(lease_timeout: u64) -> u64 {
 
 fn signed_duration_from_millis(millis: u64) -> SignedDuration {
     SignedDuration::from_millis(i64::try_from(millis).unwrap_or(i64::MAX))
-}
-
-fn encode_enqueue_args(tasks: &[Task]) -> Result<Vec<String>, SpiderError> {
-    let mut args = Vec::with_capacity(tasks.len() * 3);
-    for task in tasks {
-        let task_json = serde_json::to_string(task).map_err(|error| {
-            SpiderError::scheduler(format!("failed to encode redis scheduler task: {error}"))
-        })?;
-        let ready_at = task
-            .ready_at
-            .map(|value| value.to_string())
-            .unwrap_or_default();
-        args.push(task.id.as_str().to_string());
-        args.push(task_json);
-        args.push(ready_at);
-    }
-    Ok(args)
 }
 
 fn next_worker_id() -> String {
