@@ -622,6 +622,10 @@ Spider / rules
 - structured `fingerprint_profile`
 - explicit `keep_alive = isolated | context | page`
 - optional `keep_alive_scope = session | origin`
+- optional `keep_alive_key`
+- optional `keep_alive_max_idle`
+- optional `keep_alive_max_uses`
+- optional `keep_alive_on_error = keep | reset`
 - `stealth = true` bootstrap
 - optional external `stealth_script`
 - browser response status / headers
@@ -638,6 +642,15 @@ Spider / rules
 
 - `keep_alive_scope = session`：同一个 session 共用一份 `keep_alive`
 - `keep_alive_scope = origin`：同一个 session 下，按 URL origin 分开维护 `keep_alive`
+
+如果还需要进一步控制同一个 `keep_alive` bucket 的生命周期，可以继续加：
+
+- `keep_alive_key`：在 `session + keep_alive_scope` 的基础上再叠加一层显式业务分桶
+- `keep_alive_max_idle`：限制这份 `keep_alive` 最长允许空闲多久；当前用懒清理，在后续取回或归还该 bucket 时检查并淘汰
+- `keep_alive_max_uses`：限制单个 `keep_alive` 最多被复用多少次；达到上限后会关闭并在下次请求时重建
+- `keep_alive_on_error = keep | reset`：浏览器请求出错后，是保留当前 `keep_alive` 继续复用，还是直接丢弃重建
+
+这几项都只影响 live `keep_alive` 的运行态复用，不改变稳定 user data dir 的基本语义。
 
 user data dir、临时 profile 目录和会话锁这条实现路径也已经收口到更适合 async runtime 的处理方式；相同 session id 的实际浏览器执行仍会按 session 串行化，避免共享 profile 目录或 `keep_alive` 时出现竞态。
 
@@ -698,7 +711,11 @@ let request = Request::browser("https://example.com/app")
                     .with_languages(["ja-JP", "ja", "en-US", "en"]),
             )
             .with_keep_alive(browser::KeepAlive::Context)
-            .with_keep_alive_scope(browser::KeepAliveScope::Origin),
+            .with_keep_alive_scope(browser::KeepAliveScope::Origin)
+            .with_keep_alive_key("account:primary")
+            .with_keep_alive_max_idle(SignedDuration::from_secs(60))
+            .with_keep_alive_max_uses(20)
+            .with_keep_alive_on_error(browser::KeepAliveOnError::Reset),
     );
 ```
 

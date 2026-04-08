@@ -17,7 +17,7 @@ README 负责总览，这里负责把每个模块现在到底能做什么、还�
 
 - 观测主链路已经基本具备：`stats`、`signals / extensions`、`trace`、`telemetry` exporter 都已接通；当前真正还缺的是更完整的持久化事件总线聚合层、跨 job 运维自动化，以及更高阶的统一看板/巡检视图
 - durable scheduler 的基础语义已经基本收口：ownership、heartbeat、stale reclaim、batch、snapshot/overview、统一 `Control`、显式提交边界都已经有；当前剩余重点主要是更强的分布式协调后端和更完整的后台运维服务层
-- browser 已支持结构化 `fingerprint_profile`、最小 stealth bootstrap、稳定 session 存储态、显式 `keep_alive / keep_alive_scope`，以及按 `engine` 选择浏览器族的内置 `fingerprint_preset`；当前剩余缺口主要是更高阶 stealth 套件和更细粒度的 session/context/page 复用策略
+- browser 已支持结构化 `fingerprint_profile`、最小 stealth bootstrap、稳定 session 存储态、显式 `keep_alive / keep_alive_scope / keep_alive_key / keep_alive_max_idle / keep_alive_max_uses / keep_alive_on_error`，以及按 `engine` 选择浏览器族的内置 `fingerprint_preset`；当前剩余缺口主要是更高阶 stealth 套件和更高阶浏览器指纹/设备画像能力
 - validation 本身已经不弱；当前更缺的是“校验失败后如何统一映射到 runtime 行为”这层策略
 - plugin 自动装载与 DSL 对齐仍明显落后于底层 runtime 能力
 
@@ -59,8 +59,13 @@ README 负责总览，这里负责把每个模块现在到底能做什么、还�
 - 已支持结构化 `fingerprint_profile`
 - 已支持显式 `keep_alive = isolated | context | page`
 - 已支持显式 `keep_alive_scope = session | origin`
+- 已支持显式 `keep_alive_key`
+- 已支持显式 `keep_alive_max_idle`
+- 已支持显式 `keep_alive_max_uses`
+- 已支持显式 `keep_alive_on_error = keep | reset`
 - 已支持更完整但仍然克制的 `stealth = true` bootstrap，覆盖 `navigator.webdriver`、`navigator.language(s)`、`navigator.platform`、`navigator.vendor`、`hardwareConcurrency`、`deviceMemory`、`maxTouchPoints`、`plugins`、`mimeTypes`、`pdfViewerEnabled`、screen depth、notifications permissions 查询补丁，以及 Chromium 路线的最小 `window.chrome` / `navigator.userAgentData`
 - 同一个 browser session 会复用稳定的 user data dir，并做最小串行化；如果显式启用 `keep_alive`，还可以进一步复用 live context 或 live page；如果再配 `keep_alive_scope = origin`，则会按同一 session 下的 URL origin 分开维护 `keep_alive`
+- `keep_alive_key` 会在 `session + keep_alive_scope` 之外再加一层显式业务分桶；`keep_alive_max_idle` 用懒清理限制空闲窗口，`keep_alive_max_uses` 限制单个 entry 的复用次数，`keep_alive_on_error` 决定浏览器错误后是保留还是重置当前 entry
 - user data dir、临时 profile 目录与会话锁这条路径已经改成 async runtime 更友好的实现，不再依赖明显的同步文件 I/O 热路径
 
 内置 `fingerprint_preset` 的稳定映射：

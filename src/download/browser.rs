@@ -4,12 +4,13 @@ use crate::error::SpiderError;
 use crate::request::Headers;
 #[cfg(any(feature = "browser", test))]
 use crate::request::browser::KeepAliveScope;
+#[cfg(any(feature = "browser", test))]
+use crate::request::browser::KeepAliveOnError;
 use crate::request::browser::{
     Config as BrowserConfig, Engine as BrowserEngine, FingerprintProfile, KeepAlive,
 };
 use crate::request::{Request, RequestMode};
 use crate::response::Response;
-#[cfg(feature = "browser")]
 use jiff::SignedDuration;
 #[cfg(feature = "browser")]
 use playwright_rs::protocol::{
@@ -30,6 +31,8 @@ use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 #[cfg(any(feature = "browser", test))]
 use std::sync::atomic::Ordering;
+#[cfg(any(feature = "browser", test))]
+use std::time::Instant;
 #[cfg(any(feature = "browser", test))]
 use url::Url;
 
@@ -141,6 +144,14 @@ fn validate_browser_keep_alive(
     request: &Request,
     config: &BrowserConfig,
 ) -> Result<(), SpiderError> {
+    if let Some(max_idle) = config.keep_alive_max_idle
+        && max_idle <= SignedDuration::ZERO
+    {
+        return Err(SpiderError::download(
+            "browser keep_alive_max_idle must be greater than 0",
+        ));
+    }
+
     if config.keep_alive != KeepAlive::Isolated && request.session.is_none() {
         return Err(SpiderError::download(
             "browser keep_alive=context/page requires request.session",
@@ -324,6 +335,10 @@ struct BrowserExecutionPlan {
     init_script: Option<String>,
     keep_alive: KeepAlive,
     keep_alive_scope: KeepAliveScope,
+    keep_alive_key: Option<String>,
+    keep_alive_max_idle: Option<SignedDuration>,
+    keep_alive_max_uses: Option<u64>,
+    keep_alive_on_error: KeepAliveOnError,
 }
 
 #[cfg(any(feature = "browser", test))]
@@ -338,6 +353,10 @@ impl BrowserExecutionPlan {
             init_script,
             keep_alive: config.keep_alive,
             keep_alive_scope: config.keep_alive_scope,
+            keep_alive_key: config.keep_alive_key.clone(),
+            keep_alive_max_idle: config.keep_alive_max_idle,
+            keep_alive_max_uses: config.keep_alive_max_uses,
+            keep_alive_on_error: config.keep_alive_on_error,
         })
     }
 }
@@ -635,6 +654,7 @@ struct BrowserSessionSignature {
     stealth_scripts: Vec<String>,
     keep_alive: KeepAlive,
     keep_alive_scope: KeepAliveScope,
+    keep_alive_key: Option<String>,
     profile: Option<FingerprintProfile>,
     proxy: Option<String>,
 }
@@ -654,9 +674,33 @@ impl BrowserSessionSignature {
             stealth_scripts: config.stealth_scripts.clone(),
             keep_alive: execution_plan.keep_alive,
             keep_alive_scope: execution_plan.keep_alive_scope,
+            keep_alive_key: execution_plan.keep_alive_key.clone(),
             profile: execution_plan.profile.clone(),
             proxy: request.proxy.as_ref().map(|proxy| proxy.url.clone()),
         }
+    }
+}
+
+#[cfg(any(feature = "browser", test))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BrowserKeepAliveLifecycle {
+    last_returned_at: Instant,
+    completed_uses: u64,
+}
+
+#[cfg(any(feature = "browser", test))]
+#[cfg_attr(all(test, not(feature = "browser")), allow(dead_code))]
+impl BrowserKeepAliveLifecycle {
+    fn new(now: Instant) -> Self {
+        Self {
+            last_returned_at: now,
+            completed_uses: 0,
+        }
+    }
+
+    fn record_return(&mut self, now: Instant) {
+        self.last_returned_at = now;
+        self.completed_uses = self.completed_uses.saturating_add(1);
     }
 }
 
@@ -668,6 +712,7 @@ struct BrowserKeepAlive {
     playwright: Playwright,
     context: BrowserContext,
     page: Option<Page>,
+    lifecycle: BrowserKeepAliveLifecycle,
 }
 
 #[cfg(feature = "browser")]
@@ -737,10 +782,10 @@ async fn fetch_with_playwright_keep_alive(
         .ok_or_else(|| SpiderError::download("browser keep_alive requires request.session"))?;
     let cache_key = browser_keep_alive_cache_key(request, execution_plan)?;
     let signature = BrowserSessionSignature::for_request(request, config, execution_plan);
-    let mut session = match take_browser_keep_alive(&cache_key).await {
+    let mut session = match take_browser_keep_alive(&cache_key, execution_plan).await? {
         Some(session) => {
             if session.signature != signature {
-                store_browser_keep_alive(&cache_key, session).await;
+                insert_browser_keep_alive(&cache_key, session).await;
                 return Err(browser_keep_alive_mismatch_error(&session_id));
             }
             session
@@ -753,6 +798,7 @@ async fn fetch_with_playwright_keep_alive(
                 playwright,
                 context,
                 page: None,
+                lifecycle: BrowserKeepAliveLifecycle::new(Instant::now()),
             }
         }
     };
@@ -772,12 +818,19 @@ async fn fetch_with_playwright_keep_alive(
     match outcome {
         Ok((result, page)) => {
             session.page = page;
-            store_browser_keep_alive(&cache_key, session).await;
+            store_browser_keep_alive(&cache_key, session, execution_plan).await?;
             Ok(result)
         }
         Err(error) => {
             session.page = None;
-            store_browser_keep_alive(&cache_key, session).await;
+            match execution_plan.keep_alive_on_error {
+                KeepAliveOnError::Keep => {
+                    store_browser_keep_alive(&cache_key, session, execution_plan).await?;
+                }
+                KeepAliveOnError::Reset => {
+                    close_browser_keep_alive(session).await?;
+                }
+            }
             Err(error)
         }
     }
@@ -786,8 +839,32 @@ async fn fetch_with_playwright_keep_alive(
 #[cfg(feature = "browser")]
 fn browser_keep_alive_mismatch_error(session_id: &str) -> SpiderError {
     SpiderError::download(format!(
-        "browser keep_alive `{session_id}` requires stable engine/headless/viewport/stealth/stealth_scripts/fingerprint_preset/fingerprint_profile/proxy/keep_alive/keep_alive_scope across requests"
+        "browser keep_alive `{session_id}` requires stable engine/headless/viewport/stealth/stealth_scripts/fingerprint_preset/fingerprint_profile/proxy/keep_alive/keep_alive_scope/keep_alive_key across requests"
     ))
+}
+
+#[cfg(feature = "browser")]
+async fn close_browser_keep_alive(mut session: BrowserKeepAlive) -> Result<(), SpiderError> {
+    if let Some(page) = session.page.take()
+        && !page.is_closed()
+    {
+        let _ = page.close().await.map_err(map_playwright_error);
+    }
+
+    let close_outcome = session.context.close().await.map_err(map_playwright_error);
+    let shutdown_outcome = session
+        .playwright
+        .shutdown()
+        .await
+        .map_err(map_playwright_error);
+
+    match close_outcome {
+        Ok(()) => shutdown_outcome,
+        Err(error) => {
+            let _ = shutdown_outcome;
+            Err(error)
+        }
+    }
 }
 
 #[cfg(feature = "browser")]
@@ -1235,27 +1312,100 @@ fn browser_keep_alive_cache_key(
         .map(|session| session.id.as_str())
         .ok_or_else(|| SpiderError::download("browser keep_alive requires request.session"))?;
 
-    match execution_plan.keep_alive_scope {
+    let mut key = match execution_plan.keep_alive_scope {
         KeepAliveScope::Session => Ok(session_id.to_string()),
         KeepAliveScope::Origin => {
             let origin = browser_keep_alive_scope_origin(&request.url)?;
             Ok(format!("{session_id}::{origin}"))
         }
+    }?;
+
+    if let Some(keep_alive_key) = execution_plan.keep_alive_key.as_deref() {
+        key.push_str("::key=");
+        key.push_str(keep_alive_key);
     }
+
+    Ok(key)
+}
+
+#[cfg(any(feature = "browser", test))]
+fn browser_keep_alive_is_expired(
+    lifecycle: &BrowserKeepAliveLifecycle,
+    execution_plan: &BrowserExecutionPlan,
+    now: Instant,
+) -> Result<bool, SpiderError> {
+    if let Some(max_idle) = execution_plan.keep_alive_max_idle {
+        let max_idle = std::time::Duration::try_from(max_idle).map_err(|error| {
+            SpiderError::download(format!("invalid browser keep_alive_max_idle: {error}"))
+        })?;
+
+        if now.duration_since(lifecycle.last_returned_at) > max_idle {
+            return Ok(true);
+        }
+    }
+
+    if let Some(max_uses) = execution_plan.keep_alive_max_uses
+        && lifecycle.completed_uses >= max_uses
+    {
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
+#[cfg(any(feature = "browser", test))]
+fn browser_keep_alive_should_store_after_return(
+    lifecycle: &BrowserKeepAliveLifecycle,
+    execution_plan: &BrowserExecutionPlan,
+) -> bool {
+    execution_plan
+        .keep_alive_max_uses
+        .map(|max_uses| lifecycle.completed_uses < max_uses)
+        .unwrap_or(true)
 }
 
 #[cfg(feature = "browser")]
-async fn take_browser_keep_alive(cache_key: &str) -> Option<BrowserKeepAlive> {
+async fn take_browser_keep_alive(
+    cache_key: &str,
+    execution_plan: &BrowserExecutionPlan,
+) -> Result<Option<BrowserKeepAlive>, SpiderError> {
     let cache = browser_keep_alive_cache();
     let mut cache = cache.lock().await;
-    cache.remove(cache_key)
+    let Some(session) = cache.remove(cache_key) else {
+        return Ok(None);
+    };
+    drop(cache);
+
+    if browser_keep_alive_is_expired(&session.lifecycle, execution_plan, Instant::now())? {
+        close_browser_keep_alive(session).await?;
+        return Ok(None);
+    }
+
+    Ok(Some(session))
 }
 
 #[cfg(feature = "browser")]
-async fn store_browser_keep_alive(cache_key: &str, session: BrowserKeepAlive) {
+async fn insert_browser_keep_alive(cache_key: &str, session: BrowserKeepAlive) {
     let cache = browser_keep_alive_cache();
     let mut cache = cache.lock().await;
     cache.insert(cache_key.to_string(), session);
+}
+
+#[cfg(feature = "browser")]
+async fn store_browser_keep_alive(
+    cache_key: &str,
+    mut session: BrowserKeepAlive,
+    execution_plan: &BrowserExecutionPlan,
+) -> Result<(), SpiderError> {
+    session.lifecycle.record_return(Instant::now());
+
+    if !browser_keep_alive_should_store_after_return(&session.lifecycle, execution_plan) {
+        close_browser_keep_alive(session).await?;
+        return Ok(());
+    }
+
+    insert_browser_keep_alive(cache_key, session).await;
+    Ok(())
 }
 
 #[cfg(any(feature = "browser", test))]
@@ -1363,8 +1513,9 @@ mod tests {
     use crate::download::traits::Downloader;
     use crate::request::browser::{
         Config as BrowserConfig, Engine as BrowserEngine, FingerprintProfile, KeepAlive,
-        KeepAliveScope,
+        KeepAliveOnError, KeepAliveScope,
     };
+    use jiff::SignedDuration;
     use std::sync::Arc;
 
     #[test]
@@ -1516,6 +1667,31 @@ mod tests {
     }
 
     #[test]
+    fn browser_request_contract_rejects_non_positive_keep_alive_max_idle() {
+        let request = Request::browser("https://example.com")
+            .with_session("shared-browser")
+            .with_browser(
+                BrowserConfig::default()
+                    .with_keep_alive(KeepAlive::Context)
+                    .with_keep_alive_max_idle(SignedDuration::ZERO),
+            );
+
+        let error = validate_browser_request_contract(
+            &request,
+            request
+                .browser
+                .as_ref()
+                .expect("browser config should exist"),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            SpiderError::download("browser keep_alive_max_idle must be greater than 0")
+        );
+    }
+
+    #[test]
     fn browser_keep_alive_cache_key_uses_session_scope_by_default() {
         let request = Request::browser("https://news.example.com/list").with_session("shared");
         let execution_plan = BrowserExecutionPlan::from_config(
@@ -1544,6 +1720,112 @@ mod tests {
             .expect("cache key should build");
 
         assert_eq!(key, "shared::https://news.example.com");
+    }
+
+    #[test]
+    fn browser_keep_alive_cache_key_can_append_explicit_business_key() {
+        let request =
+            Request::browser("https://news.example.com/list?page=1").with_session("shared");
+        let execution_plan = BrowserExecutionPlan::from_config(
+            &BrowserConfig::default()
+                .with_keep_alive(KeepAlive::Context)
+                .with_keep_alive_scope(KeepAliveScope::Origin)
+                .with_keep_alive_key("account:primary"),
+        )
+        .expect("execution plan should build");
+
+        let key = browser_keep_alive_cache_key(&request, &execution_plan)
+            .expect("cache key should build");
+
+        assert_eq!(key, "shared::https://news.example.com::key=account:primary");
+    }
+
+    #[test]
+    fn browser_execution_plan_carries_keep_alive_lifecycle_controls() {
+        let execution_plan = BrowserExecutionPlan::from_config(
+            &BrowserConfig::default()
+                .with_keep_alive(KeepAlive::Page)
+                .with_keep_alive_scope(KeepAliveScope::Origin)
+                .with_keep_alive_key("account:primary")
+                .with_keep_alive_max_idle(SignedDuration::from_secs(30))
+                .with_keep_alive_max_uses(12)
+                .with_keep_alive_on_error(KeepAliveOnError::Reset),
+        )
+        .expect("execution plan should build");
+
+        assert_eq!(execution_plan.keep_alive, KeepAlive::Page);
+        assert_eq!(execution_plan.keep_alive_scope, KeepAliveScope::Origin);
+        assert_eq!(
+            execution_plan.keep_alive_key.as_deref(),
+            Some("account:primary")
+        );
+        assert_eq!(
+            execution_plan.keep_alive_max_idle,
+            Some(SignedDuration::from_secs(30))
+        );
+        assert_eq!(execution_plan.keep_alive_max_uses, Some(12));
+        assert_eq!(execution_plan.keep_alive_on_error, KeepAliveOnError::Reset);
+    }
+
+    #[test]
+    fn browser_keep_alive_expires_when_idle_window_passes() {
+        let now = Instant::now();
+        let lifecycle = BrowserKeepAliveLifecycle {
+            last_returned_at: now
+                .checked_sub(std::time::Duration::from_secs(2))
+                .expect("instant should support checked subtraction"),
+            completed_uses: 1,
+        };
+        let execution_plan = BrowserExecutionPlan::from_config(
+            &BrowserConfig::default()
+                .with_keep_alive(KeepAlive::Context)
+                .with_keep_alive_max_idle(SignedDuration::from_secs(1)),
+        )
+        .expect("execution plan should build");
+
+        let expired = browser_keep_alive_is_expired(&lifecycle, &execution_plan, now)
+            .expect("expiry check should succeed");
+
+        assert!(expired);
+    }
+
+    #[test]
+    fn browser_keep_alive_expires_when_max_uses_is_reached() {
+        let lifecycle = BrowserKeepAliveLifecycle {
+            last_returned_at: Instant::now(),
+            completed_uses: 3,
+        };
+        let execution_plan = BrowserExecutionPlan::from_config(
+            &BrowserConfig::default()
+                .with_keep_alive(KeepAlive::Context)
+                .with_keep_alive_max_uses(3),
+        )
+        .expect("execution plan should build");
+
+        let expired =
+            browser_keep_alive_is_expired(&lifecycle, &execution_plan, lifecycle.last_returned_at)
+                .expect("expiry check should succeed");
+
+        assert!(expired);
+    }
+
+    #[test]
+    fn browser_keep_alive_store_check_stops_reuse_after_max_uses() {
+        let lifecycle = BrowserKeepAliveLifecycle {
+            last_returned_at: Instant::now(),
+            completed_uses: 4,
+        };
+        let execution_plan = BrowserExecutionPlan::from_config(
+            &BrowserConfig::default()
+                .with_keep_alive(KeepAlive::Context)
+                .with_keep_alive_max_uses(4),
+        )
+        .expect("execution plan should build");
+
+        assert!(!browser_keep_alive_should_store_after_return(
+            &lifecycle,
+            &execution_plan
+        ));
     }
 
     #[test]

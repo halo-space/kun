@@ -4,13 +4,14 @@
 //! - built-in browser request path
 //! - structured fingerprint profile
 //! - optional external stealth script injection
-//! - explicit keep_alive policy
-//! - stable session id plus optional origin-scoped live reuse boundaries
+//! - explicit keep_alive policy and bucket key
+//! - stable session id plus optional lifecycle controls
 //!
 //! Run:
 //!   cargo run --example browser_advanced
 
 use halo_spider::request::{Request, browser};
+use jiff::SignedDuration;
 
 fn main() {
     let request = Request::browser("https://example.com/app")
@@ -35,6 +36,10 @@ fn main() {
                 )
                 .with_keep_alive(browser::KeepAlive::Context)
                 .with_keep_alive_scope(browser::KeepAliveScope::Origin)
+                .with_keep_alive_key("account:primary")
+                .with_keep_alive_max_idle(SignedDuration::from_secs(60))
+                .with_keep_alive_max_uses(20)
+                .with_keep_alive_on_error(browser::KeepAliveOnError::Reset)
                 .with_wait_for_selector("#app"),
         );
 

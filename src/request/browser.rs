@@ -1,3 +1,4 @@
+use jiff::SignedDuration;
 use serde::{Deserialize, Serialize};
 use std::fmt::{Display, Formatter};
 
@@ -250,6 +251,41 @@ impl TryFrom<&str> for KeepAliveScope {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeepAliveOnError {
+    #[default]
+    Keep,
+    Reset,
+}
+
+impl KeepAliveOnError {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Keep => "keep",
+            Self::Reset => "reset",
+        }
+    }
+}
+
+impl Display for KeepAliveOnError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl TryFrom<&str> for KeepAliveOnError {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            "keep" => Ok(Self::Keep),
+            "reset" => Ok(Self::Reset),
+            other => Err(format!("unsupported browser keep_alive_on_error: {other}")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     pub driver: Driver,
@@ -267,6 +303,14 @@ pub struct Config {
     pub keep_alive: KeepAlive,
     #[serde(default)]
     pub keep_alive_scope: KeepAliveScope,
+    #[serde(default)]
+    pub keep_alive_key: Option<String>,
+    #[serde(default, with = "super::option_signed_duration_millis")]
+    pub keep_alive_max_idle: Option<SignedDuration>,
+    #[serde(default)]
+    pub keep_alive_max_uses: Option<u64>,
+    #[serde(default)]
+    pub keep_alive_on_error: KeepAliveOnError,
 }
 
 impl Default for Config {
@@ -283,6 +327,10 @@ impl Default for Config {
             viewport: Viewport::default(),
             keep_alive: KeepAlive::default(),
             keep_alive_scope: KeepAliveScope::default(),
+            keep_alive_key: None,
+            keep_alive_max_idle: None,
+            keep_alive_max_uses: None,
+            keep_alive_on_error: KeepAliveOnError::default(),
         }
     }
 }
@@ -353,6 +401,26 @@ impl Config {
         self.keep_alive_scope = keep_alive_scope;
         self
     }
+
+    pub fn with_keep_alive_key(mut self, keep_alive_key: impl Into<String>) -> Self {
+        self.keep_alive_key = Some(keep_alive_key.into());
+        self
+    }
+
+    pub fn with_keep_alive_max_idle(mut self, keep_alive_max_idle: SignedDuration) -> Self {
+        self.keep_alive_max_idle = Some(keep_alive_max_idle);
+        self
+    }
+
+    pub fn with_keep_alive_max_uses(mut self, keep_alive_max_uses: u64) -> Self {
+        self.keep_alive_max_uses = Some(keep_alive_max_uses);
+        self
+    }
+
+    pub fn with_keep_alive_on_error(mut self, keep_alive_on_error: KeepAliveOnError) -> Self {
+        self.keep_alive_on_error = keep_alive_on_error;
+        self
+    }
 }
 
 #[cfg(test)]
@@ -373,6 +441,10 @@ mod tests {
         assert_eq!(config.wait_for_selector, None);
         assert_eq!(config.keep_alive, KeepAlive::Isolated);
         assert_eq!(config.keep_alive_scope, KeepAliveScope::Session);
+        assert_eq!(config.keep_alive_key, None);
+        assert_eq!(config.keep_alive_max_idle, None);
+        assert_eq!(config.keep_alive_max_uses, None);
+        assert_eq!(config.keep_alive_on_error, KeepAliveOnError::Keep);
     }
 
     #[test]
@@ -384,7 +456,11 @@ mod tests {
             .with_fingerprint_preset("desktop_zh_cn")
             .with_wait_for_selector("#app")
             .with_keep_alive(KeepAlive::Context)
-            .with_keep_alive_scope(KeepAliveScope::Origin);
+            .with_keep_alive_scope(KeepAliveScope::Origin)
+            .with_keep_alive_key("account:primary")
+            .with_keep_alive_max_idle(SignedDuration::from_secs(30))
+            .with_keep_alive_max_uses(20)
+            .with_keep_alive_on_error(KeepAliveOnError::Reset);
 
         assert_eq!(config.engine, Engine::Firefox);
         assert!(config.stealth);
@@ -397,6 +473,13 @@ mod tests {
         assert_eq!(config.wait_for_selector.as_deref(), Some("#app"));
         assert_eq!(config.keep_alive, KeepAlive::Context);
         assert_eq!(config.keep_alive_scope, KeepAliveScope::Origin);
+        assert_eq!(config.keep_alive_key.as_deref(), Some("account:primary"));
+        assert_eq!(
+            config.keep_alive_max_idle,
+            Some(SignedDuration::from_secs(30))
+        );
+        assert_eq!(config.keep_alive_max_uses, Some(20));
+        assert_eq!(config.keep_alive_on_error, KeepAliveOnError::Reset);
     }
 
     #[test]
@@ -453,6 +536,22 @@ mod tests {
         assert_eq!(
             KeepAliveScope::try_from("other"),
             Err("unsupported browser keep_alive_scope: other".to_string())
+        );
+    }
+
+    #[test]
+    fn keep_alive_on_error_try_from_string_supports_explicit_policies() {
+        assert_eq!(
+            KeepAliveOnError::try_from("keep"),
+            Ok(KeepAliveOnError::Keep)
+        );
+        assert_eq!(
+            KeepAliveOnError::try_from("reset"),
+            Ok(KeepAliveOnError::Reset)
+        );
+        assert_eq!(
+            KeepAliveOnError::try_from("other"),
+            Err("unsupported browser keep_alive_on_error: other".to_string())
         );
     }
 }
