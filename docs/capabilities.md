@@ -66,6 +66,7 @@ README 负责总览，这里负责把每个模块现在到底能做什么、还�
 - 已支持显式 `keep_alive_on_error = keep | reset`
 - 已支持更完整但仍然克制的 `stealth = true` bootstrap，覆盖 `navigator.webdriver`、`navigator.language(s)`、`navigator.platform`、`navigator.vendor`、`hardwareConcurrency`、`deviceMemory`、`maxTouchPoints`、`plugins`、`mimeTypes`、`pdfViewerEnabled`、screen depth、notifications permissions 查询补丁，以及 Chromium 路线的最小 `window.chrome` / `navigator.userAgentData`
 - 同一个 browser session 会复用稳定的 user data dir，并做最小串行化；如果显式启用 `keep_alive`，还可以进一步复用 live context 或 live page；如果再配 `keep_alive_scope = origin`，则会按同一 session 下的 URL origin 分开维护 `keep_alive`
+- 同一个 browser session 如果首次请求已经解析出一份 browser profile，后续同 session 请求会继续复用这份完整画像；如果又显式声明了冲突画像，会直接报错
 - `keep_alive_key` 会在 `session + keep_alive_scope` 之外再加一层显式业务分桶；`keep_alive_max_idle` 用懒清理限制空闲窗口，`keep_alive_max_uses` 限制单个 entry 的复用次数，`keep_alive_on_error` 决定浏览器错误后是保留还是重置当前 entry
 - `device_profile.fingerprint` 负责 `user_agent / locale / timezone / accept-language / languages / platform / device_memory` 这组身份画像；缺失字段会按当前 `engine` 与稳定默认值补齐
 - `device_profile.screen` 负责 `viewport / screen / avail` 三组尺寸，以及 `color_depth / pixel_depth / device_scale_factor`；缺失尺寸会按组合规则推导，明显冲突会显式失败

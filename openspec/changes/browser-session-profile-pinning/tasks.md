@@ -1,0 +1,4 @@
+- [x] 1. 在 browser downloader 中增加 session 级 profile 固定与复用逻辑
+- [x] 2. 对冲突的 follow-up engine/profile 给出显式错误
+- [x] 3. 补测试覆盖首次固定、后续复用与冲突场景
+- [x] 4. 更新 README 与 capabilities 文档说明

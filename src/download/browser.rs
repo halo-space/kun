@@ -18,6 +18,7 @@ use playwright_rs::protocol::{
     BrowserContext, BrowserContextOptions, ContinueOptions, Cookie, GotoOptions, Page, Playwright,
     ProxySettings, Viewport,
 };
+use serde::{Deserialize, Serialize};
 #[cfg(any(feature = "browser", test))]
 use serde_json::json;
 #[cfg(any(feature = "browser", test))]
@@ -303,7 +304,7 @@ fn builtin_browser_fingerprint_defaults(
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct BrowserResolvedFingerprintProfile {
     user_agent: String,
     locale: String,
@@ -317,7 +318,7 @@ struct BrowserResolvedFingerprintProfile {
     max_touch_points: u8,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct BrowserResolvedScreenProfile {
     viewport: Size,
     screen: Size,
@@ -327,10 +328,17 @@ struct BrowserResolvedScreenProfile {
     device_scale_factor: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct BrowserResolvedDeviceProfile {
     fingerprint: BrowserResolvedFingerprintProfile,
     screen: BrowserResolvedScreenProfile,
+}
+
+#[cfg(any(feature = "browser", test))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct BrowserSessionDeviceProfileState {
+    engine: crate::request::browser::Engine,
+    device_profile: BrowserResolvedDeviceProfile,
 }
 
 fn default_browser_screen_profile() -> BrowserResolvedScreenProfile {
@@ -450,17 +458,23 @@ fn resolve_fingerprint_profile(
 fn resolve_device_profile(
     config: &BrowserConfig,
 ) -> Result<Option<BrowserResolvedDeviceProfile>, SpiderError> {
-    let Some(device_profile) = config.device_profile.as_ref() else {
-        return Ok(None);
-    };
+    if let Some(device_profile) = config.device_profile.as_ref() {
+        return Ok(Some(BrowserResolvedDeviceProfile {
+            fingerprint: resolve_fingerprint_profile(
+                device_profile.fingerprint.as_ref(),
+                config.engine,
+            )?,
+            screen: resolve_screen_profile(device_profile.screen.as_ref())?,
+        }));
+    }
 
-    Ok(Some(BrowserResolvedDeviceProfile {
-        fingerprint: resolve_fingerprint_profile(
-            device_profile.fingerprint.as_ref(),
+    if config.stealth {
+        return Ok(Some(BrowserResolvedDeviceProfile::default_for_stealth(
             config.engine,
-        )?,
-        screen: resolve_screen_profile(device_profile.screen.as_ref())?,
-    }))
+        )));
+    }
+
+    Ok(None)
 }
 
 impl BrowserResolvedDeviceProfile {
@@ -491,8 +505,8 @@ struct BrowserExecutionPlan {
 #[cfg(any(feature = "browser", test))]
 impl BrowserExecutionPlan {
     #[cfg_attr(all(test, not(feature = "browser")), allow(dead_code))]
-    fn from_config(config: &BrowserConfig) -> Result<Self, SpiderError> {
-        let device_profile = resolve_device_profile(config)?;
+    async fn from_request(request: &Request, config: &BrowserConfig) -> Result<Self, SpiderError> {
+        let device_profile = resolve_effective_device_profile(request, config).await?;
         let init_script = build_browser_init_script(config, device_profile.as_ref());
 
         Ok(Self {
@@ -849,7 +863,7 @@ async fn fetch_with_playwright_inner(
     config: &BrowserConfig,
 ) -> Result<BrowserFetchResult, SpiderError> {
     let _session_execution_guard = acquire_browser_session_execution_guard(request).await;
-    let execution_plan = BrowserExecutionPlan::from_config(config)?;
+    let execution_plan = BrowserExecutionPlan::from_request(request, config).await?;
 
     if request.session.is_some() && execution_plan.keep_alive != KeepAlive::Isolated {
         return fetch_with_playwright_keep_alive(request, config, &execution_plan).await;
@@ -969,6 +983,101 @@ fn browser_keep_alive_mismatch_error(session_id: &str) -> SpiderError {
     SpiderError::download(format!(
         "browser keep_alive `{session_id}` requires stable engine/headless/device_profile/stealth/stealth_scripts/proxy/keep_alive/keep_alive_scope/keep_alive_key across requests"
     ))
+}
+
+#[cfg(any(feature = "browser", test))]
+fn browser_session_device_profile_mismatch_error(session_id: &str) -> SpiderError {
+    SpiderError::download(format!(
+        "browser session `{session_id}` requires stable engine/device_profile/stealth across requests once a browser profile has been established"
+    ))
+}
+
+#[cfg(any(feature = "browser", test))]
+async fn resolve_effective_device_profile(
+    request: &Request,
+    config: &BrowserConfig,
+) -> Result<Option<BrowserResolvedDeviceProfile>, SpiderError> {
+    let requested_profile = resolve_device_profile(config)?;
+    let Some(session) = &request.session else {
+        return Ok(requested_profile);
+    };
+
+    let persisted = read_browser_session_device_profile(&session.id).await?;
+    match (persisted, requested_profile) {
+        (Some(state), Some(requested_profile)) => {
+            if state.engine != config.engine || state.device_profile != requested_profile {
+                return Err(browser_session_device_profile_mismatch_error(&session.id));
+            }
+
+            Ok(Some(state.device_profile))
+        }
+        (Some(state), None) => {
+            if state.engine != config.engine {
+                return Err(browser_session_device_profile_mismatch_error(&session.id));
+            }
+
+            Ok(Some(state.device_profile))
+        }
+        (None, Some(requested_profile)) => {
+            write_browser_session_device_profile(&session.id, config.engine, &requested_profile)
+                .await?;
+            Ok(Some(requested_profile))
+        }
+        (None, None) => Ok(None),
+    }
+}
+
+#[cfg(any(feature = "browser", test))]
+async fn read_browser_session_device_profile(
+    session_id: &str,
+) -> Result<Option<BrowserSessionDeviceProfileState>, SpiderError> {
+    let path = browser_session_device_profile_path(session_id);
+    let contents = match tokio::fs::read_to_string(&path).await {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(SpiderError::download(format!(
+                "failed to read browser session device profile: {error}"
+            )));
+        }
+    };
+
+    serde_json::from_str(&contents).map(Some).map_err(|error| {
+        SpiderError::download(format!(
+            "failed to decode browser session device profile: {error}"
+        ))
+    })
+}
+
+#[cfg(any(feature = "browser", test))]
+async fn write_browser_session_device_profile(
+    session_id: &str,
+    engine: crate::request::browser::Engine,
+    device_profile: &BrowserResolvedDeviceProfile,
+) -> Result<(), SpiderError> {
+    let path = browser_session_device_profile_path(session_id);
+    let parent = path.parent().ok_or_else(|| {
+        SpiderError::download("browser session device profile path is missing parent directory")
+    })?;
+    tokio::fs::create_dir_all(parent).await.map_err(|error| {
+        SpiderError::download(format!(
+            "failed to create browser session device profile dir: {error}"
+        ))
+    })?;
+    let contents = serde_json::to_vec_pretty(&BrowserSessionDeviceProfileState {
+        engine,
+        device_profile: device_profile.clone(),
+    })
+    .map_err(|error| {
+        SpiderError::download(format!(
+            "failed to encode browser session device profile: {error}"
+        ))
+    })?;
+    tokio::fs::write(&path, contents).await.map_err(|error| {
+        SpiderError::download(format!(
+            "failed to write browser session device profile: {error}"
+        ))
+    })
 }
 
 #[cfg(feature = "browser")]
@@ -1588,6 +1697,13 @@ fn browser_session_user_data_dir(session_id: &str) -> PathBuf {
 }
 
 #[cfg(any(feature = "browser", test))]
+fn browser_session_device_profile_path(session_id: &str) -> PathBuf {
+    browser_session_user_data_dir(session_id)
+        .join(".halo-spider")
+        .join("device-profile.json")
+}
+
+#[cfg(any(feature = "browser", test))]
 fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len() * 2);
@@ -1814,9 +1930,10 @@ mod tests {
     #[test]
     fn browser_keep_alive_cache_key_uses_session_scope_by_default() {
         let request = Request::browser("https://news.example.com/list").with_session("shared");
-        let execution_plan = BrowserExecutionPlan::from_config(
+        let execution_plan = block_on(BrowserExecutionPlan::from_request(
+            &request,
             &BrowserConfig::default().with_keep_alive(KeepAlive::Context),
-        )
+        ))
         .expect("execution plan should build");
 
         let key = browser_keep_alive_cache_key(&request, &execution_plan)
@@ -1829,11 +1946,12 @@ mod tests {
     fn browser_keep_alive_cache_key_can_scope_by_origin() {
         let request =
             Request::browser("https://news.example.com/list?page=1").with_session("shared");
-        let execution_plan = BrowserExecutionPlan::from_config(
+        let execution_plan = block_on(BrowserExecutionPlan::from_request(
+            &request,
             &BrowserConfig::default()
                 .with_keep_alive(KeepAlive::Context)
                 .with_keep_alive_scope(KeepAliveScope::Origin),
-        )
+        ))
         .expect("execution plan should build");
 
         let key = browser_keep_alive_cache_key(&request, &execution_plan)
@@ -1846,12 +1964,13 @@ mod tests {
     fn browser_keep_alive_cache_key_can_append_explicit_business_key() {
         let request =
             Request::browser("https://news.example.com/list?page=1").with_session("shared");
-        let execution_plan = BrowserExecutionPlan::from_config(
+        let execution_plan = block_on(BrowserExecutionPlan::from_request(
+            &request,
             &BrowserConfig::default()
                 .with_keep_alive(KeepAlive::Context)
                 .with_keep_alive_scope(KeepAliveScope::Origin)
                 .with_keep_alive_key("account:primary"),
-        )
+        ))
         .expect("execution plan should build");
 
         let key = browser_keep_alive_cache_key(&request, &execution_plan)
@@ -1862,7 +1981,9 @@ mod tests {
 
     #[test]
     fn browser_execution_plan_carries_keep_alive_lifecycle_controls() {
-        let execution_plan = BrowserExecutionPlan::from_config(
+        let request = Request::browser("https://news.example.com/list").with_session("shared");
+        let execution_plan = block_on(BrowserExecutionPlan::from_request(
+            &request,
             &BrowserConfig::default()
                 .with_keep_alive(KeepAlive::Page)
                 .with_keep_alive_scope(KeepAliveScope::Origin)
@@ -1870,7 +1991,7 @@ mod tests {
                 .with_keep_alive_max_idle(SignedDuration::from_secs(30))
                 .with_keep_alive_max_uses(12)
                 .with_keep_alive_on_error(KeepAliveOnError::Reset),
-        )
+        ))
         .expect("execution plan should build");
 
         assert_eq!(execution_plan.keep_alive, KeepAlive::Page);
@@ -1889,6 +2010,7 @@ mod tests {
 
     #[test]
     fn browser_keep_alive_expires_when_idle_window_passes() {
+        let request = Request::browser("https://news.example.com/list").with_session("shared");
         let now = Instant::now();
         let lifecycle = BrowserKeepAliveLifecycle {
             last_returned_at: now
@@ -1896,11 +2018,12 @@ mod tests {
                 .expect("instant should support checked subtraction"),
             completed_uses: 1,
         };
-        let execution_plan = BrowserExecutionPlan::from_config(
+        let execution_plan = block_on(BrowserExecutionPlan::from_request(
+            &request,
             &BrowserConfig::default()
                 .with_keep_alive(KeepAlive::Context)
                 .with_keep_alive_max_idle(SignedDuration::from_secs(1)),
-        )
+        ))
         .expect("execution plan should build");
 
         let expired = browser_keep_alive_is_expired(&lifecycle, &execution_plan, now)
@@ -1911,15 +2034,17 @@ mod tests {
 
     #[test]
     fn browser_keep_alive_expires_when_max_uses_is_reached() {
+        let request = Request::browser("https://news.example.com/list").with_session("shared");
         let lifecycle = BrowserKeepAliveLifecycle {
             last_returned_at: Instant::now(),
             completed_uses: 3,
         };
-        let execution_plan = BrowserExecutionPlan::from_config(
+        let execution_plan = block_on(BrowserExecutionPlan::from_request(
+            &request,
             &BrowserConfig::default()
                 .with_keep_alive(KeepAlive::Context)
                 .with_keep_alive_max_uses(3),
-        )
+        ))
         .expect("execution plan should build");
 
         let expired =
@@ -1931,15 +2056,17 @@ mod tests {
 
     #[test]
     fn browser_keep_alive_store_check_stops_reuse_after_max_uses() {
+        let request = Request::browser("https://news.example.com/list").with_session("shared");
         let lifecycle = BrowserKeepAliveLifecycle {
             last_returned_at: Instant::now(),
             completed_uses: 4,
         };
-        let execution_plan = BrowserExecutionPlan::from_config(
+        let execution_plan = block_on(BrowserExecutionPlan::from_request(
+            &request,
             &BrowserConfig::default()
                 .with_keep_alive(KeepAlive::Context)
                 .with_keep_alive_max_uses(4),
-        )
+        ))
         .expect("execution plan should build");
 
         assert!(!browser_keep_alive_should_store_after_return(
@@ -2239,6 +2366,22 @@ mod tests {
     }
 
     #[test]
+    fn resolve_device_profile_uses_builtin_profile_for_stealth_requests() {
+        let config = BrowserConfig::default().with_stealth(true);
+
+        let profile = resolve_device_profile(&config)
+            .unwrap()
+            .expect("stealth should resolve a builtin profile");
+
+        assert_eq!(
+            profile.fingerprint.user_agent,
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
+        );
+        assert_eq!(profile.fingerprint.vendor, "Google Inc.");
+        assert_eq!(profile.screen.viewport, Size::new(1280, 720));
+    }
+
+    #[test]
     fn resolve_device_profile_derives_screen_defaults_and_missing_sizes() {
         let config = BrowserConfig::default().with_device_profile(
             DeviceProfile::new().with_screen(
@@ -2277,6 +2420,81 @@ mod tests {
             error,
             SpiderError::download("browser device_profile.screen requires screen >= avail")
         );
+    }
+
+    #[test]
+    fn browser_execution_plan_pins_first_session_device_profile() {
+        let session_id = unique_browser_test_session_id("session-device-profile");
+        cleanup_browser_session_artifacts(&session_id);
+
+        let first_request = Request::browser("https://example.com/app").with_session(&session_id);
+        let first_plan = block_on(BrowserExecutionPlan::from_request(
+            &first_request,
+            &BrowserConfig::default().with_stealth(true),
+        ))
+        .expect("first execution plan should build");
+
+        assert!(first_plan.device_profile.is_some());
+        assert!(browser_session_device_profile_path(&session_id).exists());
+
+        let followup_request =
+            Request::browser("https://example.com/dashboard").with_session(&session_id);
+        let followup_plan = block_on(BrowserExecutionPlan::from_request(
+            &followup_request,
+            &BrowserConfig::default(),
+        ))
+        .expect("follow-up execution plan should reuse stored profile");
+
+        assert_eq!(followup_plan.device_profile, first_plan.device_profile);
+        assert!(followup_plan.init_script.is_some());
+
+        cleanup_browser_session_artifacts(&session_id);
+    }
+
+    #[test]
+    fn browser_execution_plan_rejects_conflicting_session_device_profile() {
+        let session_id = unique_browser_test_session_id("session-device-conflict");
+        cleanup_browser_session_artifacts(&session_id);
+
+        let first_request = Request::browser("https://example.com/app").with_session(&session_id);
+        block_on(BrowserExecutionPlan::from_request(
+            &first_request,
+            &BrowserConfig::default().with_device_profile(
+                DeviceProfile::new().with_fingerprint(
+                    FingerprintProfile::new()
+                        .with_locale("ja-JP")
+                        .with_timezone("Asia/Tokyo")
+                        .with_accept_language("ja-JP,ja;q=0.9")
+                        .with_languages(["ja-JP", "ja"]),
+                ),
+            ),
+        ))
+        .expect("first execution plan should build");
+
+        let conflicting_request =
+            Request::browser("https://example.com/other").with_session(&session_id);
+        let error = block_on(BrowserExecutionPlan::from_request(
+            &conflicting_request,
+            &BrowserConfig::default().with_device_profile(
+                DeviceProfile::new().with_fingerprint(
+                    FingerprintProfile::new()
+                        .with_locale("en-US")
+                        .with_timezone("America/New_York")
+                        .with_accept_language("en-US,en;q=0.9")
+                        .with_languages(["en-US", "en"]),
+                ),
+            ),
+        ))
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            SpiderError::download(format!(
+                "browser session `{session_id}` requires stable engine/device_profile/stealth across requests once a browser profile has been established"
+            ))
+        );
+
+        cleanup_browser_session_artifacts(&session_id);
     }
 
     #[test]
@@ -2507,5 +2725,20 @@ mod tests {
             .build()
             .expect("test runtime should build")
             .block_on(future)
+    }
+
+    fn unique_browser_test_session_id(prefix: &str) -> String {
+        static COUNTER: std::sync::OnceLock<std::sync::atomic::AtomicU64> =
+            std::sync::OnceLock::new();
+        let counter = COUNTER.get_or_init(|| std::sync::atomic::AtomicU64::new(1));
+        let unique = counter.fetch_add(1, Ordering::Relaxed);
+
+        format!("{prefix}-{unique}")
+    }
+
+    fn cleanup_browser_session_artifacts(session_id: &str) {
+        let _ = block_on(tokio::fs::remove_dir_all(browser_session_user_data_dir(
+            session_id,
+        )));
     }
 }

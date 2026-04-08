@@ -653,6 +653,7 @@ Spider / rules
 这几项都只影响 live `keep_alive` 的运行态复用，不改变稳定 user data dir 的基本语义。
 
 user data dir、临时 profile 目录和会话锁这条实现路径也已经收口到更适合 async runtime 的处理方式；相同 session id 的实际浏览器执行仍会按 session 串行化，避免共享 profile 目录或 `keep_alive` 时出现竞态。
+如果某个 session 首次请求显式带了 `device_profile`，或者通过 `stealth = true` 解析出一份内置 browser profile，这份完整画像也会固定到这个 session；后续同 session 请求即使不再重复声明，也会继续复用。若要切换 browser 身份画像，直接换一个新的 session id。
 
 当前 browser `Response` 会带上真实的导航 `status` 与响应头；`protocol` 继续表示
 browser 执行路径，`ip_address` 与 `certificate` 由于 Playwright 当前接口限制仍保持为空。
@@ -667,6 +668,7 @@ browser 执行路径，`ip_address` 与 `certificate` 由于 Playwright 当前�
 - `device_profile.screen` 负责 `viewport / screen / avail` 三组尺寸，以及 `color_depth / pixel_depth / device_scale_factor`
 - `device_profile.fingerprint` 支持部分填写；下载器会按当前 `engine` 与稳定默认值补齐最终执行画像
 - `device_profile.screen` 也支持部分填写；缺失尺寸会按组合规则推导，明显冲突的尺寸组合会显式报错
+- 同一个 `session` 一旦建立过 browser profile，后续同 session 请求会继续复用这份完整画像；如果又显式声明了冲突画像，会直接报错
 - `stealth = true` 当前会注入 bootstrap，覆盖 `navigator.webdriver`、`navigator.language(s)`、`navigator.platform`、`navigator.vendor`、`hardwareConcurrency`、`deviceMemory`、`maxTouchPoints`、`plugins`、`mimeTypes`、`pdfViewerEnabled`、screen depth、notifications permissions 查询补丁，以及 Chromium 路线上的最小 `window.chrome` / `navigator.userAgentData`
 - `stealth_script` 可以把外部 stealth JS 叠加到内置 bootstrap 后面；如果只想注入外部脚本，也可以不打开 `stealth = true`
 - 这组默认画像和 stealth 现在已经会跟随 `engine` 切到 Chromium / Firefox / WebKit 对应的浏览器族，但仍然不追求更高阶的品牌级伪装能力
