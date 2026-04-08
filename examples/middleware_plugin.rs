@@ -1,14 +1,11 @@
 //! 最小 middleware plugin 示例
 //!
 //! 这个示例只演示 plugin 当前已经落地的那部分能力：
-//! - 用 `PluginManifest` 声明一个 `kind = "middleware"` 的插件
+//! - 用 `PluginManifest` 声明一个 middleware 插件
 //! - 用 `PluginRegistry` 注册 manifest
 //! - 用 `Settings::with_middleware(...)` 启用对应 key
 //! - 用 `register_middleware(...)` 提供中间件 factory
 //! - 用 `load_plugins(...)` 完成 engine 装配
-//!
-//! 如果你想看 `plugins.toml` 文件加载、override 规则和多插件组合，
-//! 继续看 `plugins_demo.rs`。
 //!
 //! 运行：
 //! cargo run --example middleware_plugin
@@ -124,7 +121,6 @@ async fn main() -> Result<(), SpiderError> {
     let mut registry = PluginRegistry::new();
     registry.register(PluginManifest {
         name: "request_stamp".to_string(),
-        kind: "middleware".to_string(),
         entry: "examples::middleware_plugin::RequestStampMiddleware".to_string(),
         r#override: false,
     })?;

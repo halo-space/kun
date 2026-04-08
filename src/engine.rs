@@ -9,9 +9,6 @@ use crate::engine::task::{
 };
 use crate::error::SpiderError;
 use crate::middleware::{Chain, Config, Registry, build as build_middleware};
-use crate::plugins::types::{
-    PluginKind, engine_deferred_plugin_kind_names, engine_supported_plugin_kind_names,
-};
 use crate::request::{Request, RequestMode};
 use crate::rules::Compiled;
 use crate::runtime::compile::{compile as compile_runtime, merge as merge_middleware};
@@ -456,12 +453,12 @@ where
     /// has a registered factory.
     ///
     /// Before calling this method, register each middleware factory with
-    /// `register_middleware()`. `load_plugins()` currently only wires
-    /// `kind = "middleware"` plugins. Other known component kinds stay on the
-    /// explicit trait + engine injection path and are not auto-wired here.
+    /// `register_middleware()`. `load_plugins()` only wires middleware plugins;
+    /// core components such as scheduler/store/http/browser stay on the
+    /// explicit trait + engine injection path.
     ///
-    /// It verifies that every middleware declared in `plugins.toml` has a
-    /// matching engine factory and returns an error otherwise.
+    /// It verifies that every middleware declared in the plugin manifest file
+    /// has a matching engine factory and returns an error otherwise.
     ///
     /// ```ignore
     /// let manifests = load_plugin_manifest("plugins.toml")?;
@@ -478,27 +475,10 @@ where
         self,
         registry: &crate::plugins::PluginRegistry,
     ) -> Result<Self, SpiderError> {
-        let mut unsupported_manifests = Vec::new();
         for manifest in registry.all() {
-            let kind = PluginKind::try_from(manifest.kind.as_str()).map_err(SpiderError::plugin)?;
-            if !kind.is_engine_supported() {
-                unsupported_manifests.push(format!("({}, {})", manifest.kind, manifest.name));
-            }
-        }
-
-        if !unsupported_manifests.is_empty() {
-            return Err(SpiderError::plugin(format!(
-                "engine currently only auto-loads plugin kinds [{}]; unsupported manifests: {}; known but not auto-loadable yet: [{}]",
-                engine_supported_plugin_kind_names().join(", "),
-                unsupported_manifests.join(", "),
-                engine_deferred_plugin_kind_names().join(", ")
-            )));
-        }
-
-        for manifest in registry.by_kind("middleware") {
             if !self.plugins.has(&manifest.name) {
                 return Err(SpiderError::plugin(format!(
-                    "middleware plugin '{}' declared in plugins.toml (entry: {}) but no factory registered; \
+                    "middleware plugin '{}' declared in plugin manifest (entry: {}) but no factory registered; \
                      call register_middleware(\"{}\", ...) before load_plugins()",
                     manifest.name, manifest.entry, manifest.name
                 )));
@@ -1757,13 +1737,12 @@ mod tests {
     }
 
     #[test]
-    fn engine_load_plugins_rejects_deferred_plugin_kinds_explicitly() {
+    fn engine_load_plugins_requires_registered_factory() {
         let mut registry = PluginRegistry::new();
         registry
             .register(PluginManifest {
-                name: "sqlite".to_string(),
-                kind: "store".to_string(),
-                entry: "plugins_demo::SqliteStore".to_string(),
+                name: "stats".to_string(),
+                entry: "plugins::StatsMiddleware".to_string(),
                 r#override: false,
             })
             .unwrap();
@@ -1776,12 +1755,13 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("only auto-loads plugin kinds [middleware]")
+                .contains("middleware plugin 'stats' declared in plugin manifest")
         );
-        assert!(error.to_string().contains("(store, sqlite)"));
-        assert!(error.to_string().contains(
-            "known but not auto-loadable yet: [store, scheduler, dedup, robots, http, browser]"
-        ));
+        assert!(
+            error
+                .to_string()
+                .contains("call register_middleware(\"stats\", ...) before load_plugins()")
+        );
     }
 
     #[test]

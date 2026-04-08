@@ -1,9 +1,8 @@
 use crate::error::SpiderError;
 use crate::plugins::manifest::PluginManifest;
-use crate::plugins::types::PluginKind;
 use std::collections::BTreeMap;
 
-type PluginKey = (String, String);
+type PluginKey = String;
 
 #[derive(Default)]
 pub struct PluginRegistry {
@@ -15,17 +14,15 @@ impl PluginRegistry {
         Self::default()
     }
 
-    pub fn register(&mut self, mut manifest: PluginManifest) -> Result<(), SpiderError> {
-        let kind = PluginKind::try_from(manifest.kind.as_str()).map_err(SpiderError::plugin)?;
-        manifest.kind = kind.as_str().to_string();
-        let key = (manifest.kind.clone(), manifest.name.clone());
+    pub fn register(&mut self, manifest: PluginManifest) -> Result<(), SpiderError> {
+        let key = manifest.name.clone();
 
         if let Some(existing) = self.manifests.get(&key)
             && !manifest.r#override
         {
             return Err(SpiderError::plugin(format!(
-                "plugin conflict: ({}, {}) already registered as '{}'; set override = true to replace",
-                key.0, key.1, existing.entry
+                "plugin conflict: middleware plugin '{}' already registered as '{}'; set override = true to replace",
+                key, existing.entry
             )));
         }
 
@@ -40,20 +37,12 @@ impl PluginRegistry {
         Ok(())
     }
 
-    pub fn get(&self, kind: &str, name: &str) -> Option<&PluginManifest> {
-        self.manifests.get(&(kind.to_string(), name.to_string()))
+    pub fn get(&self, name: &str) -> Option<&PluginManifest> {
+        self.manifests.get(name)
     }
 
     pub fn all(&self) -> impl Iterator<Item = &PluginManifest> {
         self.manifests.values()
-    }
-
-    pub fn by_kind(&self, kind: &str) -> Vec<&PluginManifest> {
-        self.manifests
-            .iter()
-            .filter(|((k, _), _)| k == kind)
-            .map(|(_, m)| m)
-            .collect()
     }
 }
 
@@ -61,11 +50,10 @@ impl PluginRegistry {
 mod tests {
     use super::*;
 
-    fn make_manifest(kind: &str, name: &str, override_flag: bool) -> PluginManifest {
+    fn make_manifest(name: &str, override_flag: bool) -> PluginManifest {
         PluginManifest {
             name: name.to_string(),
-            kind: kind.to_string(),
-            entry: format!("{kind}.{name}:Plugin"),
+            entry: format!("middleware.{name}:Plugin"),
             r#override: override_flag,
         }
     }
@@ -73,77 +61,43 @@ mod tests {
     #[test]
     fn register_and_get() {
         let mut registry = PluginRegistry::new();
-        registry
-            .register(make_manifest("middleware", "proxy", false))
-            .unwrap();
+        registry.register(make_manifest("proxy", false)).unwrap();
 
-        let plugin = registry.get("middleware", "proxy").unwrap();
+        let plugin = registry.get("proxy").unwrap();
         assert_eq!(plugin.entry, "middleware.proxy:Plugin");
     }
 
     #[test]
-    fn same_kind_same_name_conflict_fails_without_override() {
+    fn same_name_conflict_fails_without_override() {
         let mut registry = PluginRegistry::new();
-        registry
-            .register(make_manifest("middleware", "proxy", false))
-            .unwrap();
+        registry.register(make_manifest("proxy", false)).unwrap();
 
         let err = registry
-            .register(make_manifest("middleware", "proxy", false))
+            .register(make_manifest("proxy", false))
             .unwrap_err();
         assert!(err.to_string().contains("plugin conflict"));
     }
 
     #[test]
-    fn same_kind_same_name_succeeds_with_override() {
+    fn same_name_succeeds_with_override() {
         let mut registry = PluginRegistry::new();
-        registry
-            .register(make_manifest("middleware", "proxy", false))
-            .unwrap();
-        registry
-            .register(make_manifest("middleware", "proxy", true))
-            .unwrap();
+        registry.register(make_manifest("proxy", false)).unwrap();
+        registry.register(make_manifest("proxy", true)).unwrap();
 
         assert_eq!(registry.manifests.len(), 1);
     }
 
     #[test]
-    fn different_kind_same_name_allowed() {
+    fn all_returns_registered_plugins() {
         let mut registry = PluginRegistry::new();
-        registry
-            .register(make_manifest("middleware", "redis", false))
-            .unwrap();
-        registry
-            .register(make_manifest("store", "redis", false))
-            .unwrap();
+        registry.register(make_manifest("proxy", false)).unwrap();
+        registry.register(make_manifest("cookies", false)).unwrap();
 
-        assert_eq!(registry.manifests.len(), 2);
-    }
+        let names = registry
+            .all()
+            .map(|manifest| manifest.name.as_str())
+            .collect::<Vec<_>>();
 
-    #[test]
-    fn by_kind_filters_correctly() {
-        let mut registry = PluginRegistry::new();
-        registry
-            .register(make_manifest("middleware", "proxy", false))
-            .unwrap();
-        registry
-            .register(make_manifest("middleware", "cookies", false))
-            .unwrap();
-        registry
-            .register(make_manifest("scheduler", "local", false))
-            .unwrap();
-
-        assert_eq!(registry.by_kind("middleware").len(), 2);
-        assert_eq!(registry.by_kind("scheduler").len(), 1);
-    }
-
-    #[test]
-    fn unknown_kind_is_rejected() {
-        let mut registry = PluginRegistry::new();
-        let error = registry
-            .register(make_manifest("rules", "cron", false))
-            .unwrap_err();
-
-        assert!(error.to_string().contains("unsupported plugin kind"));
+        assert_eq!(names, vec!["cookies", "proxy"]);
     }
 }

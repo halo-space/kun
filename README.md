@@ -47,7 +47,7 @@ README 这里只保留总览；模块级细节统一放到 [docs/capabilities.md
 - `robots` 这块如果想直接看 `Site::pattern / host / origin` 的接法，可以运行 `examples/robots_site_policy.rs`
 - `AutoThrottle` 支持按 origin 基于延迟、错误和目标并发动态调整下一次下载间隔；`Settings::with_auto_throttle(true)` 开启后，`download_delay` 表示初始/最小 delay，`with_auto_throttle_max_delay(...)` 表示最大 delay
 - `HTTP cache / conditional request` 支持内存 backend 和内置 `middleware::http_cache::File` 持久化 backend；`Settings::with_http_cache(true)` 开启后，同一 HTTP `GET` 请求会基于已缓存的 `ETag / Last-Modified` 自动补 `If-None-Match / If-Modified-Since`；命中 `304 Not Modified` 时，在 `response` 策略下会回填缓存 body，并给 `Response.flags` 增加 `http_cache`；当前也支持 `ttl` 和 `validators / response` 两种缓存策略
-- plugin 当前定位为 `middleware` 的声明式装配：manifest / registry / factory / `load_plugins()` 这条链路已可用；`store`、`scheduler`、`dedup`、`robots`、`http`、`browser` 这些核心组件继续走 trait + engine 显式注入，不把 plugin 当通用组件扩展机制
+- plugin 当前定位为 `middleware` 的声明式装配：manifest / registry / factory / `load_plugins()` 这条链路已可用；核心组件继续走 trait + engine 显式注入，不把 plugin 当通用组件扩展机制
 - DSL 当前定位已经明确为“共享底层能力的配置化入口”，不是另一套独立运行时
 
 当前仍待补齐的底层能力：
@@ -354,7 +354,6 @@ cargo run --example custom_middleware
 cargo run --example middleware_plugin
 cargo run --example custom_scheduler
 cargo run --example telemetry
-cargo run --example plugins_demo
 
 # AI 选择器示例（需要 OPENAI_API_KEY 环境变量）
 cargo run --example ai_extraction --features ai-selector

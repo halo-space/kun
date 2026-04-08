@@ -1047,7 +1047,7 @@ let section_html = response.xpath("//section[@id='content']").html().one();
 当前 plugin 体系的定位是：只负责 `middleware` 的声明式装配，不作为通用组件扩展机制。
 
 - `middleware`：已支持 manifest / registry / factory / `load_plugins()` 这条装配链路
-- `store` / `scheduler` / `dedup` / `robots` / `http` / `browser`：继续作为明确的组件 owner 边界，优先走 trait + engine 显式注入，不作为 plugin 自动装载目标
+- 核心组件：继续走 trait + engine 显式注入，不作为 plugin 自动装载目标
 
 这样做是为了避免注册表看起来什么都能扩展，但 engine 实际并不打算把所有核心组件都做成 plugin 式接线。
 

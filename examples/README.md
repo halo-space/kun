@@ -22,7 +22,6 @@
 - `middleware_plugin.rs`：最小 middleware plugin 装配示例，展示 manifest / registry / factory / `load_plugins()`
 - `custom_dedup.rs`：自定义 `dedup::Dedup`，替换默认 request 去重实现
 - `custom_scheduler.rs`：自定义 `scheduler::Scheduler` 与自定义 `scheduler::checkpoint::Persist` 的接线方式
-- `plugins_demo.rs`：当前 middleware 插件接入路径、`PluginRegistry` 的 `(kind, name)` 唯一性与 override 规则
 - `ai_extraction.rs`：AI selector 直接处理 `period.xml`
 
 如果你要接 PostgreSQL，当前也建议按 `custom Store` 模式自己实现，而不是继续加内置 PG 分支。
