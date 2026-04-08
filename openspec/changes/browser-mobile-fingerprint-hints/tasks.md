@@ -1,0 +1,4 @@
+- [x] 1. 为 `FingerprintProfile` 增加 `mobile` 字段和 builder
+- [x] 2. 让 downloader 在 `mobile = true` 时切到移动端默认画像与默认 screen hints
+- [x] 3. 让 DSL 编译入口支持 `fetch.browser.device_profile.fingerprint.mobile`
+- [x] 4. 补测试并更新 README / capabilities

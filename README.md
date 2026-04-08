@@ -54,7 +54,7 @@ README 这里只保留总览；模块级细节统一放到 [docs/capabilities.md
 
 - 观测剩余缺口：持久化事件总线聚合层、跨 job 仪表盘/巡检视图，以及更系统的运维自动化。
 - durable scheduler 剩余缺口：后台运维服务层，以及更丰富的 exporter / 自动化接线。
-- browser 剩余缺口：更高阶浏览器指纹伪装，以及更细粒度的 session/context/page 复用策略。
+- browser 剩余缺口：更高阶品牌级伪装，以及更完整的内置 stealth / client hints 画像能力。
 - validation 剩余缺口：校验失败如何统一映射到 runtime 行为。
 - plugin 自动装载这条线当前仍只自动接 `middleware`；`store`、`scheduler`、`dedup`、`robots`、`http`、`browser` 这些 kind 还没有完成真正的 engine 自动接线。
 - DSL 继续后置；当前它已经共享底层 `Request / parse / scheduler / validation` 模型，但整体能力面仍然没有完全追平代码爬虫主线。
@@ -664,9 +664,10 @@ browser 执行路径，`ip_address` 与 `certificate` 由于 Playwright 当前�
 当前已经支持的 browser 指纹能力边界：
 
 - 公开画像入口现在统一收口到 `device_profile`
-- `device_profile.fingerprint` 负责 `user_agent / locale / timezone / accept-language / languages / platform / device_memory`
+- `device_profile.fingerprint` 负责 `user_agent / locale / timezone / accept-language / languages / platform / mobile / device_memory`
 - `device_profile.screen` 负责 `viewport / screen / avail` 三组尺寸，以及 `color_depth / pixel_depth / device_scale_factor`
 - `device_profile.fingerprint` 支持部分填写；下载器会按当前 `engine` 与稳定默认值补齐最终执行画像
+- 如果显式声明 `device_profile.fingerprint.mobile = true`，下载器会切到移动端默认画像，并同步带上更贴近移动端的默认 viewport / touch hints
 - `device_profile.screen` 也支持部分填写；缺失尺寸会按组合规则推导，明显冲突的尺寸组合会显式报错
 - 同一个 `session` 一旦建立过 browser profile，后续同 session 请求会继续复用这份完整画像；如果又显式声明了冲突画像，会直接报错
 - `stealth = true` 当前会注入 bootstrap，覆盖 `navigator.webdriver`、`navigator.language(s)`、`navigator.platform`、`navigator.vendor`、`hardwareConcurrency`、`deviceMemory`、`maxTouchPoints`、`plugins`、`mimeTypes`、`pdfViewerEnabled`、screen depth、notifications permissions 查询补丁，以及 Chromium 路线上的最小 `window.chrome` / `navigator.userAgentData`

@@ -99,6 +99,8 @@ pub struct FingerprintProfile {
     #[serde(default)]
     pub platform: Option<String>,
     #[serde(default)]
+    pub mobile: Option<bool>,
+    #[serde(default)]
     pub device_memory: Option<u8>,
 }
 
@@ -138,6 +140,11 @@ impl FingerprintProfile {
 
     pub fn with_platform(mut self, platform: impl Into<String>) -> Self {
         self.platform = Some(platform.into());
+        self
+    }
+
+    pub fn with_mobile(mut self, mobile: bool) -> Self {
+        self.mobile = Some(mobile);
         self
     }
 
@@ -506,6 +513,7 @@ mod tests {
                             .with_accept_language("ja-JP,ja;q=0.9")
                             .with_languages(["ja-JP", "ja"])
                             .with_platform("MacIntel")
+                            .with_mobile(true)
                             .with_device_memory(16),
                     )
                     .with_screen(
@@ -539,6 +547,14 @@ mod tests {
                 .and_then(|profile| profile.fingerprint.as_ref())
                 .and_then(|fingerprint| fingerprint.locale.as_deref()),
             Some("ja-JP")
+        );
+        assert_eq!(
+            config
+                .device_profile
+                .as_ref()
+                .and_then(|profile| profile.fingerprint.as_ref())
+                .and_then(|fingerprint| fingerprint.mobile),
+            Some(true)
         );
         assert_eq!(
             config

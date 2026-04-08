@@ -544,6 +544,9 @@ fn parse_browser_config(
             if let Some(platform) = fingerprint.get("platform").and_then(Value::as_str) {
                 profile = profile.with_platform(platform.to_string());
             }
+            if let Some(mobile) = fingerprint.get("mobile").and_then(Value::as_bool) {
+                profile = profile.with_mobile(mobile);
+            }
             if let Some(device_memory) = fingerprint.get("device_memory").and_then(Value::as_f64) {
                 profile = profile.with_device_memory(device_memory as u8);
             }

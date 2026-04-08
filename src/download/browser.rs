@@ -255,6 +255,7 @@ struct BuiltinBrowserFingerprintDefaults {
     accept_language: &'static str,
     languages: &'static [&'static str],
     platform: &'static str,
+    mobile: bool,
     vendor: &'static str,
     hardware_concurrency: u8,
     device_memory: u8,
@@ -263,43 +264,86 @@ struct BuiltinBrowserFingerprintDefaults {
 
 fn builtin_browser_fingerprint_defaults(
     engine: BrowserEngine,
+    mobile: bool,
 ) -> BuiltinBrowserFingerprintDefaults {
-    match engine {
-        BrowserEngine::Chromium => BuiltinBrowserFingerprintDefaults {
+    match (engine, mobile) {
+        (BrowserEngine::Chromium, false) => BuiltinBrowserFingerprintDefaults {
             user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
             locale: "en-US",
             timezone: "America/New_York",
             accept_language: "en-US,en;q=0.9",
             languages: &["en-US", "en"],
             platform: "Win32",
+            mobile: false,
             vendor: "Google Inc.",
             hardware_concurrency: 8,
             device_memory: 8,
             max_touch_points: 0,
         },
-        BrowserEngine::Firefox => BuiltinBrowserFingerprintDefaults {
+        (BrowserEngine::Chromium, true) => BuiltinBrowserFingerprintDefaults {
+            user_agent: "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Mobile Safari/537.36",
+            locale: "en-US",
+            timezone: "America/New_York",
+            accept_language: "en-US,en;q=0.9",
+            languages: &["en-US", "en"],
+            platform: "Linux armv81",
+            mobile: true,
+            vendor: "Google Inc.",
+            hardware_concurrency: 8,
+            device_memory: 8,
+            max_touch_points: 5,
+        },
+        (BrowserEngine::Firefox, false) => BuiltinBrowserFingerprintDefaults {
             user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:137.0) Gecko/20100101 Firefox/137.0",
             locale: "en-US",
             timezone: "America/New_York",
             accept_language: "en-US,en;q=0.9",
             languages: &["en-US", "en"],
             platform: "Win32",
+            mobile: false,
             vendor: "",
             hardware_concurrency: 8,
             device_memory: 8,
             max_touch_points: 0,
         },
-        BrowserEngine::Webkit => BuiltinBrowserFingerprintDefaults {
+        (BrowserEngine::Firefox, true) => BuiltinBrowserFingerprintDefaults {
+            user_agent: "Mozilla/5.0 (Android 14; Mobile; rv:137.0) Gecko/137.0 Firefox/137.0",
+            locale: "en-US",
+            timezone: "America/New_York",
+            accept_language: "en-US,en;q=0.9",
+            languages: &["en-US", "en"],
+            platform: "Linux armv81",
+            mobile: true,
+            vendor: "",
+            hardware_concurrency: 8,
+            device_memory: 8,
+            max_touch_points: 5,
+        },
+        (BrowserEngine::Webkit, false) => BuiltinBrowserFingerprintDefaults {
             user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
             locale: "en-US",
             timezone: "America/New_York",
             accept_language: "en-US,en;q=0.9",
             languages: &["en-US", "en"],
             platform: "MacIntel",
+            mobile: false,
             vendor: "Apple Computer, Inc.",
             hardware_concurrency: 8,
             device_memory: 8,
             max_touch_points: 0,
+        },
+        (BrowserEngine::Webkit, true) => BuiltinBrowserFingerprintDefaults {
+            user_agent: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
+            locale: "en-US",
+            timezone: "America/New_York",
+            accept_language: "en-US,en;q=0.9",
+            languages: &["en-US", "en"],
+            platform: "iPhone",
+            mobile: true,
+            vendor: "Apple Computer, Inc.",
+            hardware_concurrency: 8,
+            device_memory: 4,
+            max_touch_points: 5,
         },
     }
 }
@@ -312,6 +356,7 @@ struct BrowserResolvedFingerprintProfile {
     accept_language: String,
     languages: Vec<String>,
     platform: String,
+    mobile: bool,
     vendor: String,
     hardware_concurrency: u8,
     device_memory: u8,
@@ -341,15 +386,19 @@ struct BrowserSessionDeviceProfileState {
     device_profile: BrowserResolvedDeviceProfile,
 }
 
-fn default_browser_screen_profile() -> BrowserResolvedScreenProfile {
-    let default = Size::new(1280, 720);
+fn default_browser_screen_profile(mobile: bool) -> BrowserResolvedScreenProfile {
+    let default = if mobile {
+        Size::new(390, 844)
+    } else {
+        Size::new(1280, 720)
+    };
     BrowserResolvedScreenProfile {
         viewport: default.clone(),
         screen: default.clone(),
         avail: default,
         color_depth: 24,
         pixel_depth: 24,
-        device_scale_factor: 1,
+        device_scale_factor: if mobile { 3 } else { 1 },
     }
 }
 
@@ -357,7 +406,7 @@ fn default_browser_screen_profile() -> BrowserResolvedScreenProfile {
 fn browser_execution_viewport(device_profile: Option<&BrowserResolvedDeviceProfile>) -> Size {
     device_profile
         .map(|profile| profile.screen.viewport.clone())
-        .unwrap_or_else(|| default_browser_screen_profile().viewport)
+        .unwrap_or_else(|| default_browser_screen_profile(false).viewport)
 }
 
 fn max_browser_size(left: &Size, right: &Size) -> Size {
@@ -366,12 +415,13 @@ fn max_browser_size(left: &Size, right: &Size) -> Size {
 
 fn resolve_screen_profile(
     profile: Option<&ScreenProfile>,
+    mobile: bool,
 ) -> Result<BrowserResolvedScreenProfile, SpiderError> {
     if let Some(profile) = profile {
         validate_screen_profile(profile)?;
     }
 
-    let default = default_browser_screen_profile();
+    let default = default_browser_screen_profile(mobile);
     let input_viewport = profile.and_then(|screen| screen.viewport.clone());
     let input_screen = profile.and_then(|screen| screen.screen.clone());
     let input_avail = profile.and_then(|screen| screen.avail.clone());
@@ -403,11 +453,15 @@ fn resolve_screen_profile(
         viewport,
         screen,
         avail,
-        color_depth: profile.and_then(|screen| screen.color_depth).unwrap_or(24),
-        pixel_depth: profile.and_then(|screen| screen.pixel_depth).unwrap_or(24),
+        color_depth: profile
+            .and_then(|screen| screen.color_depth)
+            .unwrap_or(default.color_depth),
+        pixel_depth: profile
+            .and_then(|screen| screen.pixel_depth)
+            .unwrap_or(default.pixel_depth),
         device_scale_factor: profile
             .and_then(|screen| screen.device_scale_factor)
-            .unwrap_or(1),
+            .unwrap_or(default.device_scale_factor),
     })
 }
 
@@ -419,7 +473,8 @@ fn resolve_fingerprint_profile(
         validate_fingerprint_profile(profile)?;
     }
 
-    let defaults = builtin_browser_fingerprint_defaults(engine);
+    let requested_mobile = profile.and_then(|profile| profile.mobile).unwrap_or(false);
+    let defaults = builtin_browser_fingerprint_defaults(engine, requested_mobile);
 
     Ok(BrowserResolvedFingerprintProfile {
         user_agent: profile
@@ -446,6 +501,9 @@ fn resolve_fingerprint_profile(
         platform: profile
             .and_then(|profile| profile.platform.clone())
             .unwrap_or_else(|| defaults.platform.to_string()),
+        mobile: profile
+            .and_then(|profile| profile.mobile)
+            .unwrap_or(defaults.mobile),
         vendor: defaults.vendor.to_string(),
         hardware_concurrency: defaults.hardware_concurrency,
         device_memory: profile
@@ -459,12 +517,11 @@ fn resolve_device_profile(
     config: &BrowserConfig,
 ) -> Result<Option<BrowserResolvedDeviceProfile>, SpiderError> {
     if let Some(device_profile) = config.device_profile.as_ref() {
+        let fingerprint =
+            resolve_fingerprint_profile(device_profile.fingerprint.as_ref(), config.engine)?;
         return Ok(Some(BrowserResolvedDeviceProfile {
-            fingerprint: resolve_fingerprint_profile(
-                device_profile.fingerprint.as_ref(),
-                config.engine,
-            )?,
-            screen: resolve_screen_profile(device_profile.screen.as_ref())?,
+            screen: resolve_screen_profile(device_profile.screen.as_ref(), fingerprint.mobile)?,
+            fingerprint,
         }));
     }
 
@@ -480,10 +537,11 @@ fn resolve_device_profile(
 impl BrowserResolvedDeviceProfile {
     #[allow(dead_code)]
     fn default_for_stealth(engine: BrowserEngine) -> Self {
+        let fingerprint = resolve_fingerprint_profile(None, engine)
+            .expect("builtin browser fingerprint defaults must be valid");
         Self {
-            fingerprint: resolve_fingerprint_profile(None, engine)
-                .expect("builtin browser fingerprint defaults must be valid"),
-            screen: default_browser_screen_profile(),
+            screen: default_browser_screen_profile(fingerprint.mobile),
+            fingerprint,
         }
     }
 }
@@ -546,10 +604,12 @@ fn build_browser_init_script(
     let languages_json = json!(fingerprint.languages).to_string();
     let language_json = json!(language).to_string();
     let platform_json = json!(fingerprint.platform).to_string();
+    let mobile_json = json!(fingerprint.mobile).to_string();
     let vendor_json = json!(fingerprint.vendor).to_string();
     let hardware_concurrency_json = json!(fingerprint.hardware_concurrency).to_string();
     let device_memory_json = json!(fingerprint.device_memory).to_string();
     let max_touch_points_json = json!(fingerprint.max_touch_points).to_string();
+    let architecture_json = json!(if fingerprint.mobile { "arm" } else { "x86" }).to_string();
     let screen_width_json = json!(screen.screen.width).to_string();
     let screen_height_json = json!(screen.screen.height).to_string();
     let avail_width_json = json!(screen.avail.width).to_string();
@@ -650,7 +710,7 @@ fn build_browser_init_script(
                     .to_string(),
             );
             lines.push(format!(
-                "Object.defineProperty(navigator, 'userAgentData', {{ get: () => ({{ brands: [{{ brand: 'Chromium', version: '136' }}, {{ brand: 'Not.A/Brand', version: '24' }}], mobile: false, platform: {platform_json}, getHighEntropyValues: async () => ({{ architecture: 'x86', bitness: '64', model: '', platform: {platform_json}, platformVersion: '10.0.0', uaFullVersion: '136.0.0.0' }}) }}), configurable: true }});"
+                "Object.defineProperty(navigator, 'userAgentData', {{ get: () => ({{ brands: [{{ brand: 'Chromium', version: '136' }}, {{ brand: 'Not.A/Brand', version: '24' }}], mobile: {mobile_json}, platform: {platform_json}, getHighEntropyValues: async () => ({{ architecture: {architecture_json}, bitness: '64', model: '', platform: {platform_json}, platformVersion: '10.0.0', uaFullVersion: '136.0.0.0' }}) }}), configurable: true }});"
             ));
         }
     }
@@ -2360,6 +2420,7 @@ mod tests {
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:137.0) Gecko/20100101 Firefox/137.0"
         );
         assert_eq!(profile.fingerprint.platform, "Win32");
+        assert!(!profile.fingerprint.mobile);
         assert_eq!(profile.fingerprint.vendor, "");
         assert_eq!(profile.fingerprint.locale, "en-US");
         assert_eq!(profile.fingerprint.timezone, "America/New_York");
@@ -2379,6 +2440,25 @@ mod tests {
         );
         assert_eq!(profile.fingerprint.vendor, "Google Inc.");
         assert_eq!(profile.screen.viewport, Size::new(1280, 720));
+    }
+
+    #[test]
+    fn resolve_device_profile_uses_mobile_defaults_when_requested() {
+        let config = BrowserConfig::default().with_device_profile(
+            DeviceProfile::new().with_fingerprint(FingerprintProfile::new().with_mobile(true)),
+        );
+
+        let profile = resolve_device_profile(&config)
+            .unwrap()
+            .expect("mobile profile should resolve");
+
+        assert!(profile.fingerprint.mobile);
+        assert_eq!(profile.fingerprint.platform, "Linux armv81");
+        assert!(profile.fingerprint.user_agent.contains("Android 14"));
+        assert!(profile.fingerprint.user_agent.contains("Mobile"));
+        assert_eq!(profile.fingerprint.max_touch_points, 5);
+        assert_eq!(profile.screen.viewport, Size::new(390, 844));
+        assert_eq!(profile.screen.device_scale_factor, 3);
     }
 
     #[test]
@@ -2539,6 +2619,25 @@ mod tests {
                     .find("window.__thirdPartyStealth = true;")
                     .expect("external stealth script should exist")
         );
+    }
+
+    #[test]
+    fn build_browser_init_script_carries_mobile_hint_for_chromium() {
+        let config = BrowserConfig::default()
+            .with_stealth(true)
+            .with_device_profile(
+                DeviceProfile::new().with_fingerprint(FingerprintProfile::new().with_mobile(true)),
+            );
+
+        let profile = resolve_device_profile(&config)
+            .unwrap()
+            .expect("mobile profile should resolve");
+        let init_script =
+            build_browser_init_script(&config, Some(&profile)).expect("init script should exist");
+
+        assert!(init_script.contains("mobile: true"));
+        assert!(init_script.contains("architecture: \"arm\""));
+        assert!(init_script.contains("Object.defineProperty(navigator, 'maxTouchPoints'"));
     }
 
     #[test]

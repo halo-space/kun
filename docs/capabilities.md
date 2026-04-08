@@ -17,7 +17,7 @@ README 负责总览，这里负责把每个模块现在到底能做什么、还�
 
 - 观测主链路已经基本具备：`stats`、`signals / extensions`、`trace`、`telemetry` exporter 都已接通；当前真正还缺的是更完整的持久化事件总线聚合层、跨 job 运维自动化，以及更高阶的统一看板/巡检视图
 - durable scheduler 的基础语义已经基本收口：ownership、heartbeat、stale reclaim、batch、snapshot/overview、统一 `Control`、显式提交边界都已经有；当前剩余重点主要是更强的分布式协调后端和更完整的后台运维服务层
-- browser 已支持结构化 `device_profile`、最小 stealth bootstrap、稳定 session 存储态、显式 `keep_alive / keep_alive_scope / keep_alive_key / keep_alive_max_idle / keep_alive_max_uses / keep_alive_on_error`；当前剩余缺口主要是更高阶 stealth 套件和更高阶浏览器指纹/设备画像能力
+- browser 已支持结构化 `device_profile`、最小 stealth bootstrap、稳定 session 存储态、显式 `keep_alive / keep_alive_scope / keep_alive_key / keep_alive_max_idle / keep_alive_max_uses / keep_alive_on_error`；当前剩余缺口主要是更高阶品牌级伪装，以及更完整的内置 stealth / client hints 画像能力
 - validation 本身已经不弱；当前更缺的是“校验失败后如何统一映射到 runtime 行为”这层策略
 - plugin 自动装载与 DSL 对齐仍明显落后于底层 runtime 能力
 
@@ -68,7 +68,8 @@ README 负责总览，这里负责把每个模块现在到底能做什么、还�
 - 同一个 browser session 会复用稳定的 user data dir，并做最小串行化；如果显式启用 `keep_alive`，还可以进一步复用 live context 或 live page；如果再配 `keep_alive_scope = origin`，则会按同一 session 下的 URL origin 分开维护 `keep_alive`
 - 同一个 browser session 如果首次请求已经解析出一份 browser profile，后续同 session 请求会继续复用这份完整画像；如果又显式声明了冲突画像，会直接报错
 - `keep_alive_key` 会在 `session + keep_alive_scope` 之外再加一层显式业务分桶；`keep_alive_max_idle` 用懒清理限制空闲窗口，`keep_alive_max_uses` 限制单个 entry 的复用次数，`keep_alive_on_error` 决定浏览器错误后是保留还是重置当前 entry
-- `device_profile.fingerprint` 负责 `user_agent / locale / timezone / accept-language / languages / platform / device_memory` 这组身份画像；缺失字段会按当前 `engine` 与稳定默认值补齐
+- `device_profile.fingerprint` 负责 `user_agent / locale / timezone / accept-language / languages / platform / mobile / device_memory` 这组身份画像；缺失字段会按当前 `engine` 与稳定默认值补齐
+- 如果显式声明 `device_profile.fingerprint.mobile = true`，下载器会切到移动端默认画像，并同步带上更贴近移动端的默认 viewport / touch hints
 - `device_profile.screen` 负责 `viewport / screen / avail` 三组尺寸，以及 `color_depth / pixel_depth / device_scale_factor`；缺失尺寸会按组合规则推导，明显冲突会显式失败
 - user data dir、临时 profile 目录与会话锁这条路径已经改成 async runtime 更友好的实现，不再依赖明显的同步文件 I/O 热路径
 

@@ -402,7 +402,8 @@ mod tests {
                             .with_locale("en-US")
                             .with_timezone("America/New_York")
                             .with_accept_language("en-US,en;q=0.9")
-                            .with_languages(["en-US", "en"]),
+                            .with_languages(["en-US", "en"])
+                            .with_mobile(true),
                     ),
                 ),
         );
@@ -425,6 +426,15 @@ mod tests {
                 .and_then(|profile| profile.fingerprint.as_ref())
                 .and_then(|fingerprint| fingerprint.locale.as_deref()),
             Some("en-US")
+        );
+        assert_eq!(
+            request
+                .browser
+                .as_ref()
+                .and_then(|config| config.device_profile.as_ref())
+                .and_then(|profile| profile.fingerprint.as_ref())
+                .and_then(|fingerprint| fingerprint.mobile),
+            Some(true)
         );
     }
 
@@ -525,7 +535,8 @@ mod tests {
                                     .with_locale("zh-CN")
                                     .with_timezone("Asia/Shanghai")
                                     .with_accept_language("zh-CN,zh;q=0.9,en;q=0.8")
-                                    .with_languages(["zh-CN", "zh", "en"]),
+                                    .with_languages(["zh-CN", "zh", "en"])
+                                    .with_mobile(true),
                             )
                             .with_screen(
                                 ScreenProfile::new()
@@ -598,6 +609,15 @@ mod tests {
                 .and_then(|profile| profile.fingerprint.as_ref())
                 .and_then(|profile| profile.timezone.as_deref()),
             Some("Asia/Shanghai")
+        );
+        assert_eq!(
+            decoded
+                .browser
+                .as_ref()
+                .and_then(|config| config.device_profile.as_ref())
+                .and_then(|profile| profile.fingerprint.as_ref())
+                .and_then(|profile| profile.mobile),
+            Some(true)
         );
         assert_eq!(
             decoded

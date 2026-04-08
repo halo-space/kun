@@ -893,4 +893,44 @@ mod tests {
         ));
         assert!(request.browser.is_none());
     }
+
+    #[test]
+    fn dsl_browser_config_can_compile_mobile_fingerprint_profile() {
+        let compiled = crate::rules::compile::compile_rules(Value::from(json!({
+            "steps": [
+                {
+                    "id": "mobile",
+                    "fetch": {
+                        "mode": "browser",
+                        "browser": {
+                            "stealth": true,
+                            "device_profile": {
+                                "fingerprint": {
+                                    "mobile": true,
+                                    "locale": "en-US"
+                                }
+                            }
+                        }
+                    },
+                    "parse": {}
+                }
+            ]
+        })))
+        .expect("rules should compile");
+
+        let browser = compiled
+            .steps
+            .first()
+            .and_then(|step| step.fetch.browser.as_ref())
+            .expect("browser config should exist");
+        let fingerprint = browser
+            .device_profile
+            .as_ref()
+            .and_then(|profile| profile.fingerprint.as_ref())
+            .expect("fingerprint profile should exist");
+
+        assert!(browser.stealth);
+        assert_eq!(fingerprint.mobile, Some(true));
+        assert_eq!(fingerprint.locale.as_deref(), Some("en-US"));
+    }
 }
