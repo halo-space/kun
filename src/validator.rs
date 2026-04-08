@@ -63,6 +63,8 @@ impl TryFrom<&str> for ValidationType {
     }
 }
 
+pub use ValidationType as Type;
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ValidationRule {
     pub required: bool,
@@ -99,6 +101,8 @@ impl ValidationTransform {
         }
     }
 }
+
+pub use ValidationTransform as Transform;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValidationConditionKind {
@@ -206,6 +210,27 @@ pub struct Validation {
     pub rule: ValidationRule,
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Config {
+    pub validations: Vec<Validation>,
+}
+
+impl Config {
+    pub fn new(validations: impl IntoIterator<Item = Validation>) -> Self {
+        Self {
+            validations: validations.into_iter().collect(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.validations.is_empty()
+    }
+}
+
+pub fn rule(field: impl Into<String>, value_type: Type) -> Validation {
+    Validation::new(field, value_type)
+}
+
 impl Validation {
     pub fn root() -> Self {
         Self::new("", ValidationType::Object)
@@ -227,6 +252,10 @@ impl Validation {
     pub fn with_transform(mut self, transform: ValidationTransform) -> Self {
         self.transforms.push(transform);
         self
+    }
+
+    pub fn transform(self, transform: Transform) -> Self {
+        self.with_transform(transform)
     }
 
     pub fn with_transforms(
@@ -360,6 +389,14 @@ impl Validation {
         self
     }
 
+    pub fn required(self) -> Self {
+        self.with_required(true)
+    }
+
+    pub fn optional(self) -> Self {
+        self.with_required(false)
+    }
+
     pub fn with_regex(mut self, pattern: impl Into<String>) -> Self {
         self.rule.regex = Some(pattern.into());
         self
@@ -485,6 +522,20 @@ impl ValidationReport {
         }
 
         Ok(())
+    }
+
+    pub fn summary(&self) -> String {
+        self.issues
+            .iter()
+            .map(|issue| {
+                if issue.field.is_empty() {
+                    issue.message.clone()
+                } else {
+                    format!("{}: {}", issue.field, issue.message)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
     }
 }
 
@@ -2846,6 +2897,40 @@ mod tests {
             SpiderError::Parse(
                 "validation failed for field meta..title: invalid field path: unexpected `.`; field path segments cannot be empty".to_string()
             )
+        );
+    }
+
+    #[test]
+    fn config_new_collects_rules() {
+        let config = Config::new([
+            rule("title", Type::Text).required(),
+            rule("published_at", Type::Text).transform(Transform::ParseDatetime),
+        ]);
+
+        assert_eq!(config.validations.len(), 2);
+        assert!(!config.is_empty());
+        assert_eq!(config.validations[0].field, "title");
+        assert_eq!(config.validations[1].field, "published_at");
+    }
+
+    #[test]
+    fn validation_report_summary_joins_issue_messages() {
+        let report = ValidationReport {
+            issues: vec![
+                ValidationIssue {
+                    field: "title".to_string(),
+                    message: "value is required".to_string(),
+                },
+                ValidationIssue {
+                    field: "published_at".to_string(),
+                    message: "transform parse_datetime failed: invalid format".to_string(),
+                },
+            ],
+        };
+
+        assert_eq!(
+            report.summary(),
+            "title: value is required; published_at: transform parse_datetime failed: invalid format"
         );
     }
 }

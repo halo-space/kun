@@ -8,6 +8,7 @@ use crate::response::Response;
 use crate::rules::Compiled;
 use crate::scheduler::{Scheduler, Task, TaskId, TaskLease};
 use crate::spider::{Failure, Output as SpiderOutput, Spider};
+use crate::validator::validate_item_report;
 use std::sync::Arc;
 
 pub(super) async fn enqueue_request<S, D>(
@@ -417,13 +418,34 @@ where
     async fn process_spider_output(
         self,
         mut output: SpiderOutput,
+        task_id: &TaskId,
         request: &Request,
         response: Option<Response>,
     ) -> TaskOutcome {
+        let validator = self.spider.validator();
         let mut kept_items = Vec::with_capacity(output.items.len());
         for mut item in output.items.drain(..) {
             match self.pipeline.process(&mut item, self.spider_name).await {
                 Ok(true) => {
+                    if let Some(config) = validator.as_ref().filter(|config| !config.is_empty()) {
+                        let report = validate_item_report(&item, &config.validations);
+                        if report.is_err() {
+                            crate::trace::warn(
+                                "validator.drop",
+                                vec![
+                                    crate::trace::prop("stage", "validator"),
+                                    crate::trace::prop("event", "drop"),
+                                    crate::trace::prop("reason", "validation_failed"),
+                                    crate::trace::prop("spider", self.spider_name),
+                                    crate::trace::prop("url", request.url.as_str()),
+                                    crate::trace::prop("task_id", task_id.as_str()),
+                                    crate::trace::prop("issues", report.issues.len()),
+                                    crate::trace::prop("summary", report.summary()),
+                                ],
+                            );
+                            continue;
+                        }
+                    }
                     kept_items.push(item);
                 }
                 Ok(false) => {
@@ -502,8 +524,13 @@ where
 
         match self.spider.handle_error(&errback.name, &failure).await {
             Ok(output) => {
-                self.process_spider_output(output, &context.request, context.response.clone())
-                    .await
+                self.process_spider_output(
+                    output,
+                    &context.task_id,
+                    &context.request,
+                    context.response.clone(),
+                )
+                .await
             }
             Err(errback_error) => {
                 self.error_outcome_from_context(context, errback_error)
@@ -739,8 +766,13 @@ where
                     Err(error) => return self.error_outcome_from_context(&context, error).await,
                 }
 
-                self.process_spider_output(output, &context.request, context.response.clone())
-                    .await
+                self.process_spider_output(
+                    output,
+                    &context.task_id,
+                    &context.request,
+                    context.response.clone(),
+                )
+                .await
             }
             Err(error) => {
                 crate::trace::error(

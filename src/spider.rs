@@ -175,6 +175,10 @@ pub trait Spider: Send + Sync {
         None
     }
 
+    fn validator(&self) -> Option<crate::validator::Config> {
+        None
+    }
+
     async fn parse(&self, _response: &Response) -> Result<Output, SpiderError> {
         Ok(Output::empty())
     }

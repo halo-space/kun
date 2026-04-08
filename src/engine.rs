@@ -1527,6 +1527,7 @@ mod tests {
     use crate::stats::{Event as StatsEvent, Reporter as StatsReporter};
     use crate::store::Memory as MemoryStore;
     use crate::test_support::redis::spawn_redis_server;
+    use crate::validator;
     use crate::value::Value;
     use jiff::SignedDuration;
     use serde_json::json;
@@ -2383,6 +2384,70 @@ mod tests {
                 request_count: 1,
                 response_count: 1,
                 pipeline_drop_count: 1,
+                scheduler_claim_count: 1,
+                scheduler_complete_count: 1,
+                ..StatsSnapshot::default()
+            }
+        );
+    }
+
+    #[test]
+    fn engine_validator_drops_invalid_items_before_store() {
+        let scheduler = Memory::default();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/item")))).unwrap();
+
+        let store = MemoryStore::default();
+        let mut engine = Engine::from_parts(scheduler, StubHttp, StubBrowser)
+            .with_pipeline(PassPipeline)
+            .with_store(store.clone());
+        let mut step_chains = BTreeMap::new();
+
+        let output = block_on(engine.execute_spider_once(
+            &InvalidValidatedItemSpider,
+            None,
+            &mut step_chains,
+        ))
+        .unwrap()
+        .unwrap();
+
+        assert!(output.items.is_empty());
+        assert!(store.items().is_empty());
+        assert_eq!(
+            engine.stats(),
+            StatsSnapshot {
+                request_count: 1,
+                response_count: 1,
+                scheduler_claim_count: 1,
+                scheduler_complete_count: 1,
+                ..StatsSnapshot::default()
+            }
+        );
+    }
+
+    #[test]
+    fn engine_validator_allows_valid_items_into_store() {
+        let scheduler = Memory::default();
+        block_on(scheduler.enqueue(Task::new(Request::new("https://example.com/item")))).unwrap();
+
+        let store = MemoryStore::default();
+        let mut engine = Engine::from_parts(scheduler, StubHttp, StubBrowser)
+            .with_pipeline(PassPipeline)
+            .with_store(store.clone());
+        let mut step_chains = BTreeMap::new();
+
+        let output =
+            block_on(engine.execute_spider_once(&ValidatedItemSpider, None, &mut step_chains))
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(output.items.len(), 1);
+        assert_eq!(store.items(), output.items);
+        assert_eq!(
+            engine.stats(),
+            StatsSnapshot {
+                request_count: 1,
+                response_count: 1,
+                item_count: 1,
                 scheduler_claim_count: 1,
                 scheduler_complete_count: 1,
                 ..StatsSnapshot::default()
@@ -3730,6 +3795,65 @@ mod tests {
             Ok(SpiderOutput {
                 items: vec![
                     crate::item::Item::new().with_field("title", Value::String("post".to_string())),
+                ],
+                requests: Vec::new(),
+            })
+        }
+    }
+
+    struct ValidatedItemSpider;
+
+    impl Spider for ValidatedItemSpider {
+        fn name(&self) -> &str {
+            "validated_item_spider"
+        }
+
+        fn validator(&self) -> Option<validator::Config> {
+            Some(validator::Config::new([
+                validator::rule("title", validator::Type::Text).required(),
+                validator::rule("published_at", validator::Type::Text)
+                    .transform(validator::Transform::ParseDatetime)
+                    .required(),
+            ]))
+        }
+
+        async fn parse(&self, _response: &Response) -> Result<SpiderOutput, SpiderError> {
+            Ok(SpiderOutput {
+                items: vec![
+                    crate::item::Item::new()
+                        .with_field("title", Value::String("post".to_string()))
+                        .with_field(
+                            "published_at",
+                            Value::String("2026-04-08 10:00:00".to_string()),
+                        ),
+                ],
+                requests: Vec::new(),
+            })
+        }
+    }
+
+    struct InvalidValidatedItemSpider;
+
+    impl Spider for InvalidValidatedItemSpider {
+        fn name(&self) -> &str {
+            "invalid_validated_item_spider"
+        }
+
+        fn validator(&self) -> Option<validator::Config> {
+            Some(validator::Config::new([
+                validator::rule("title", validator::Type::Text).required(),
+                validator::rule("published_at", validator::Type::Text)
+                    .transform(validator::Transform::ParseDatetime)
+                    .required(),
+            ]))
+        }
+
+        async fn parse(&self, _response: &Response) -> Result<SpiderOutput, SpiderError> {
+            Ok(SpiderOutput {
+                items: vec![
+                    crate::item::Item::new()
+                        .with_field("title", Value::String("post".to_string()))
+                        .with_field("published_at", Value::String("not-a-datetime".to_string())),
                 ],
                 requests: Vec::new(),
             })

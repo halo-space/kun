@@ -54,7 +54,6 @@ README 这里只保留总览；模块级细节统一放到 [docs/capabilities.md
 
 - 观测剩余缺口：持久化事件总线聚合层、跨 job 仪表盘/巡检视图，以及更系统的运维自动化。
 - durable scheduler 剩余缺口：后台运维服务层，以及更丰富的 exporter / 自动化接线。
-- validation 剩余缺口：校验失败如何统一映射到 runtime 行为。
 - plugin 自动装载这条线当前仍只自动接 `middleware`；`store`、`scheduler`、`dedup`、`robots`、`http`、`browser` 这些 kind 还没有完成真正的 engine 自动接线。
 - DSL 继续后置；当前它已经共享底层 `Request / parse / scheduler / validation` 模型，但整体能力面仍然没有完全追平代码爬虫主线。
 
@@ -593,7 +592,7 @@ Spider / rules
 
 - `Request` 是统一的执行单元，DSL 生成的请求和代码里手写的请求没有本质区别。
 - `step.fetch.request` / `step.fetch.browser` 现在也是往同一个 `Request` 模型上做显式覆盖：无论是 rules 起始请求，还是 DSL step 继续产出的 follow request，都会先走共享 `Request` / `follow()` 语义，再应用目标 step 的 request 配置。
-- `step.validate` 走共享 validation；DSL step 产出的 item 也还是继续走统一的 `pipeline -> store` 链路。
+- 代码 Spider 现在可以通过 `Spider::validator()` 显式启用共享 validation；item 产出会继续走统一的 `pipeline -> validator -> store` 链路。
 - `meta` 是请求级上下文参数，用来携带当前请求和后续链路需要透传的数据；它的角色类似 Scrapy 的 `Request.meta`。
 - `Response.body` 保留原始响应字节，`Response.text` 是从 `body` 派生出的解码文本；当前优先使用 BOM、`Content-Type charset` 与文档内编码声明，再回退到统计型 apparent encoding 猜测，最后才使用 UTF-8 lossy。
 - `dedup`、`schedule`、`retry` 等能力属于 `kun` 框架本身的爬虫能力，DSL 只是这些能力的配置化表达，不应实现成一套独立于代码爬虫的专用流程。

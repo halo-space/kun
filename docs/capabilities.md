@@ -17,7 +17,6 @@ README 负责总览，这里负责把每个模块现在到底能做什么、还�
 
 - 观测主链路已经基本具备：`stats`、`signals / extensions`、`trace`、`telemetry` exporter 都已接通；当前真正还缺的是更完整的持久化事件总线聚合层、跨 job 运维自动化，以及更高阶的统一看板/巡检视图
 - durable scheduler 的基础语义已经基本收口：ownership、heartbeat、stale reclaim、batch、snapshot/overview、统一 `Control`、显式提交边界都已经有；当前剩余重点主要是更强的分布式协调后端和更完整的后台运维服务层
-- validation 本身已经不弱；当前更缺的是“校验失败后如何统一映射到 runtime 行为”这层策略
 - plugin 自动装载与 DSL 对齐仍明显落后于底层 runtime 能力
 
 ## Request
@@ -1007,8 +1006,10 @@ let section_html = response.xpath("//section[@id='content']").html().one();
 
 `validate` 是底层共享能力，不应该只存在于 DSL 配置里。
 
-- 当前已经有共享 `Validation` / `ValidationRule` 结构
-- DSL 可以编译到这套共享 validation 定义
+- 当前已经有共享 `validator::Config`、`validator::rule(...)`、`validator::Type` / `validator::Transform` 这套入口，底层仍然复用同一份 validation 模型
+- 代码 Spider 现在可以通过 `Spider::validator() -> Option<validator::Config>` 显式启用这套校验
+- 如果配置了 `validator()`，engine 会在 `pipeline -> validator -> store` 这条链路里执行校验；没有配置就直接跳过
+- validator 失败时当前统一记 `stage=validator` 日志，并丢弃当前 item；不会进入 `store`，也不会触发重试或把整个 task 判失败
 - 代码爬虫现在已经可以直接调用 `validator::validate_fields()` / `validator::validate_item()`，也可以用 `validator::validate_fields_report()` / `validator::validate_item_report()` 收集多条错误
 - validation 是显式启用的：只有传入的 `Validation` 会执行；没有配置规则的字段不会被默认校验，字段缺失时也只有 `required` 才报错，其它规则会直接跳过
 - `Validation.field` 现在已经支持最小字段路径：`meta.title`、`authors[0].name`、`tags[]`、`articles[].title`
@@ -1020,7 +1021,7 @@ let section_html = response.xpath("//section[@id='content']").html().one();
 - 当前也支持 `ValidationTransform` 链式转换后再校验：
   - 文本规范化：`Trim`、`NormalizeWhitespace`
   - 标量转换：`ParseNumber`、`ParseBool`、`ParseDatetime`
-  - 典型用法是先把抓取出来的字符串值收口，再按最终 `ValidationType` 与规则继续校验
+- 典型用法是先把抓取出来的字符串值收口，再按最终 `validator::Type` 与规则继续校验
 - 当前也支持嵌套子规则：
   - `with_object_validations([...])`：对对象值内部字段继续做相对路径校验
   - `with_each_validations([...])`：对列表中的每个成员继续做相对路径或根值校验
@@ -1040,9 +1041,7 @@ let section_html = response.xpath("//section[@id='content']").html().one();
   - 多个条件当前按 `AND` 语义组合；条件路径也走同一套字段路径解析，并且在嵌套对象/列表作用域里按相对路径解析
   - 典型场景是 “`type == video` 时 `duration` 必填” 或 “某个伴随字段缺失时才要求另一字段出现”
 
-这块后续还会继续补更高阶的运行时失败策略映射，以及更复杂的跨字段派生条件。
-
-这部分的设计目标是：先把 validation 做成代码可直接调用的底层能力，再映射到 DSL。
+这部分的设计目标是：先把 validation 的底层模型和代码 Spider runtime 契约收口，再在 DSL 配置面上做映射。
 
 ## Plugins
 
@@ -1062,9 +1061,9 @@ let section_html = response.xpath("//section[@id='content']").html().one();
 - 不是另一套运行时
 - 不是重新发明一套调度、重试、去重、输出机制
 - 而是把代码爬虫已有的底层能力配置化
-- `validate` 走共享 validation
+- `validate` 继续走共享 validation 模型
 - `fetch.request` / `fetch.browser` 走共享 `Request`
-- item 输出继续走统一 `pipeline -> store`
+- 代码 Spider 的 item 输出当前走统一 `pipeline -> validator -> store`
 
 也就是说，正确方向应该是：
 
