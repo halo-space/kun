@@ -54,7 +54,7 @@ README 这里只保留总览；模块级细节统一放到 [docs/capabilities.md
 
 - 观测剩余缺口：持久化事件总线聚合层、跨 job 仪表盘/巡检视图，以及更系统的运维自动化。
 - durable scheduler 剩余缺口：后台运维服务层，以及更丰富的 exporter / 自动化接线。
-- browser 剩余缺口：更高阶品牌级伪装，以及更完整的内置 stealth / client hints 画像能力。
+- browser 剩余缺口：更高阶品牌级伪装，以及更多 client hints / 指纹字段扩展能力。
 - validation 剩余缺口：校验失败如何统一映射到 runtime 行为。
 - plugin 自动装载这条线当前仍只自动接 `middleware`；`store`、`scheduler`、`dedup`、`robots`、`http`、`browser` 这些 kind 还没有完成真正的 engine 自动接线。
 - DSL 继续后置；当前它已经共享底层 `Request / parse / scheduler / validation` 模型，但整体能力面仍然没有完全追平代码爬虫主线。
@@ -674,9 +674,10 @@ browser 执行路径，`ip_address` 与 `certificate` 由于 Playwright 当前�
 - `stealth_script` 可以把外部 stealth JS 叠加到内置 bootstrap 后面；如果只想注入外部脚本，也可以不打开 `stealth = true`
 - 这组默认画像和 stealth 现在已经会跟随 `engine` 切到 Chromium / Firefox / WebKit 对应的浏览器族，但仍然不追求更高阶的品牌级伪装能力
 
-当前仍未实现、并且会继续显式报错的能力：
+当前仍未实现、并且会继续显式报错或保留空白的能力：
 
-- 更高阶浏览器指纹伪装能力
+- 更高阶品牌级浏览器指纹伪装能力
+- 更多 client hints / 指纹字段扩展能力
 
 如果当前构建没有启用 `browser` feature，browser request 会直接返回显式错误，不会再返回 stub response。
 
