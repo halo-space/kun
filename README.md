@@ -52,8 +52,7 @@ README 这里只保留总览；模块级细节统一放到 [docs/capabilities.md
 
 当前仍待补齐的底层能力：
 
-- 观测剩余缺口：持久化事件总线聚合层、跨 job 仪表盘/巡检视图，以及更系统的运维自动化。
-- durable scheduler 剩余缺口：后台运维服务层，以及更丰富的 exporter / 自动化接线。
+- 观测 / 运维剩余缺口：持久化事件总线聚合层、跨 job 仪表盘 / 巡检视图，以及 durable scheduler 的后台守护式运维服务。
 - plugin 自动装载这条线当前仍只自动接 `middleware`；`store`、`scheduler`、`dedup`、`robots`、`http`、`browser` 这些 kind 还没有完成真正的 engine 自动接线。
 - DSL 继续后置；当前它已经共享底层 `Request / parse / scheduler / validation` 模型，但整体能力面仍然没有完全追平代码爬虫主线。
 
