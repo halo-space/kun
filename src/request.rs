@@ -354,8 +354,8 @@ mod option_signed_duration_millis {
 mod tests {
     use super::*;
     use crate::request::browser::{
-        DeviceProfile, Driver, Engine, FingerprintProfile, KeepAlive, KeepAliveScope,
-        ScreenProfile, Size,
+        ClientHintsProfile, DeviceProfile, Driver, Engine, FingerprintProfile, KeepAlive,
+        KeepAliveScope, ScreenProfile, Size,
     };
     use crate::value::Value;
     use jiff::SignedDuration;
@@ -403,7 +403,12 @@ mod tests {
                             .with_timezone("America/New_York")
                             .with_accept_language("en-US,en;q=0.9")
                             .with_languages(["en-US", "en"])
-                            .with_mobile(true),
+                            .with_mobile(true)
+                            .with_client_hints(
+                                ClientHintsProfile::new()
+                                    .with_architecture("arm")
+                                    .with_platform_version("14.0.0"),
+                            ),
                     ),
                 ),
         );
@@ -435,6 +440,16 @@ mod tests {
                 .and_then(|profile| profile.fingerprint.as_ref())
                 .and_then(|fingerprint| fingerprint.mobile),
             Some(true)
+        );
+        assert_eq!(
+            request
+                .browser
+                .as_ref()
+                .and_then(|config| config.device_profile.as_ref())
+                .and_then(|profile| profile.fingerprint.as_ref())
+                .and_then(|fingerprint| fingerprint.client_hints.as_ref())
+                .and_then(|client_hints| client_hints.architecture.as_deref()),
+            Some("arm")
         );
     }
 
@@ -536,7 +551,13 @@ mod tests {
                                     .with_timezone("Asia/Shanghai")
                                     .with_accept_language("zh-CN,zh;q=0.9,en;q=0.8")
                                     .with_languages(["zh-CN", "zh", "en"])
-                                    .with_mobile(true),
+                                    .with_mobile(true)
+                                    .with_client_hints(
+                                        ClientHintsProfile::new()
+                                            .with_architecture("arm")
+                                            .with_platform_version("14.0.0")
+                                            .with_ua_full_version("136.0.0.0"),
+                                    ),
                             )
                             .with_screen(
                                 ScreenProfile::new()
@@ -618,6 +639,16 @@ mod tests {
                 .and_then(|profile| profile.fingerprint.as_ref())
                 .and_then(|profile| profile.mobile),
             Some(true)
+        );
+        assert_eq!(
+            decoded
+                .browser
+                .as_ref()
+                .and_then(|config| config.device_profile.as_ref())
+                .and_then(|profile| profile.fingerprint.as_ref())
+                .and_then(|profile| profile.client_hints.as_ref())
+                .and_then(|client_hints| client_hints.ua_full_version.as_deref()),
+            Some("136.0.0.0")
         );
         assert_eq!(
             decoded

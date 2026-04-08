@@ -7,8 +7,8 @@ use crate::request::browser::KeepAliveOnError;
 #[cfg(any(feature = "browser", test))]
 use crate::request::browser::KeepAliveScope;
 use crate::request::browser::{
-    Config as BrowserConfig, Engine as BrowserEngine, FingerprintProfile, KeepAlive, ScreenProfile,
-    Size,
+    ClientHintsProfile, Config as BrowserConfig, Engine as BrowserEngine, FingerprintProfile,
+    KeepAlive, ScreenProfile, Size,
 };
 use crate::request::{Request, RequestMode};
 use crate::response::Response;
@@ -172,6 +172,7 @@ fn validate_fingerprint_profile(profile: &FingerprintProfile) -> Result<(), Spid
         profile.accept_language.as_deref(),
     )?;
     validate_optional_non_empty_browser_profile_field("platform", profile.platform.as_deref())?;
+    validate_client_hints_profile(profile.client_hints.as_ref())?;
 
     if let Some(languages) = profile.languages.as_ref() {
         if languages.is_empty() {
@@ -247,6 +248,35 @@ fn validate_optional_non_empty_browser_profile_field(
     Ok(())
 }
 
+fn validate_client_hints_profile(profile: Option<&ClientHintsProfile>) -> Result<(), SpiderError> {
+    let Some(profile) = profile else {
+        return Ok(());
+    };
+
+    validate_optional_non_empty_browser_profile_field(
+        "client_hints.architecture",
+        profile.architecture.as_deref(),
+    )?;
+    validate_optional_non_empty_browser_profile_field(
+        "client_hints.bitness",
+        profile.bitness.as_deref(),
+    )?;
+    validate_optional_non_empty_browser_profile_field(
+        "client_hints.model",
+        profile.model.as_deref(),
+    )?;
+    validate_optional_non_empty_browser_profile_field(
+        "client_hints.platform_version",
+        profile.platform_version.as_deref(),
+    )?;
+    validate_optional_non_empty_browser_profile_field(
+        "client_hints.ua_full_version",
+        profile.ua_full_version.as_deref(),
+    )?;
+
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct BuiltinBrowserFingerprintDefaults {
     user_agent: &'static str,
@@ -260,6 +290,15 @@ struct BuiltinBrowserFingerprintDefaults {
     hardware_concurrency: u8,
     device_memory: u8,
     max_touch_points: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BuiltinBrowserClientHintsDefaults {
+    architecture: &'static str,
+    bitness: &'static str,
+    model: &'static str,
+    platform_version: &'static str,
+    ua_full_version: &'static str,
 }
 
 fn builtin_browser_fingerprint_defaults(
@@ -348,6 +387,66 @@ fn builtin_browser_fingerprint_defaults(
     }
 }
 
+fn builtin_browser_client_hints_defaults(
+    engine: BrowserEngine,
+    mobile: bool,
+) -> BuiltinBrowserClientHintsDefaults {
+    match (engine, mobile) {
+        (BrowserEngine::Chromium, false) => BuiltinBrowserClientHintsDefaults {
+            architecture: "x86",
+            bitness: "64",
+            model: "",
+            platform_version: "10.0.0",
+            ua_full_version: "136.0.0.0",
+        },
+        (BrowserEngine::Chromium, true) => BuiltinBrowserClientHintsDefaults {
+            architecture: "arm",
+            bitness: "64",
+            model: "Pixel 7",
+            platform_version: "14.0.0",
+            ua_full_version: "136.0.0.0",
+        },
+        (BrowserEngine::Firefox, false) => BuiltinBrowserClientHintsDefaults {
+            architecture: "x86",
+            bitness: "64",
+            model: "",
+            platform_version: "10.0.0",
+            ua_full_version: "137.0",
+        },
+        (BrowserEngine::Firefox, true) => BuiltinBrowserClientHintsDefaults {
+            architecture: "arm",
+            bitness: "64",
+            model: "",
+            platform_version: "14.0.0",
+            ua_full_version: "137.0",
+        },
+        (BrowserEngine::Webkit, false) => BuiltinBrowserClientHintsDefaults {
+            architecture: "x86",
+            bitness: "64",
+            model: "",
+            platform_version: "14.4.0",
+            ua_full_version: "17.4.0",
+        },
+        (BrowserEngine::Webkit, true) => BuiltinBrowserClientHintsDefaults {
+            architecture: "arm",
+            bitness: "64",
+            model: "iPhone",
+            platform_version: "17.4.0",
+            ua_full_version: "17.4.0",
+        },
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct BrowserResolvedClientHintsProfile {
+    platform: String,
+    architecture: String,
+    bitness: String,
+    model: String,
+    platform_version: String,
+    ua_full_version: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct BrowserResolvedFingerprintProfile {
     user_agent: String,
@@ -357,6 +456,7 @@ struct BrowserResolvedFingerprintProfile {
     languages: Vec<String>,
     platform: String,
     mobile: bool,
+    client_hints: BrowserResolvedClientHintsProfile,
     vendor: String,
     hardware_concurrency: u8,
     device_memory: u8,
@@ -475,6 +575,14 @@ fn resolve_fingerprint_profile(
 
     let requested_mobile = profile.and_then(|profile| profile.mobile).unwrap_or(false);
     let defaults = builtin_browser_fingerprint_defaults(engine, requested_mobile);
+    let client_hints_defaults = builtin_browser_client_hints_defaults(engine, requested_mobile);
+    let platform = profile
+        .and_then(|profile| profile.platform.clone())
+        .unwrap_or_else(|| defaults.platform.to_string());
+    let mobile = profile
+        .and_then(|profile| profile.mobile)
+        .unwrap_or(defaults.mobile);
+    let client_hints = profile.and_then(|profile| profile.client_hints.as_ref());
 
     Ok(BrowserResolvedFingerprintProfile {
         user_agent: profile
@@ -498,12 +606,26 @@ fn resolve_fingerprint_profile(
                     .map(|value| value.to_string())
                     .collect()
             }),
-        platform: profile
-            .and_then(|profile| profile.platform.clone())
-            .unwrap_or_else(|| defaults.platform.to_string()),
-        mobile: profile
-            .and_then(|profile| profile.mobile)
-            .unwrap_or(defaults.mobile),
+        platform: platform.clone(),
+        mobile,
+        client_hints: BrowserResolvedClientHintsProfile {
+            platform: derive_client_hints_platform(&platform, mobile),
+            architecture: client_hints
+                .and_then(|profile| profile.architecture.clone())
+                .unwrap_or_else(|| client_hints_defaults.architecture.to_string()),
+            bitness: client_hints
+                .and_then(|profile| profile.bitness.clone())
+                .unwrap_or_else(|| client_hints_defaults.bitness.to_string()),
+            model: client_hints
+                .and_then(|profile| profile.model.clone())
+                .unwrap_or_else(|| client_hints_defaults.model.to_string()),
+            platform_version: client_hints
+                .and_then(|profile| profile.platform_version.clone())
+                .unwrap_or_else(|| client_hints_defaults.platform_version.to_string()),
+            ua_full_version: client_hints
+                .and_then(|profile| profile.ua_full_version.clone())
+                .unwrap_or_else(|| client_hints_defaults.ua_full_version.to_string()),
+        },
         vendor: defaults.vendor.to_string(),
         hardware_concurrency: defaults.hardware_concurrency,
         device_memory: profile
@@ -511,6 +633,28 @@ fn resolve_fingerprint_profile(
             .unwrap_or(defaults.device_memory),
         max_touch_points: defaults.max_touch_points,
     })
+}
+
+fn derive_client_hints_platform(platform: &str, mobile: bool) -> String {
+    let normalized = platform.to_ascii_lowercase();
+
+    if normalized.contains("iphone") || normalized.contains("ipad") || normalized.contains("ios") {
+        return "iOS".to_string();
+    }
+    if normalized.contains("android") || (mobile && normalized.contains("linux")) {
+        return "Android".to_string();
+    }
+    if normalized.contains("mac") {
+        return "macOS".to_string();
+    }
+    if normalized.contains("win") {
+        return "Windows".to_string();
+    }
+    if normalized.contains("linux") {
+        return "Linux".to_string();
+    }
+
+    platform.to_string()
 }
 
 fn resolve_device_profile(
@@ -603,13 +747,22 @@ fn build_browser_init_script(
         .unwrap_or_else(|| "en-US".to_string());
     let languages_json = json!(fingerprint.languages).to_string();
     let language_json = json!(language).to_string();
-    let platform_json = json!(fingerprint.platform).to_string();
+    let navigator_platform_json = json!(fingerprint.platform).to_string();
     let mobile_json = json!(fingerprint.mobile).to_string();
     let vendor_json = json!(fingerprint.vendor).to_string();
     let hardware_concurrency_json = json!(fingerprint.hardware_concurrency).to_string();
     let device_memory_json = json!(fingerprint.device_memory).to_string();
     let max_touch_points_json = json!(fingerprint.max_touch_points).to_string();
-    let architecture_json = json!(if fingerprint.mobile { "arm" } else { "x86" }).to_string();
+    let client_hints_platform_json = json!(fingerprint.client_hints.platform).to_string();
+    let architecture_json = json!(fingerprint.client_hints.architecture).to_string();
+    let bitness_json = json!(fingerprint.client_hints.bitness).to_string();
+    let model_json = json!(fingerprint.client_hints.model).to_string();
+    let platform_version_json = json!(fingerprint.client_hints.platform_version).to_string();
+    let ua_full_version_json = json!(fingerprint.client_hints.ua_full_version).to_string();
+    let chromium_brand_version_json = json!(chromium_brand_version(
+        &fingerprint.client_hints.ua_full_version
+    ))
+    .to_string();
     let screen_width_json = json!(screen.screen.width).to_string();
     let screen_height_json = json!(screen.screen.height).to_string();
     let avail_width_json = json!(screen.avail.width).to_string();
@@ -634,7 +787,7 @@ fn build_browser_init_script(
             "Object.defineProperty(navigator, 'language', {{ get: () => {language_json}, configurable: true }});"
         ));
         lines.push(format!(
-            "Object.defineProperty(navigator, 'platform', {{ get: () => {platform_json}, configurable: true }});"
+            "Object.defineProperty(navigator, 'platform', {{ get: () => {navigator_platform_json}, configurable: true }});"
         ));
         lines.push(format!(
             "Object.defineProperty(navigator, 'vendor', {{ get: () => {vendor_json}, configurable: true }});"
@@ -710,7 +863,7 @@ fn build_browser_init_script(
                     .to_string(),
             );
             lines.push(format!(
-                "Object.defineProperty(navigator, 'userAgentData', {{ get: () => ({{ brands: [{{ brand: 'Chromium', version: '136' }}, {{ brand: 'Not.A/Brand', version: '24' }}], mobile: {mobile_json}, platform: {platform_json}, getHighEntropyValues: async () => ({{ architecture: {architecture_json}, bitness: '64', model: '', platform: {platform_json}, platformVersion: '10.0.0', uaFullVersion: '136.0.0.0' }}) }}), configurable: true }});"
+                "Object.defineProperty(navigator, 'userAgentData', {{ get: () => ({{ brands: [{{ brand: 'Chromium', version: {chromium_brand_version_json} }}, {{ brand: 'Not.A/Brand', version: '24' }}], mobile: {mobile_json}, platform: {client_hints_platform_json}, getHighEntropyValues: async () => ({{ architecture: {architecture_json}, bitness: {bitness_json}, model: {model_json}, platform: {client_hints_platform_json}, platformVersion: {platform_version_json}, uaFullVersion: {ua_full_version_json} }}) }}), configurable: true }});"
             ));
         }
     }
@@ -722,6 +875,15 @@ fn build_browser_init_script(
     sections.extend(config.stealth_scripts.iter().cloned());
 
     Some(sections.join("\n"))
+}
+
+#[cfg(any(feature = "browser", test))]
+fn chromium_brand_version(ua_full_version: &str) -> String {
+    ua_full_version
+        .split('.')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or("136")
+        .to_string()
 }
 
 #[cfg(any(feature = "browser", test))]
@@ -1820,8 +1982,8 @@ mod tests {
     use super::*;
     use crate::download::traits::Downloader;
     use crate::request::browser::{
-        Config as BrowserConfig, DeviceProfile, Engine as BrowserEngine, FingerprintProfile,
-        KeepAlive, KeepAliveOnError, KeepAliveScope, ScreenProfile, Size,
+        ClientHintsProfile, Config as BrowserConfig, DeviceProfile, Engine as BrowserEngine,
+        FingerprintProfile, KeepAlive, KeepAliveOnError, KeepAliveScope, ScreenProfile, Size,
     };
     use jiff::SignedDuration;
     use std::sync::Arc;
@@ -2254,6 +2416,34 @@ mod tests {
     }
 
     #[test]
+    fn browser_request_contract_rejects_empty_client_hints_field() {
+        let request = Request::browser("https://example.com").with_browser(
+            BrowserConfig::default().with_device_profile(
+                DeviceProfile::new().with_fingerprint(
+                    FingerprintProfile::new()
+                        .with_client_hints(ClientHintsProfile::new().with_architecture("   ")),
+                ),
+            ),
+        );
+
+        let error = validate_browser_request_contract(
+            &request,
+            request
+                .browser
+                .as_ref()
+                .expect("browser config should exist"),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            SpiderError::download(
+                "browser device_profile.fingerprint.client_hints.architecture must not be empty"
+            )
+        );
+    }
+
+    #[test]
     fn browser_navigation_request_override_is_absent_for_default_get_without_body() {
         let request = Request::browser("https://example.com");
 
@@ -2403,6 +2593,15 @@ mod tests {
         assert_eq!(profile.fingerprint.locale, "zh-CN");
         assert_eq!(profile.fingerprint.timezone, "Asia/Shanghai");
         assert_eq!(profile.fingerprint.languages, vec!["zh-CN", "zh", "en"]);
+        assert_eq!(profile.fingerprint.client_hints.platform, "Windows");
+        assert_eq!(profile.fingerprint.client_hints.architecture, "x86");
+        assert_eq!(profile.fingerprint.client_hints.bitness, "64");
+        assert_eq!(profile.fingerprint.client_hints.model, "");
+        assert_eq!(profile.fingerprint.client_hints.platform_version, "10.0.0");
+        assert_eq!(
+            profile.fingerprint.client_hints.ua_full_version,
+            "136.0.0.0"
+        );
     }
 
     #[test]
@@ -2424,6 +2623,8 @@ mod tests {
         assert_eq!(profile.fingerprint.vendor, "");
         assert_eq!(profile.fingerprint.locale, "en-US");
         assert_eq!(profile.fingerprint.timezone, "America/New_York");
+        assert_eq!(profile.fingerprint.client_hints.platform, "Windows");
+        assert_eq!(profile.fingerprint.client_hints.ua_full_version, "137.0");
     }
 
     #[test]
@@ -2439,6 +2640,7 @@ mod tests {
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
         );
         assert_eq!(profile.fingerprint.vendor, "Google Inc.");
+        assert_eq!(profile.fingerprint.client_hints.platform, "Windows");
         assert_eq!(profile.screen.viewport, Size::new(1280, 720));
     }
 
@@ -2457,8 +2659,45 @@ mod tests {
         assert!(profile.fingerprint.user_agent.contains("Android 14"));
         assert!(profile.fingerprint.user_agent.contains("Mobile"));
         assert_eq!(profile.fingerprint.max_touch_points, 5);
+        assert_eq!(profile.fingerprint.client_hints.platform, "Android");
+        assert_eq!(profile.fingerprint.client_hints.architecture, "arm");
+        assert_eq!(profile.fingerprint.client_hints.model, "Pixel 7");
+        assert_eq!(profile.fingerprint.client_hints.platform_version, "14.0.0");
         assert_eq!(profile.screen.viewport, Size::new(390, 844));
         assert_eq!(profile.screen.device_scale_factor, 3);
+    }
+
+    #[test]
+    fn resolve_device_profile_applies_client_hints_overrides() {
+        let config = BrowserConfig::default().with_device_profile(
+            DeviceProfile::new().with_fingerprint(
+                FingerprintProfile::new()
+                    .with_platform("MacIntel")
+                    .with_client_hints(
+                        ClientHintsProfile::new()
+                            .with_architecture("arm")
+                            .with_bitness("64")
+                            .with_model("MacBookPro18,3")
+                            .with_platform_version("14.4.0")
+                            .with_ua_full_version("137.0.1.2"),
+                    ),
+            ),
+        );
+
+        let profile = resolve_device_profile(&config)
+            .unwrap()
+            .expect("profile should resolve");
+
+        assert_eq!(profile.fingerprint.platform, "MacIntel");
+        assert_eq!(profile.fingerprint.client_hints.platform, "macOS");
+        assert_eq!(profile.fingerprint.client_hints.architecture, "arm");
+        assert_eq!(profile.fingerprint.client_hints.bitness, "64");
+        assert_eq!(profile.fingerprint.client_hints.model, "MacBookPro18,3");
+        assert_eq!(profile.fingerprint.client_hints.platform_version, "14.4.0");
+        assert_eq!(
+            profile.fingerprint.client_hints.ua_full_version,
+            "137.0.1.2"
+        );
     }
 
     #[test]
@@ -2611,6 +2850,8 @@ mod tests {
         assert!(init_script.contains("Object.defineProperty(navigator, 'plugins'"));
         assert!(init_script.contains("navigator.permissions.query"));
         assert!(init_script.contains("window.__thirdPartyStealth = true;"));
+        assert!(init_script.contains("platformVersion: \"10.0.0\""));
+        assert!(init_script.contains("uaFullVersion: \"136.0.0.0\""));
         assert!(
             init_script
                 .find("Object.defineProperty(navigator, 'webdriver'")
@@ -2637,7 +2878,44 @@ mod tests {
 
         assert!(init_script.contains("mobile: true"));
         assert!(init_script.contains("architecture: \"arm\""));
+        assert!(init_script.contains("platform: \"Android\""));
+        assert!(init_script.contains("platformVersion: \"14.0.0\""));
+        assert!(init_script.contains("uaFullVersion: \"136.0.0.0\""));
         assert!(init_script.contains("Object.defineProperty(navigator, 'maxTouchPoints'"));
+    }
+
+    #[test]
+    fn build_browser_init_script_uses_client_hints_overrides_for_chromium() {
+        let config = BrowserConfig::default()
+            .with_stealth(true)
+            .with_device_profile(
+                DeviceProfile::new().with_fingerprint(
+                    FingerprintProfile::new()
+                        .with_platform("MacIntel")
+                        .with_client_hints(
+                            ClientHintsProfile::new()
+                                .with_architecture("arm")
+                                .with_bitness("64")
+                                .with_model("MacBookPro18,3")
+                                .with_platform_version("14.4.0")
+                                .with_ua_full_version("137.0.1.2"),
+                        ),
+                ),
+            );
+
+        let profile = resolve_device_profile(&config)
+            .unwrap()
+            .expect("profile should resolve");
+        let init_script =
+            build_browser_init_script(&config, Some(&profile)).expect("init script should exist");
+
+        assert!(init_script.contains("version: \"137\""));
+        assert!(init_script.contains("platform: \"macOS\""));
+        assert!(init_script.contains("architecture: \"arm\""));
+        assert!(init_script.contains("bitness: \"64\""));
+        assert!(init_script.contains("model: \"MacBookPro18,3\""));
+        assert!(init_script.contains("platformVersion: \"14.4.0\""));
+        assert!(init_script.contains("uaFullVersion: \"137.0.1.2\""));
     }
 
     #[test]

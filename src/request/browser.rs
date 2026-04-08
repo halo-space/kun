@@ -85,6 +85,51 @@ impl Size {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ClientHintsProfile {
+    #[serde(default)]
+    pub architecture: Option<String>,
+    #[serde(default)]
+    pub bitness: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub platform_version: Option<String>,
+    #[serde(default)]
+    pub ua_full_version: Option<String>,
+}
+
+impl ClientHintsProfile {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_architecture(mut self, architecture: impl Into<String>) -> Self {
+        self.architecture = Some(architecture.into());
+        self
+    }
+
+    pub fn with_bitness(mut self, bitness: impl Into<String>) -> Self {
+        self.bitness = Some(bitness.into());
+        self
+    }
+
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
+    }
+
+    pub fn with_platform_version(mut self, platform_version: impl Into<String>) -> Self {
+        self.platform_version = Some(platform_version.into());
+        self
+    }
+
+    pub fn with_ua_full_version(mut self, ua_full_version: impl Into<String>) -> Self {
+        self.ua_full_version = Some(ua_full_version.into());
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct FingerprintProfile {
     #[serde(default)]
     pub user_agent: Option<String>,
@@ -100,6 +145,8 @@ pub struct FingerprintProfile {
     pub platform: Option<String>,
     #[serde(default)]
     pub mobile: Option<bool>,
+    #[serde(default)]
+    pub client_hints: Option<ClientHintsProfile>,
     #[serde(default)]
     pub device_memory: Option<u8>,
 }
@@ -145,6 +192,11 @@ impl FingerprintProfile {
 
     pub fn with_mobile(mut self, mobile: bool) -> Self {
         self.mobile = Some(mobile);
+        self
+    }
+
+    pub fn with_client_hints(mut self, client_hints: ClientHintsProfile) -> Self {
+        self.client_hints = Some(client_hints);
         self
     }
 
@@ -514,6 +566,14 @@ mod tests {
                             .with_languages(["ja-JP", "ja"])
                             .with_platform("MacIntel")
                             .with_mobile(true)
+                            .with_client_hints(
+                                ClientHintsProfile::new()
+                                    .with_architecture("arm")
+                                    .with_bitness("64")
+                                    .with_model("iPhone")
+                                    .with_platform_version("17.4.0")
+                                    .with_ua_full_version("136.0.0.0"),
+                            )
                             .with_device_memory(16),
                     )
                     .with_screen(
@@ -555,6 +615,15 @@ mod tests {
                 .and_then(|profile| profile.fingerprint.as_ref())
                 .and_then(|fingerprint| fingerprint.mobile),
             Some(true)
+        );
+        assert_eq!(
+            config
+                .device_profile
+                .as_ref()
+                .and_then(|profile| profile.fingerprint.as_ref())
+                .and_then(|fingerprint| fingerprint.client_hints.as_ref())
+                .and_then(|client_hints| client_hints.platform_version.as_deref()),
+            Some("17.4.0")
         );
         assert_eq!(
             config

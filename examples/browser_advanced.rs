@@ -31,6 +31,13 @@ fn main() {
                                 .with_accept_language("en-US,en;q=0.9")
                                 .with_languages(["en-US", "en"])
                                 .with_platform("MacIntel")
+                                .with_client_hints(
+                                    browser::ClientHintsProfile::new()
+                                        .with_architecture("arm")
+                                        .with_bitness("64")
+                                        .with_platform_version("14.4.0")
+                                        .with_ua_full_version("136.0.0.0"),
+                                )
                                 .with_device_memory(8),
                         )
                         .with_screen(
