@@ -1683,8 +1683,17 @@ mod tests {
                     .with_lease_timeout(SignedDuration::from_millis(20)),
             );
         let observer_task = async move {
-            tokio::time::sleep(to_std_duration(SignedDuration::from_millis(30)).unwrap()).await;
-            let checkpoint = observer.checkpoint().await.unwrap();
+            let mut checkpoint = observer.checkpoint().await.unwrap();
+            for _ in 0..20 {
+                let has_expected_inflight = checkpoint.ready.is_empty()
+                    && checkpoint.inflight.len() == 1
+                    && checkpoint.inflight[0].request.url == "https://example.com/start";
+                if has_expected_inflight {
+                    break;
+                }
+                tokio::time::sleep(to_std_duration(SignedDuration::from_millis(5)).unwrap()).await;
+                checkpoint = observer.checkpoint().await.unwrap();
+            }
 
             assert!(checkpoint.ready.is_empty());
             assert_eq!(checkpoint.inflight.len(), 1);

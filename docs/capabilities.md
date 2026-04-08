@@ -631,6 +631,7 @@ Engine runtime
 - `telemetry` 适合把 `stats + scheduler runtime` 统一接到 `Collector / File / Prometheus / OpenTelemetry`
 - 这几层不是互斥关系，而是面向不同读者和不同接线位置
 - 如果你什么都不配，engine 仍然能正常运行；只是没有额外日志、导出和监听
+- 如果你更关心“这些数据怎么采、怎么聚合、跨 job 怎么看、运维控制怎么做”，直接看 [operations.md](./operations.md)
 
 最常见的判断方式：
 

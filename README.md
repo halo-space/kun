@@ -7,6 +7,7 @@
 - 库代码位于 `src/`
 - 示例位于 `examples/`
 - 功能说明文档位于 `docs/capabilities.md`
+- 运维 / 观测指南位于 `docs/operations.md`
 - 当前规范源位于 `openspec/specs/`
 - 后续需求、方案、任务统一从 `openspec/changes/` 发起
 - `openspec init` 生成的协作入口位于 `.claude/commands/opsx/` 与 `.codex/skills/`
@@ -14,6 +15,7 @@
 ## 功能说明
 
 按功能模块整理的能力说明见 [docs/capabilities.md](docs/capabilities.md)。
+如果你更关心“数据怎么拿、跨 job 怎么看、pause/release/purge 怎么做”，直接看 [docs/operations.md](docs/operations.md)。
 
 这份文档会集中解释：
 
