@@ -15,7 +15,6 @@ README 负责总览，这里负责把每个模块现在到底能做什么、还�
 
 如果只看“代码爬虫底层能力”这一层，而不看 DSL，当前和 Scrapy 更完整运行时相比，最主要的剩余缺口是：
 
-- 观测主链路已经基本具备：`stats`、`signals / extensions`、`trace`、`telemetry` exporter 都已接通；当前真正还缺的是更完整的持久化事件总线聚合层、跨 job 运维自动化、更高阶的统一看板 / 巡检视图，以及 durable scheduler 的后台守护式运维服务
 - DSL 配置化入口与底层 runtime 能力对齐仍明显落后；plugin 当前则有意只收口在 `middleware` 装配，不承担通用组件扩展
 
 ## Request

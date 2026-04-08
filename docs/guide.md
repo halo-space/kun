@@ -1,23 +1,25 @@
-# halo-spider
+# halo-spider 使用手册
 
-一个受 Scrapy 启发的 Rust 异步爬虫框架。当前优先补齐和稳定代码爬虫与共享底层能力；DSL 入口仍保留，但配置面暂时后置，并使用 OpenSpec 管理规范与变更。
+这份文档保留 README 的完整干货内容，方便在 `docs/` 目录下长期引用。
+README 继续承担项目首页角色；这里更适合作为一份完整使用手册来阅读。
+
+`halo-spider` 是一个受 Scrapy 启发的 Rust 异步爬虫框架。当前优先补齐和稳定代码爬虫与共享底层能力；DSL 入口仍保留，但配置面暂时后置，并使用 OpenSpec 管理规范与变更。
 
 ## 当前状态
 
 - 库代码位于 `src/`
 - 示例位于 `examples/`
-- 完整使用手册位于 `docs/guide.md`
-- 功能说明文档位于 `docs/capabilities.md`
-- 运维 / 观测指南位于 `docs/operations.md`
+- 项目首页位于 `../README.md`
+- 功能说明文档位于 `./capabilities.md`
+- 运维 / 观测指南位于 `./operations.md`
 - 当前规范源位于 `openspec/specs/`
 - 后续需求、方案、任务统一从 `openspec/changes/` 发起
 - `openspec init` 生成的协作入口位于 `.claude/commands/opsx/` 与 `.codex/skills/`
 
 ## 功能说明
 
-按功能模块整理的能力说明见 [docs/capabilities.md](docs/capabilities.md)。
-如果你更关心“数据怎么拿、跨 job 怎么看、pause/release/purge 怎么做”，直接看 [docs/operations.md](docs/operations.md)。
-如果你想从项目介绍之外，直接看一份完整使用手册，见 [docs/guide.md](docs/guide.md)。
+按功能模块整理的能力说明见 [capabilities.md](./capabilities.md)。
+如果你更关心“数据怎么拿、跨 job 怎么看、pause/release/purge 怎么做”，直接看 [operations.md](./operations.md)。
 
 这份文档会集中解释：
 
@@ -28,7 +30,7 @@
 
 ## 底层能力概览
 
-README 这里只保留总览；模块级细节统一放到 [docs/capabilities.md](docs/capabilities.md)。
+这份手册保留 README 的完整内容；模块级细节统一放到 [capabilities.md](./capabilities.md)。
 
 当前已落地的底层能力：
 
@@ -740,7 +742,7 @@ let request = Request::browser("https://example.com/app")
 - `HTML` 与 `XML` 现在都支持 `XPath`；HTML 响应会先被解析并规范化成稳定 DOM，再执行 `one()`、`all()`、`text()`、`html()` 与 `attr()` 这组统一提取语义
 - DSL 配置面当前后置，优先补齐和稳定代码爬虫与共享底层能力
 
-README 当前不再承诺字段级 DSL 配置说明。等配置面稳定后，再按模块补回。
+当前不再承诺字段级 DSL 配置说明。等配置面稳定后，再按模块补回。
 
 ## AI 选择器
 
@@ -836,7 +838,7 @@ let engine = Engine::new().with_settings(
 
 ## 贡献指南
 
-如果你想参与开发或了解项目的开发流程，请查看 [CONTRIBUTING.md](CONTRIBUTING.md)。
+如果你想参与开发或了解项目的开发流程，请查看 [CONTRIBUTING.md](../CONTRIBUTING.md)。
 ## License
 
 MIT
