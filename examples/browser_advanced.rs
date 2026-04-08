@@ -2,7 +2,7 @@
 //!
 //! Shows:
 //! - built-in browser request path
-//! - structured fingerprint profile
+//! - structured device profile
 //! - optional external stealth script injection
 //! - explicit keep_alive policy and bucket key
 //! - stable session id plus optional lifecycle controls
@@ -21,18 +21,27 @@ fn main() {
                 .with_engine(browser::Engine::Chromium)
                 .with_stealth(true)
                 .with_stealth_script("window.__thirdPartyStealth = true;")
-                .with_fingerprint_profile(
-                    browser::FingerprintProfile::new()
-                        .with_user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36")
-                        .with_locale("en-US")
-                        .with_timezone("America/Los_Angeles")
-                        .with_accept_language("en-US,en;q=0.9")
-                        .with_languages(["en-US", "en"])
-                        .with_platform("MacIntel")
-                        .with_vendor("Google Inc.")
-                        .with_hardware_concurrency(10)
-                        .with_device_memory(8)
-                        .with_max_touch_points(0),
+                .with_device_profile(
+                    browser::DeviceProfile::new()
+                        .with_fingerprint(
+                            browser::FingerprintProfile::new()
+                                .with_user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36")
+                                .with_locale("en-US")
+                                .with_timezone("America/Los_Angeles")
+                                .with_accept_language("en-US,en;q=0.9")
+                                .with_languages(["en-US", "en"])
+                                .with_platform("MacIntel")
+                                .with_device_memory(8),
+                        )
+                        .with_screen(
+                            browser::ScreenProfile::new()
+                                .with_viewport(1440, 900)
+                                .with_screen(1728, 1117)
+                                .with_avail(1728, 1067)
+                                .with_color_depth(24)
+                                .with_pixel_depth(24)
+                                .with_device_scale_factor(2),
+                        ),
                 )
                 .with_keep_alive(browser::KeepAlive::Context)
                 .with_keep_alive_scope(browser::KeepAliveScope::Origin)

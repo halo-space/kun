@@ -17,7 +17,7 @@ README 负责总览，这里负责把每个模块现在到底能做什么、还�
 
 - 观测主链路已经基本具备：`stats`、`signals / extensions`、`trace`、`telemetry` exporter 都已接通；当前真正还缺的是更完整的持久化事件总线聚合层、跨 job 运维自动化，以及更高阶的统一看板/巡检视图
 - durable scheduler 的基础语义已经基本收口：ownership、heartbeat、stale reclaim、batch、snapshot/overview、统一 `Control`、显式提交边界都已经有；当前剩余重点主要是更强的分布式协调后端和更完整的后台运维服务层
-- browser 已支持结构化 `fingerprint_profile`、最小 stealth bootstrap、稳定 session 存储态、显式 `keep_alive / keep_alive_scope / keep_alive_key / keep_alive_max_idle / keep_alive_max_uses / keep_alive_on_error`，以及按 `engine` 选择浏览器族的内置 `fingerprint_preset`；当前剩余缺口主要是更高阶 stealth 套件和更高阶浏览器指纹/设备画像能力
+- browser 已支持结构化 `device_profile`、最小 stealth bootstrap、稳定 session 存储态、显式 `keep_alive / keep_alive_scope / keep_alive_key / keep_alive_max_idle / keep_alive_max_uses / keep_alive_on_error`；当前剩余缺口主要是更高阶 stealth 套件和更高阶浏览器指纹/设备画像能力
 - validation 本身已经不弱；当前更缺的是“校验失败后如何统一映射到 runtime 行为”这层策略
 - plugin 自动装载与 DSL 对齐仍明显落后于底层 runtime 能力
 
@@ -55,8 +55,9 @@ README 负责总览，这里负责把每个模块现在到底能做什么、还�
 - 用于打开页面、执行浏览器导航、拿渲染后的 HTML
 - 已支持最小的 `method`、`body`、`headers`、`timeout`、`proxy`、request cookies、session
 - 已支持 `wait_for_selector` 这类页面就绪等待配置，用于在取 HTML 前等待目标内容出现
-- 已支持内置 `fingerprint_preset = desktop_zh_cn | desktop_en_us | desktop_en_gb | desktop_ja_jp | desktop_de_de | desktop_fr_fr`
-- 已支持结构化 `fingerprint_profile`
+- 已支持结构化 `device_profile`
+- 已支持 `device_profile.fingerprint`
+- 已支持 `device_profile.screen`
 - 已支持显式 `keep_alive = isolated | context | page`
 - 已支持显式 `keep_alive_scope = session | origin`
 - 已支持显式 `keep_alive_key`
@@ -66,35 +67,26 @@ README 负责总览，这里负责把每个模块现在到底能做什么、还�
 - 已支持更完整但仍然克制的 `stealth = true` bootstrap，覆盖 `navigator.webdriver`、`navigator.language(s)`、`navigator.platform`、`navigator.vendor`、`hardwareConcurrency`、`deviceMemory`、`maxTouchPoints`、`plugins`、`mimeTypes`、`pdfViewerEnabled`、screen depth、notifications permissions 查询补丁，以及 Chromium 路线的最小 `window.chrome` / `navigator.userAgentData`
 - 同一个 browser session 会复用稳定的 user data dir，并做最小串行化；如果显式启用 `keep_alive`，还可以进一步复用 live context 或 live page；如果再配 `keep_alive_scope = origin`，则会按同一 session 下的 URL origin 分开维护 `keep_alive`
 - `keep_alive_key` 会在 `session + keep_alive_scope` 之外再加一层显式业务分桶；`keep_alive_max_idle` 用懒清理限制空闲窗口，`keep_alive_max_uses` 限制单个 entry 的复用次数，`keep_alive_on_error` 决定浏览器错误后是保留还是重置当前 entry
+- `device_profile.fingerprint` 负责 `user_agent / locale / timezone / accept-language / languages / platform / device_memory` 这组身份画像；缺失字段会按当前 `engine` 与稳定默认值补齐
+- `device_profile.screen` 负责 `viewport / screen / avail` 三组尺寸，以及 `color_depth / pixel_depth / device_scale_factor`；缺失尺寸会按组合规则推导，明显冲突会显式失败
 - user data dir、临时 profile 目录与会话锁这条路径已经改成 async runtime 更友好的实现，不再依赖明显的同步文件 I/O 热路径
 
-内置 `fingerprint_preset` 的稳定映射：
+当前默认 fingerprint / device 画像的稳定边界：
 
-- preset 会稳定提供 `locale / timezone / accept-language / languages`
-- 其中 `user_agent / platform / vendor` 现在会按 `engine` 切到对应浏览器族：
-  `chromium -> Chrome / Win32 / Google Inc.`
-  `firefox -> Firefox / Win32 / ""`
-  `webkit -> Safari / MacIntel / Apple Computer, Inc.`
-
-| preset | locale | timezone | languages |
-| --- | --- | --- | --- |
-| `desktop_zh_cn` | `zh-CN` | `Asia/Shanghai` | `["zh-CN", "zh", "en"]` |
-| `desktop_en_us` | `en-US` | `America/New_York` | `["en-US", "en"]` |
-| `desktop_en_gb` | `en-GB` | `Europe/London` | `["en-GB", "en"]` |
-| `desktop_ja_jp` | `ja-JP` | `Asia/Tokyo` | `["ja-JP", "ja", "en-US", "en"]` |
-| `desktop_de_de` | `de-DE` | `Europe/Berlin` | `["de-DE", "de", "en"]` |
-| `desktop_fr_fr` | `fr-FR` | `Europe/Paris` | `["fr-FR", "fr", "en"]` |
+- 如果调用方传了 `device_profile`，下载器会把它和当前 `engine` 编译成一份归一化执行画像
+- `user_agent / platform / vendor` 等浏览器族相关默认值会跟随 `engine`
+- 没公开暴露的 `vendor / hardwareConcurrency / maxTouchPoints` 仍然由下载器内部按浏览器族默认值补齐，用于 stealth bootstrap
+- `device_profile` 只承载“浏览器呈现出来的身份画像”；`keep_alive`、`session`、`proxy`、`wait_for_selector` 等运行策略继续留在 `browser::Config`
 
 当前仍未收敛、并会继续显式报错或保留空白的部分：
 
-- 自定义 `fingerprint_preset` 名称注册机制
 - 更高阶浏览器指纹伪装能力
 - `ip_address`、`certificate` 这类 Playwright 当前接口拿不到的响应侧字段
 
 这里刻意保持一个边界：
 
 - browser 仍然只是渲染型下载器，不扩成通用自动化框架
-- fingerprint preset 现在会跟随 `engine` 切到对应浏览器族
+- device profile 默认值现在会跟随 `engine` 切到对应浏览器族
 - `stealth_script` 可以继续叠加外部 stealth JS，但仍不承诺“品牌级完美伪装”
 
 这部分的设计目标是：HTTP 和 browser 只是两种下载方式，最终都回到统一请求语义。

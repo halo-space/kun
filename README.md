@@ -609,7 +609,6 @@ Spider / rules
 
 - `engine = chromium | firefox | webkit`
 - `headless`
-- `viewport`
 - `wait_for_selector`
 - request method
 - request body
@@ -618,8 +617,9 @@ Spider / rules
 - request headers
 - request proxy
 - request session
-- built-in `fingerprint_preset = desktop_zh_cn | desktop_en_us | desktop_en_gb | desktop_ja_jp | desktop_de_de | desktop_fr_fr`
-- structured `fingerprint_profile`
+- optional `device_profile`
+- optional `device_profile.fingerprint`
+- optional `device_profile.screen`
 - explicit `keep_alive = isolated | context | page`
 - optional `keep_alive_scope = session | origin`
 - optional `keep_alive_key`
@@ -662,16 +662,17 @@ browser 执行路径，`ip_address` 与 `certificate` 由于 Playwright 当前�
 
 当前已经支持的 browser 指纹能力边界：
 
-- `fingerprint_preset` 当前只支持内置 preset：`desktop_zh_cn`、`desktop_en_us`、`desktop_en_gb`、`desktop_ja_jp`、`desktop_de_de`、`desktop_fr_fr`
-- `fingerprint_profile` 可以直接传结构化 profile，不必先注册新的内置 preset 名称
-- `fingerprint_preset` 会稳定映射 `locale`、`timezone`、`accept-language`、`languages`，同时按当前 `engine` 选择对应浏览器族的 `user_agent / platform / vendor`
+- 公开画像入口现在统一收口到 `device_profile`
+- `device_profile.fingerprint` 负责 `user_agent / locale / timezone / accept-language / languages / platform / device_memory`
+- `device_profile.screen` 负责 `viewport / screen / avail` 三组尺寸，以及 `color_depth / pixel_depth / device_scale_factor`
+- `device_profile.fingerprint` 支持部分填写；下载器会按当前 `engine` 与稳定默认值补齐最终执行画像
+- `device_profile.screen` 也支持部分填写；缺失尺寸会按组合规则推导，明显冲突的尺寸组合会显式报错
 - `stealth = true` 当前会注入 bootstrap，覆盖 `navigator.webdriver`、`navigator.language(s)`、`navigator.platform`、`navigator.vendor`、`hardwareConcurrency`、`deviceMemory`、`maxTouchPoints`、`plugins`、`mimeTypes`、`pdfViewerEnabled`、screen depth、notifications permissions 查询补丁，以及 Chromium 路线上的最小 `window.chrome` / `navigator.userAgentData`
 - `stealth_script` 可以把外部 stealth JS 叠加到内置 bootstrap 后面；如果只想注入外部脚本，也可以不打开 `stealth = true`
-- 这组 preset 和 stealth 现在已经会跟随 `engine` 切到 Chromium / Firefox / WebKit 对应的浏览器族，但仍然不追求更高阶的品牌级伪装能力
+- 这组默认画像和 stealth 现在已经会跟随 `engine` 切到 Chromium / Firefox / WebKit 对应的浏览器族，但仍然不追求更高阶的品牌级伪装能力
 
 当前仍未实现、并且会继续显式报错的能力：
 
-- 自定义 `fingerprint_preset` 名称注册机制
 - 更高阶浏览器指纹伪装能力
 
 如果当前构建没有启用 `browser` feature，browser request 会直接返回显式错误，不会再返回 stub response。
@@ -703,12 +704,21 @@ let request = Request::browser("https://example.com/app")
             .with_wait_for_selector("#app")
             .with_stealth(true)
             .with_stealth_script("window.__thirdPartyStealth = true;")
-            .with_fingerprint_profile(
-                browser::FingerprintProfile::new()
-                    .with_locale("ja-JP")
-                    .with_timezone("Asia/Tokyo")
-                    .with_accept_language("ja-JP,ja;q=0.9")
-                    .with_languages(["ja-JP", "ja", "en-US", "en"]),
+            .with_device_profile(
+                browser::DeviceProfile::new()
+                    .with_fingerprint(
+                        browser::FingerprintProfile::new()
+                            .with_locale("ja-JP")
+                            .with_timezone("Asia/Tokyo")
+                            .with_accept_language("ja-JP,ja;q=0.9")
+                            .with_languages(["ja-JP", "ja", "en-US", "en"]),
+                    )
+                    .with_screen(
+                        browser::ScreenProfile::new()
+                            .with_viewport(1440, 900)
+                            .with_screen(1728, 1117)
+                            .with_avail(1728, 1067),
+                    ),
             )
             .with_keep_alive(browser::KeepAlive::Context)
             .with_keep_alive_scope(browser::KeepAliveScope::Origin)

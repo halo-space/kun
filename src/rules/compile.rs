@@ -1,8 +1,8 @@
 use crate::error::SpiderError;
 use crate::middleware::{Config as MiddlewareConfig, Map as MiddlewareMap, Stage};
 use crate::request::browser::{
-    Config as BrowserConfig, Driver, Engine, FingerprintProfile, KeepAlive, KeepAliveScope,
-    Viewport,
+    Config as BrowserConfig, DeviceProfile, Driver, Engine, FingerprintProfile, KeepAlive,
+    KeepAliveScope, ScreenProfile, Size,
 };
 use crate::request::http::Config as HttpConfig;
 use crate::request::{Headers, ProxyConfig, RequestMode, SessionConfig};
@@ -499,63 +499,96 @@ fn parse_browser_config(
     if let Some(stealth) = value.get("stealth").and_then(Value::as_bool) {
         config = config.with_stealth(stealth);
     }
-    if let Some(preset) = value.get("fingerprint_preset").and_then(Value::as_str) {
-        config = config.with_fingerprint_preset(preset.to_string());
-    }
-    if let Some(profile) = value.get("fingerprint_profile") {
-        let profile = expect_object(profile, "fetch.browser.fingerprint_profile")?;
-        let mut fingerprint = FingerprintProfile::new();
+    if let Some(device_profile) = value.get("device_profile") {
+        let device_profile = expect_object(device_profile, "fetch.browser.device_profile")?;
+        let mut resolved = DeviceProfile::new();
 
-        if let Some(user_agent) = profile.get("user_agent").and_then(Value::as_str) {
-            fingerprint = fingerprint.with_user_agent(user_agent.to_string());
-        }
-        if let Some(locale) = profile.get("locale").and_then(Value::as_str) {
-            fingerprint = fingerprint.with_locale(locale.to_string());
-        }
-        if let Some(timezone) = profile.get("timezone").and_then(Value::as_str) {
-            fingerprint = fingerprint.with_timezone(timezone.to_string());
-        }
-        if let Some(accept_language) = profile.get("accept_language").and_then(Value::as_str) {
-            fingerprint = fingerprint.with_accept_language(accept_language.to_string());
-        }
-        if let Some(languages) = profile.get("languages") {
-            let values = languages
-                .as_array()
-                .ok_or_else(|| {
-                    SpiderError::rules(
-                        "fetch.browser.fingerprint_profile.languages must be an array",
-                    )
-                })?
-                .iter()
-                .map(|value| {
-                    value.as_str().map(str::to_string).ok_or_else(|| {
+        if let Some(fingerprint) = device_profile.get("fingerprint") {
+            let fingerprint =
+                expect_object(fingerprint, "fetch.browser.device_profile.fingerprint")?;
+            let mut profile = FingerprintProfile::new();
+
+            if let Some(user_agent) = fingerprint.get("user_agent").and_then(Value::as_str) {
+                profile = profile.with_user_agent(user_agent.to_string());
+            }
+            if let Some(locale) = fingerprint.get("locale").and_then(Value::as_str) {
+                profile = profile.with_locale(locale.to_string());
+            }
+            if let Some(timezone) = fingerprint.get("timezone").and_then(Value::as_str) {
+                profile = profile.with_timezone(timezone.to_string());
+            }
+            if let Some(accept_language) =
+                fingerprint.get("accept_language").and_then(Value::as_str)
+            {
+                profile = profile.with_accept_language(accept_language.to_string());
+            }
+            if let Some(languages) = fingerprint.get("languages") {
+                let values = languages
+                    .as_array()
+                    .ok_or_else(|| {
                         SpiderError::rules(
-                            "fetch.browser.fingerprint_profile.languages must be string[]",
+                            "fetch.browser.device_profile.fingerprint.languages must be an array",
                         )
+                    })?
+                    .iter()
+                    .map(|value| {
+                        value.as_str().map(str::to_string).ok_or_else(|| {
+                            SpiderError::rules(
+                                "fetch.browser.device_profile.fingerprint.languages must be string[]",
+                            )
+                        })
                     })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            fingerprint = fingerprint.with_languages(values);
-        }
-        if let Some(platform) = profile.get("platform").and_then(Value::as_str) {
-            fingerprint = fingerprint.with_platform(platform.to_string());
-        }
-        if let Some(vendor) = profile.get("vendor").and_then(Value::as_str) {
-            fingerprint = fingerprint.with_vendor(vendor.to_string());
-        }
-        if let Some(hardware_concurrency) =
-            profile.get("hardware_concurrency").and_then(Value::as_f64)
-        {
-            fingerprint = fingerprint.with_hardware_concurrency(hardware_concurrency as u8);
-        }
-        if let Some(device_memory) = profile.get("device_memory").and_then(Value::as_f64) {
-            fingerprint = fingerprint.with_device_memory(device_memory as u8);
-        }
-        if let Some(max_touch_points) = profile.get("max_touch_points").and_then(Value::as_f64) {
-            fingerprint = fingerprint.with_max_touch_points(max_touch_points as u8);
+                    .collect::<Result<Vec<_>, _>>()?;
+                profile = profile.with_languages(values);
+            }
+            if let Some(platform) = fingerprint.get("platform").and_then(Value::as_str) {
+                profile = profile.with_platform(platform.to_string());
+            }
+            if let Some(device_memory) = fingerprint.get("device_memory").and_then(Value::as_f64) {
+                profile = profile.with_device_memory(device_memory as u8);
+            }
+
+            resolved = resolved.with_fingerprint(profile);
         }
 
-        config = config.with_fingerprint_profile(fingerprint);
+        if let Some(screen) = device_profile.get("screen") {
+            let screen = expect_object(screen, "fetch.browser.device_profile.screen")?;
+            let mut profile = ScreenProfile::new();
+
+            if let Some(viewport) = screen.get("viewport") {
+                profile = profile.with_viewport_size(parse_browser_size(
+                    viewport,
+                    "fetch.browser.device_profile.screen.viewport",
+                )?);
+            }
+            if let Some(screen_size) = screen.get("screen") {
+                profile = profile.with_screen_size(parse_browser_size(
+                    screen_size,
+                    "fetch.browser.device_profile.screen.screen",
+                )?);
+            }
+            if let Some(avail) = screen.get("avail") {
+                profile = profile.with_avail_size(parse_browser_size(
+                    avail,
+                    "fetch.browser.device_profile.screen.avail",
+                )?);
+            }
+            if let Some(color_depth) = screen.get("color_depth").and_then(Value::as_f64) {
+                profile = profile.with_color_depth(color_depth as u8);
+            }
+            if let Some(pixel_depth) = screen.get("pixel_depth").and_then(Value::as_f64) {
+                profile = profile.with_pixel_depth(pixel_depth as u8);
+            }
+            if let Some(device_scale_factor) =
+                screen.get("device_scale_factor").and_then(Value::as_f64)
+            {
+                profile = profile.with_device_scale_factor(device_scale_factor as u32);
+            }
+
+            resolved = resolved.with_screen(profile);
+        }
+
+        config = config.with_device_profile(resolved);
     }
     if let Some(wait_for_selector) = value.get("wait_for_selector").and_then(Value::as_str) {
         config = config.with_wait_for_selector(wait_for_selector.to_string());
@@ -569,22 +602,24 @@ fn parse_browser_config(
             KeepAliveScope::try_from(keep_alive_scope).map_err(SpiderError::rules)?,
         );
     }
-    if let Some(viewport) = value.get("viewport") {
-        let viewport = expect_object(viewport, "fetch.browser.viewport")?;
-        let width = viewport
-            .get("width")
-            .and_then(Value::as_f64)
-            .map(|value| value as u32)
-            .unwrap_or(1280);
-        let height = viewport
-            .get("height")
-            .and_then(Value::as_f64)
-            .map(|value| value as u32)
-            .unwrap_or(720);
-        config.viewport = Viewport { width, height };
-    }
 
     Ok(Some(config))
+}
+
+fn parse_browser_size(value: &Value, field: &str) -> Result<Size, SpiderError> {
+    let size = expect_object(value, field)?;
+    let width = size
+        .get("width")
+        .and_then(Value::as_f64)
+        .map(|value| value as u32)
+        .ok_or_else(|| SpiderError::rules(format!("{field}.width must be a number")))?;
+    let height = size
+        .get("height")
+        .and_then(Value::as_f64)
+        .map(|value| value as u32)
+        .ok_or_else(|| SpiderError::rules(format!("{field}.height must be a number")))?;
+
+    Ok(Size::new(width, height))
 }
 
 fn parse_request_timeout(value: Option<&Value>) -> Result<Option<SignedDuration>, SpiderError> {

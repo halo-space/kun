@@ -3,11 +3,12 @@ use crate::error::SpiderError;
 #[cfg(any(feature = "browser", test))]
 use crate::request::Headers;
 #[cfg(any(feature = "browser", test))]
-use crate::request::browser::KeepAliveScope;
-#[cfg(any(feature = "browser", test))]
 use crate::request::browser::KeepAliveOnError;
+#[cfg(any(feature = "browser", test))]
+use crate::request::browser::KeepAliveScope;
 use crate::request::browser::{
-    Config as BrowserConfig, Engine as BrowserEngine, FingerprintProfile, KeepAlive,
+    Config as BrowserConfig, Engine as BrowserEngine, FingerprintProfile, KeepAlive, ScreenProfile,
+    Size,
 };
 use crate::request::{Request, RequestMode};
 use crate::response::Response;
@@ -106,7 +107,7 @@ fn validate_browser_request_contract(
     request: &Request,
     config: &BrowserConfig,
 ) -> Result<(), SpiderError> {
-    resolve_fingerprint_profile(config).map(|_| ())?;
+    resolve_device_profile(config).map(|_| ())?;
     validate_browser_stealth_scripts(config)?;
     validate_browser_wait_for_selector(config)?;
     validate_browser_keep_alive(request, config)?;
@@ -162,44 +163,83 @@ fn validate_browser_keep_alive(
 }
 
 fn validate_fingerprint_profile(profile: &FingerprintProfile) -> Result<(), SpiderError> {
-    validate_non_empty_browser_profile_field("user_agent", &profile.user_agent)?;
-    validate_non_empty_browser_profile_field("locale", &profile.locale)?;
-    validate_non_empty_browser_profile_field("timezone", &profile.timezone)?;
-    validate_non_empty_browser_profile_field("accept_language", &profile.accept_language)?;
-    validate_non_empty_browser_profile_field("platform", &profile.platform)?;
+    validate_optional_non_empty_browser_profile_field("user_agent", profile.user_agent.as_deref())?;
+    validate_optional_non_empty_browser_profile_field("locale", profile.locale.as_deref())?;
+    validate_optional_non_empty_browser_profile_field("timezone", profile.timezone.as_deref())?;
+    validate_optional_non_empty_browser_profile_field(
+        "accept_language",
+        profile.accept_language.as_deref(),
+    )?;
+    validate_optional_non_empty_browser_profile_field("platform", profile.platform.as_deref())?;
 
-    if profile.languages.is_empty() {
-        return Err(SpiderError::download(
-            "browser fingerprint_profile.languages must not be empty",
-        ));
+    if let Some(languages) = profile.languages.as_ref() {
+        if languages.is_empty() {
+            return Err(SpiderError::download(
+                "browser device_profile.fingerprint.languages must not be empty",
+            ));
+        }
+        if languages.iter().any(|value| value.trim().is_empty()) {
+            return Err(SpiderError::download(
+                "browser device_profile.fingerprint.languages must not contain empty values",
+            ));
+        }
     }
-    if profile
-        .languages
-        .iter()
-        .any(|value| value.trim().is_empty())
-    {
+    if profile.device_memory == Some(0) {
         return Err(SpiderError::download(
-            "browser fingerprint_profile.languages must not contain empty values",
-        ));
-    }
-    if profile.hardware_concurrency == 0 {
-        return Err(SpiderError::download(
-            "browser fingerprint_profile.hardware_concurrency must be greater than 0",
-        ));
-    }
-    if profile.device_memory == 0 {
-        return Err(SpiderError::download(
-            "browser fingerprint_profile.device_memory must be greater than 0",
+            "browser device_profile.fingerprint.device_memory must be greater than 0",
         ));
     }
 
     Ok(())
 }
 
-fn validate_non_empty_browser_profile_field(field: &str, value: &str) -> Result<(), SpiderError> {
-    if value.trim().is_empty() {
+fn validate_screen_profile(profile: &ScreenProfile) -> Result<(), SpiderError> {
+    validate_browser_screen_size("viewport", profile.viewport.as_ref())?;
+    validate_browser_screen_size("screen", profile.screen.as_ref())?;
+    validate_browser_screen_size("avail", profile.avail.as_ref())?;
+
+    if profile.color_depth == Some(0) {
+        return Err(SpiderError::download(
+            "browser device_profile.screen.color_depth must be greater than 0",
+        ));
+    }
+    if profile.pixel_depth == Some(0) {
+        return Err(SpiderError::download(
+            "browser device_profile.screen.pixel_depth must be greater than 0",
+        ));
+    }
+    if profile.device_scale_factor == Some(0) {
+        return Err(SpiderError::download(
+            "browser device_profile.screen.device_scale_factor must be greater than 0",
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_browser_screen_size(field: &str, value: Option<&Size>) -> Result<(), SpiderError> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+
+    if value.width == 0 || value.height == 0 {
         return Err(SpiderError::download(format!(
-            "browser fingerprint_profile.{field} must not be empty"
+            "browser device_profile.screen.{field} width and height must be greater than 0"
+        )));
+    }
+
+    Ok(())
+}
+
+fn validate_optional_non_empty_browser_profile_field(
+    field: &str,
+    value: Option<&str>,
+) -> Result<(), SpiderError> {
+    if let Some(value) = value
+        && value.trim().is_empty()
+    {
+        return Err(SpiderError::download(format!(
+            "browser device_profile.fingerprint.{field} must not be empty"
         )));
     }
 
@@ -207,17 +247,12 @@ fn validate_non_empty_browser_profile_field(field: &str, value: &str) -> Result<
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct BuiltinBrowserFingerprintPreset {
-    name: &'static str,
+struct BuiltinBrowserFingerprintDefaults {
+    user_agent: &'static str,
     locale: &'static str,
     timezone: &'static str,
     accept_language: &'static str,
     languages: &'static [&'static str],
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct BuiltinBrowserFingerprintFamily {
-    user_agent: &'static str,
     platform: &'static str,
     vendor: &'static str,
     hardware_concurrency: u8,
@@ -225,99 +260,40 @@ struct BuiltinBrowserFingerprintFamily {
     max_touch_points: u8,
 }
 
-impl BuiltinBrowserFingerprintPreset {
-    fn to_profile(self, family: BuiltinBrowserFingerprintFamily) -> FingerprintProfile {
-        FingerprintProfile::new()
-            .with_user_agent(family.user_agent)
-            .with_locale(self.locale)
-            .with_timezone(self.timezone)
-            .with_accept_language(self.accept_language)
-            .with_languages(self.languages.iter().copied())
-            .with_platform(family.platform)
-            .with_vendor(family.vendor)
-            .with_hardware_concurrency(family.hardware_concurrency)
-            .with_device_memory(family.device_memory)
-            .with_max_touch_points(family.max_touch_points)
-    }
-}
-
-const BROWSER_FINGERPRINT_PRESETS: [BuiltinBrowserFingerprintPreset; 6] = [
-    BuiltinBrowserFingerprintPreset {
-        name: "desktop_zh_cn",
-        locale: "zh-CN",
-        timezone: "Asia/Shanghai",
-        accept_language: "zh-CN,zh;q=0.9,en;q=0.8",
-        languages: &["zh-CN", "zh", "en"],
-    },
-    BuiltinBrowserFingerprintPreset {
-        name: "desktop_en_us",
-        locale: "en-US",
-        timezone: "America/New_York",
-        accept_language: "en-US,en;q=0.9",
-        languages: &["en-US", "en"],
-    },
-    BuiltinBrowserFingerprintPreset {
-        name: "desktop_en_gb",
-        locale: "en-GB",
-        timezone: "Europe/London",
-        accept_language: "en-GB,en;q=0.9",
-        languages: &["en-GB", "en"],
-    },
-    BuiltinBrowserFingerprintPreset {
-        name: "desktop_ja_jp",
-        locale: "ja-JP",
-        timezone: "Asia/Tokyo",
-        accept_language: "ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7",
-        languages: &["ja-JP", "ja", "en-US", "en"],
-    },
-    BuiltinBrowserFingerprintPreset {
-        name: "desktop_de_de",
-        locale: "de-DE",
-        timezone: "Europe/Berlin",
-        accept_language: "de-DE,de;q=0.9,en;q=0.8",
-        languages: &["de-DE", "de", "en"],
-    },
-    BuiltinBrowserFingerprintPreset {
-        name: "desktop_fr_fr",
-        locale: "fr-FR",
-        timezone: "Europe/Paris",
-        accept_language: "fr-FR,fr;q=0.9,en;q=0.8",
-        languages: &["fr-FR", "fr", "en"],
-    },
-];
-
-fn builtin_browser_fingerprint_presets() -> &'static [BuiltinBrowserFingerprintPreset] {
-    &BROWSER_FINGERPRINT_PRESETS
-}
-
-fn builtin_browser_fingerprint_preset_names() -> String {
-    builtin_browser_fingerprint_presets()
-        .iter()
-        .map(|preset| preset.name)
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-fn builtin_browser_fingerprint_family(engine: BrowserEngine) -> BuiltinBrowserFingerprintFamily {
+fn builtin_browser_fingerprint_defaults(
+    engine: BrowserEngine,
+) -> BuiltinBrowserFingerprintDefaults {
     match engine {
-        BrowserEngine::Chromium => BuiltinBrowserFingerprintFamily {
+        BrowserEngine::Chromium => BuiltinBrowserFingerprintDefaults {
             user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+            locale: "en-US",
+            timezone: "America/New_York",
+            accept_language: "en-US,en;q=0.9",
+            languages: &["en-US", "en"],
             platform: "Win32",
             vendor: "Google Inc.",
             hardware_concurrency: 8,
             device_memory: 8,
             max_touch_points: 0,
         },
-        BrowserEngine::Firefox => BuiltinBrowserFingerprintFamily {
+        BrowserEngine::Firefox => BuiltinBrowserFingerprintDefaults {
             user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:137.0) Gecko/20100101 Firefox/137.0",
+            locale: "en-US",
+            timezone: "America/New_York",
+            accept_language: "en-US,en;q=0.9",
+            languages: &["en-US", "en"],
             platform: "Win32",
             vendor: "",
             hardware_concurrency: 8,
             device_memory: 8,
             max_touch_points: 0,
         },
-        BrowserEngine::Webkit => BuiltinBrowserFingerprintFamily {
+        BrowserEngine::Webkit => BuiltinBrowserFingerprintDefaults {
             user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+            locale: "en-US",
+            timezone: "America/New_York",
+            accept_language: "en-US,en;q=0.9",
+            languages: &["en-US", "en"],
             platform: "MacIntel",
             vendor: "Apple Computer, Inc.",
             hardware_concurrency: 8,
@@ -327,11 +303,182 @@ fn builtin_browser_fingerprint_family(engine: BrowserEngine) -> BuiltinBrowserFi
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BrowserResolvedFingerprintProfile {
+    user_agent: String,
+    locale: String,
+    timezone: String,
+    accept_language: String,
+    languages: Vec<String>,
+    platform: String,
+    vendor: String,
+    hardware_concurrency: u8,
+    device_memory: u8,
+    max_touch_points: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BrowserResolvedScreenProfile {
+    viewport: Size,
+    screen: Size,
+    avail: Size,
+    color_depth: u8,
+    pixel_depth: u8,
+    device_scale_factor: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BrowserResolvedDeviceProfile {
+    fingerprint: BrowserResolvedFingerprintProfile,
+    screen: BrowserResolvedScreenProfile,
+}
+
+fn default_browser_screen_profile() -> BrowserResolvedScreenProfile {
+    let default = Size::new(1280, 720);
+    BrowserResolvedScreenProfile {
+        viewport: default.clone(),
+        screen: default.clone(),
+        avail: default,
+        color_depth: 24,
+        pixel_depth: 24,
+        device_scale_factor: 1,
+    }
+}
+
+#[allow(dead_code)]
+fn browser_execution_viewport(device_profile: Option<&BrowserResolvedDeviceProfile>) -> Size {
+    device_profile
+        .map(|profile| profile.screen.viewport.clone())
+        .unwrap_or_else(|| default_browser_screen_profile().viewport)
+}
+
+fn max_browser_size(left: &Size, right: &Size) -> Size {
+    Size::new(left.width.max(right.width), left.height.max(right.height))
+}
+
+fn resolve_screen_profile(
+    profile: Option<&ScreenProfile>,
+) -> Result<BrowserResolvedScreenProfile, SpiderError> {
+    if let Some(profile) = profile {
+        validate_screen_profile(profile)?;
+    }
+
+    let default = default_browser_screen_profile();
+    let input_viewport = profile.and_then(|screen| screen.viewport.clone());
+    let input_screen = profile.and_then(|screen| screen.screen.clone());
+    let input_avail = profile.and_then(|screen| screen.avail.clone());
+
+    let viewport = input_viewport
+        .clone()
+        .or_else(|| input_screen.clone())
+        .or_else(|| input_avail.clone())
+        .unwrap_or_else(|| default.viewport.clone());
+    let screen = match (input_screen, input_avail.clone()) {
+        (Some(screen), _) => screen,
+        (None, Some(avail)) => max_browser_size(&viewport, &avail),
+        (None, None) => viewport.clone(),
+    };
+    let avail = input_avail.unwrap_or_else(|| screen.clone());
+
+    if screen.width < viewport.width || screen.height < viewport.height {
+        return Err(SpiderError::download(
+            "browser device_profile.screen requires screen >= viewport",
+        ));
+    }
+    if screen.width < avail.width || screen.height < avail.height {
+        return Err(SpiderError::download(
+            "browser device_profile.screen requires screen >= avail",
+        ));
+    }
+
+    Ok(BrowserResolvedScreenProfile {
+        viewport,
+        screen,
+        avail,
+        color_depth: profile.and_then(|screen| screen.color_depth).unwrap_or(24),
+        pixel_depth: profile.and_then(|screen| screen.pixel_depth).unwrap_or(24),
+        device_scale_factor: profile
+            .and_then(|screen| screen.device_scale_factor)
+            .unwrap_or(1),
+    })
+}
+
+fn resolve_fingerprint_profile(
+    profile: Option<&FingerprintProfile>,
+    engine: BrowserEngine,
+) -> Result<BrowserResolvedFingerprintProfile, SpiderError> {
+    if let Some(profile) = profile {
+        validate_fingerprint_profile(profile)?;
+    }
+
+    let defaults = builtin_browser_fingerprint_defaults(engine);
+
+    Ok(BrowserResolvedFingerprintProfile {
+        user_agent: profile
+            .and_then(|profile| profile.user_agent.clone())
+            .unwrap_or_else(|| defaults.user_agent.to_string()),
+        locale: profile
+            .and_then(|profile| profile.locale.clone())
+            .unwrap_or_else(|| defaults.locale.to_string()),
+        timezone: profile
+            .and_then(|profile| profile.timezone.clone())
+            .unwrap_or_else(|| defaults.timezone.to_string()),
+        accept_language: profile
+            .and_then(|profile| profile.accept_language.clone())
+            .unwrap_or_else(|| defaults.accept_language.to_string()),
+        languages: profile
+            .and_then(|profile| profile.languages.clone())
+            .unwrap_or_else(|| {
+                defaults
+                    .languages
+                    .iter()
+                    .map(|value| value.to_string())
+                    .collect()
+            }),
+        platform: profile
+            .and_then(|profile| profile.platform.clone())
+            .unwrap_or_else(|| defaults.platform.to_string()),
+        vendor: defaults.vendor.to_string(),
+        hardware_concurrency: defaults.hardware_concurrency,
+        device_memory: profile
+            .and_then(|profile| profile.device_memory)
+            .unwrap_or(defaults.device_memory),
+        max_touch_points: defaults.max_touch_points,
+    })
+}
+
+fn resolve_device_profile(
+    config: &BrowserConfig,
+) -> Result<Option<BrowserResolvedDeviceProfile>, SpiderError> {
+    let Some(device_profile) = config.device_profile.as_ref() else {
+        return Ok(None);
+    };
+
+    Ok(Some(BrowserResolvedDeviceProfile {
+        fingerprint: resolve_fingerprint_profile(
+            device_profile.fingerprint.as_ref(),
+            config.engine,
+        )?,
+        screen: resolve_screen_profile(device_profile.screen.as_ref())?,
+    }))
+}
+
+impl BrowserResolvedDeviceProfile {
+    #[allow(dead_code)]
+    fn default_for_stealth(engine: BrowserEngine) -> Self {
+        Self {
+            fingerprint: resolve_fingerprint_profile(None, engine)
+                .expect("builtin browser fingerprint defaults must be valid"),
+            screen: default_browser_screen_profile(),
+        }
+    }
+}
+
 #[cfg(any(feature = "browser", test))]
 #[cfg_attr(all(test, not(feature = "browser")), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct BrowserExecutionPlan {
-    profile: Option<FingerprintProfile>,
+    device_profile: Option<BrowserResolvedDeviceProfile>,
     init_script: Option<String>,
     keep_alive: KeepAlive,
     keep_alive_scope: KeepAliveScope,
@@ -345,11 +492,11 @@ struct BrowserExecutionPlan {
 impl BrowserExecutionPlan {
     #[cfg_attr(all(test, not(feature = "browser")), allow(dead_code))]
     fn from_config(config: &BrowserConfig) -> Result<Self, SpiderError> {
-        let profile = resolve_fingerprint_profile(config)?;
-        let init_script = build_browser_init_script(config, profile.as_ref());
+        let device_profile = resolve_device_profile(config)?;
+        let init_script = build_browser_init_script(config, device_profile.as_ref());
 
         Ok(Self {
-            profile,
+            device_profile,
             init_script,
             keep_alive: config.keep_alive,
             keep_alive_scope: config.keep_alive_scope,
@@ -361,73 +508,41 @@ impl BrowserExecutionPlan {
     }
 }
 
-fn resolve_fingerprint_profile(
-    config: &BrowserConfig,
-) -> Result<Option<FingerprintProfile>, SpiderError> {
-    if config.fingerprint_preset.is_some() && config.fingerprint_profile.is_some() {
-        return Err(SpiderError::download(
-            "browser request cannot set both fingerprint_preset and fingerprint_profile",
-        ));
-    }
-
-    if let Some(profile) = config.fingerprint_profile.as_ref() {
-        validate_fingerprint_profile(profile)?;
-        return Ok(Some(profile.clone()));
-    }
-
-    let Some(profile_name) = config.fingerprint_preset.as_deref() else {
-        return Ok(None);
-    };
-
-    if let Some(preset) = builtin_browser_fingerprint_presets()
-        .iter()
-        .copied()
-        .find(|preset| preset.name == profile_name)
-    {
-        let family = builtin_browser_fingerprint_family(config.engine);
-        return Ok(Some(preset.to_profile(family)));
-    }
-
-    let supported = builtin_browser_fingerprint_preset_names();
-    Err(SpiderError::download(format!(
-        "browser fingerprint_preset is not supported on the Playwright route: {profile_name}; supported presets: {supported}"
-    )))
-}
-
 #[cfg(any(feature = "browser", test))]
 fn build_browser_init_script(
     config: &BrowserConfig,
-    profile: Option<&FingerprintProfile>,
+    device_profile: Option<&BrowserResolvedDeviceProfile>,
 ) -> Option<String> {
-    if !config.stealth && profile.is_none() && config.stealth_scripts.is_empty() {
+    if !config.stealth && device_profile.is_none() && config.stealth_scripts.is_empty() {
         return None;
     }
 
-    let languages = profile
-        .map(|profile| profile.languages.clone())
-        .unwrap_or_else(|| vec!["en-US".to_string(), "en".to_string()]);
-    let language = languages
+    let fallback = BrowserResolvedDeviceProfile::default_for_stealth(config.engine);
+    let fingerprint = device_profile
+        .map(|profile| &profile.fingerprint)
+        .unwrap_or(&fallback.fingerprint);
+    let screen = device_profile
+        .map(|profile| &profile.screen)
+        .unwrap_or(&fallback.screen);
+    let language = fingerprint
+        .languages
         .first()
         .cloned()
         .unwrap_or_else(|| "en-US".to_string());
-    let platform = profile
-        .map(|profile| profile.platform.clone())
-        .unwrap_or_else(|| "Win32".to_string());
-    let vendor = profile
-        .map(|profile| profile.vendor.clone())
-        .unwrap_or_else(|| "Google Inc.".to_string());
-    let hardware_concurrency = profile
-        .map(|profile| profile.hardware_concurrency)
-        .unwrap_or(8);
-    let device_memory = profile.map(|profile| profile.device_memory).unwrap_or(8);
-    let max_touch_points = profile.map(|profile| profile.max_touch_points).unwrap_or(0);
-    let languages_json = json!(languages).to_string();
+    let languages_json = json!(fingerprint.languages).to_string();
     let language_json = json!(language).to_string();
-    let platform_json = json!(platform).to_string();
-    let vendor_json = json!(vendor).to_string();
-    let hardware_concurrency_json = json!(hardware_concurrency).to_string();
-    let device_memory_json = json!(device_memory).to_string();
-    let max_touch_points_json = json!(max_touch_points).to_string();
+    let platform_json = json!(fingerprint.platform).to_string();
+    let vendor_json = json!(fingerprint.vendor).to_string();
+    let hardware_concurrency_json = json!(fingerprint.hardware_concurrency).to_string();
+    let device_memory_json = json!(fingerprint.device_memory).to_string();
+    let max_touch_points_json = json!(fingerprint.max_touch_points).to_string();
+    let screen_width_json = json!(screen.screen.width).to_string();
+    let screen_height_json = json!(screen.screen.height).to_string();
+    let avail_width_json = json!(screen.avail.width).to_string();
+    let avail_height_json = json!(screen.avail.height).to_string();
+    let color_depth_json = json!(screen.color_depth).to_string();
+    let pixel_depth_json = json!(screen.pixel_depth).to_string();
+    let device_scale_factor_json = json!(screen.device_scale_factor).to_string();
     let mut lines = Vec::new();
 
     if config.stealth {
@@ -437,7 +552,7 @@ fn build_browser_init_script(
         );
     }
 
-    if config.stealth || profile.is_some() {
+    if config.stealth || device_profile.is_some() {
         lines.push(format!(
             "Object.defineProperty(navigator, 'languages', {{ get: () => {languages_json}.slice(), configurable: true }});"
         ));
@@ -458,6 +573,27 @@ fn build_browser_init_script(
         ));
         lines.push(format!(
             "Object.defineProperty(navigator, 'maxTouchPoints', {{ get: () => {max_touch_points_json}, configurable: true }});"
+        ));
+        lines.push(format!(
+            "Object.defineProperty(screen, 'width', {{ get: () => {screen_width_json}, configurable: true }});"
+        ));
+        lines.push(format!(
+            "Object.defineProperty(screen, 'height', {{ get: () => {screen_height_json}, configurable: true }});"
+        ));
+        lines.push(format!(
+            "Object.defineProperty(screen, 'availWidth', {{ get: () => {avail_width_json}, configurable: true }});"
+        ));
+        lines.push(format!(
+            "Object.defineProperty(screen, 'availHeight', {{ get: () => {avail_height_json}, configurable: true }});"
+        ));
+        lines.push(format!(
+            "Object.defineProperty(screen, 'colorDepth', {{ get: () => {color_depth_json}, configurable: true }});"
+        ));
+        lines.push(format!(
+            "Object.defineProperty(screen, 'pixelDepth', {{ get: () => {pixel_depth_json}, configurable: true }});"
+        ));
+        lines.push(format!(
+            "Object.defineProperty(window, 'devicePixelRatio', {{ get: () => {device_scale_factor_json}, configurable: true }});"
         ));
     }
 
@@ -480,14 +616,6 @@ fn build_browser_init_script(
         );
         lines.push(
             "Object.defineProperty(navigator, 'pdfViewerEnabled', { get: () => true, configurable: true });"
-                .to_string(),
-        );
-        lines.push(
-            "Object.defineProperty(screen, 'colorDepth', { get: () => 24, configurable: true });"
-                .to_string(),
-        );
-        lines.push(
-            "Object.defineProperty(screen, 'pixelDepth', { get: () => 24, configurable: true });"
                 .to_string(),
         );
         lines.push(
@@ -649,13 +777,13 @@ async fn browser_response_metadata(
 struct BrowserSessionSignature {
     engine: crate::request::browser::Engine,
     headless: bool,
-    viewport: crate::request::browser::Viewport,
+    viewport: Size,
     stealth: bool,
     stealth_scripts: Vec<String>,
     keep_alive: KeepAlive,
     keep_alive_scope: KeepAliveScope,
     keep_alive_key: Option<String>,
-    profile: Option<FingerprintProfile>,
+    device_profile: Option<BrowserResolvedDeviceProfile>,
     proxy: Option<String>,
 }
 
@@ -669,13 +797,13 @@ impl BrowserSessionSignature {
         Self {
             engine: config.engine,
             headless: config.headless,
-            viewport: config.viewport.clone(),
+            viewport: browser_execution_viewport(execution_plan.device_profile.as_ref()),
             stealth: config.stealth,
             stealth_scripts: config.stealth_scripts.clone(),
             keep_alive: execution_plan.keep_alive,
             keep_alive_scope: execution_plan.keep_alive_scope,
             keep_alive_key: execution_plan.keep_alive_key.clone(),
-            profile: execution_plan.profile.clone(),
+            device_profile: execution_plan.device_profile.clone(),
             proxy: request.proxy.as_ref().map(|proxy| proxy.url.clone()),
         }
     }
@@ -742,7 +870,7 @@ async fn fetch_with_playwright_isolated_session(
         &context,
         request,
         config,
-        execution_plan.profile.as_ref(),
+        execution_plan.device_profile.as_ref(),
         false,
         None,
     )
@@ -809,7 +937,7 @@ async fn fetch_with_playwright_keep_alive(
         &session.context,
         request,
         config,
-        execution_plan.profile.as_ref(),
+        execution_plan.device_profile.as_ref(),
         keep_page,
         existing_page,
     )
@@ -839,7 +967,7 @@ async fn fetch_with_playwright_keep_alive(
 #[cfg(feature = "browser")]
 fn browser_keep_alive_mismatch_error(session_id: &str) -> SpiderError {
     SpiderError::download(format!(
-        "browser keep_alive `{session_id}` requires stable engine/headless/viewport/stealth/stealth_scripts/fingerprint_preset/fingerprint_profile/proxy/keep_alive/keep_alive_scope/keep_alive_key across requests"
+        "browser keep_alive `{session_id}` requires stable engine/headless/device_profile/stealth/stealth_scripts/proxy/keep_alive/keep_alive_scope/keep_alive_key across requests"
     ))
 }
 
@@ -878,7 +1006,7 @@ async fn launch_browser_context(
         config,
         request,
         request.timeout,
-        execution_plan.profile.as_ref(),
+        execution_plan.device_profile.as_ref(),
     )?;
     let user_data_dir = BrowserUserDataDir::for_request(request).await?;
     let user_data_path = user_data_dir.path().to_string_lossy().into_owned();
@@ -931,11 +1059,11 @@ async fn run_browser_request_in_context(
     context: &BrowserContext,
     request: &Request,
     config: &BrowserConfig,
-    profile: Option<&FingerprintProfile>,
+    device_profile: Option<&BrowserResolvedDeviceProfile>,
     keep_page: bool,
     existing_page: Option<Page>,
 ) -> Result<(BrowserFetchResult, Option<Page>), SpiderError> {
-    apply_request_state_to_context(context, request, profile).await?;
+    apply_request_state_to_context(context, request, device_profile).await?;
 
     let page = match existing_page.filter(|page| !page.is_closed()) {
         Some(page) => page,
@@ -964,10 +1092,13 @@ async fn run_browser_request_in_context(
 async fn apply_request_state_to_context(
     context: &BrowserContext,
     request: &Request,
-    profile: Option<&FingerprintProfile>,
+    device_profile: Option<&BrowserResolvedDeviceProfile>,
 ) -> Result<(), SpiderError> {
     context
-        .set_extra_http_headers(build_browser_context_headers(request, profile))
+        .set_extra_http_headers(build_browser_context_headers(
+            request,
+            device_profile.map(|profile| &profile.fingerprint),
+        ))
         .await
         .map_err(map_playwright_error)?;
     apply_request_cookies_to_context(context, request).await
@@ -1060,16 +1191,16 @@ fn build_context_options(
     config: &BrowserConfig,
     request: &Request,
     timeout: Option<SignedDuration>,
-    profile: Option<&FingerprintProfile>,
+    device_profile: Option<&BrowserResolvedDeviceProfile>,
 ) -> Result<BrowserContextOptions, SpiderError> {
     let mut builder = BrowserContextOptions::builder()
         .headless(config.headless)
         .viewport(Viewport {
-            width: config.viewport.width,
-            height: config.viewport.height,
+            width: browser_execution_viewport(device_profile).width,
+            height: browser_execution_viewport(device_profile).height,
         });
 
-    if let Some(profile) = profile {
+    if let Some(profile) = device_profile.map(|profile| &profile.fingerprint) {
         builder = builder
             .user_agent(profile.user_agent.clone())
             .locale(profile.locale.clone())
@@ -1091,7 +1222,8 @@ fn build_context_options(
         });
     }
 
-    let headers = build_browser_context_headers(request, profile);
+    let headers =
+        build_browser_context_headers(request, device_profile.map(|profile| &profile.fingerprint));
     if !headers.is_empty() {
         builder = builder.extra_http_headers(headers);
     }
@@ -1117,7 +1249,7 @@ async fn apply_execution_plan_to_context(
 #[cfg(any(feature = "browser", test))]
 fn build_browser_context_headers(
     request: &Request,
-    profile: Option<&FingerprintProfile>,
+    profile: Option<&BrowserResolvedFingerprintProfile>,
 ) -> std::collections::HashMap<String, String> {
     let mut headers = BTreeMap::new();
 
@@ -1512,8 +1644,8 @@ mod tests {
     use super::*;
     use crate::download::traits::Downloader;
     use crate::request::browser::{
-        Config as BrowserConfig, Engine as BrowserEngine, FingerprintProfile, KeepAlive,
-        KeepAliveOnError, KeepAliveScope,
+        Config as BrowserConfig, DeviceProfile, Engine as BrowserEngine, FingerprintProfile,
+        KeepAlive, KeepAliveOnError, KeepAliveScope, ScreenProfile, Size,
     };
     use jiff::SignedDuration;
     use std::sync::Arc;
@@ -1545,30 +1677,18 @@ mod tests {
     }
 
     #[test]
-    fn browser_request_contract_allows_supported_fingerprint_profile() {
-        let request = Request::browser("https://example.com")
-            .with_browser(BrowserConfig::default().with_fingerprint_preset("desktop_zh_cn"));
-
-        let result = validate_browser_request_contract(
-            &request,
-            request
-                .browser
-                .as_ref()
-                .expect("browser config should exist"),
-        );
-
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn browser_request_contract_allows_structured_fingerprint_profile() {
+    fn browser_request_contract_allows_device_profile() {
         let request = Request::browser("https://example.com").with_browser(
-            BrowserConfig::default().with_fingerprint_profile(
-                FingerprintProfile::new()
-                    .with_locale("ja-JP")
-                    .with_timezone("Asia/Tokyo")
-                    .with_accept_language("ja-JP,ja;q=0.9")
-                    .with_languages(["ja-JP", "ja"]),
+            BrowserConfig::default().with_device_profile(
+                DeviceProfile::new()
+                    .with_fingerprint(
+                        FingerprintProfile::new()
+                            .with_locale("ja-JP")
+                            .with_timezone("Asia/Tokyo")
+                            .with_accept_language("ja-JP,ja;q=0.9")
+                            .with_languages(["ja-JP", "ja"]),
+                    )
+                    .with_screen(ScreenProfile::new().with_viewport(1440, 900)),
             ),
         );
 
@@ -1584,15 +1704,10 @@ mod tests {
     }
 
     #[test]
-    fn browser_request_contract_allows_empty_vendor_for_firefox_style_profile() {
+    fn browser_request_contract_allows_partial_device_profile() {
         let request = Request::browser("https://example.com").with_browser(
-            BrowserConfig::default().with_fingerprint_profile(
-                FingerprintProfile::new()
-                    .with_vendor("")
-                    .with_locale("en-US")
-                    .with_timezone("America/New_York")
-                    .with_accept_language("en-US,en;q=0.9")
-                    .with_languages(["en-US", "en"]),
+            BrowserConfig::default().with_device_profile(
+                DeviceProfile::new().with_screen(ScreenProfile::new().with_avail(1280, 680)),
             ),
         );
 
@@ -1608,9 +1723,16 @@ mod tests {
     }
 
     #[test]
-    fn browser_request_contract_rejects_unsupported_fingerprint_profile() {
-        let request = Request::browser("https://example.com")
-            .with_browser(BrowserConfig::default().with_fingerprint_preset("desktop_unknown"));
+    fn browser_request_contract_rejects_conflicting_screen_profile() {
+        let request = Request::browser("https://example.com").with_browser(
+            BrowserConfig::default().with_device_profile(
+                DeviceProfile::new().with_screen(
+                    ScreenProfile::new()
+                        .with_viewport(1440, 900)
+                        .with_screen(1366, 768),
+                ),
+            ),
+        );
 
         let error = validate_browser_request_contract(
             &request,
@@ -1623,9 +1745,7 @@ mod tests {
 
         assert_eq!(
             error,
-            SpiderError::download(
-                "browser fingerprint_preset is not supported on the Playwright route: desktop_unknown; supported presets: desktop_zh_cn, desktop_en_us, desktop_en_gb, desktop_ja_jp, desktop_de_de, desktop_fr_fr",
-            )
+            SpiderError::download("browser device_profile.screen requires screen >= viewport")
         );
     }
 
@@ -2074,112 +2194,112 @@ mod tests {
     }
 
     #[test]
-    fn resolve_fingerprint_profile_returns_builtin_profile() {
-        let config = BrowserConfig::default().with_fingerprint_preset("desktop_zh_cn");
+    fn resolve_device_profile_compiles_partial_fingerprint_against_engine_defaults() {
+        let config = BrowserConfig::default().with_device_profile(
+            DeviceProfile::new().with_fingerprint(
+                FingerprintProfile::new()
+                    .with_locale("zh-CN")
+                    .with_timezone("Asia/Shanghai")
+                    .with_accept_language("zh-CN,zh;q=0.9,en;q=0.8")
+                    .with_languages(["zh-CN", "zh", "en"]),
+            ),
+        );
 
-        let profile = resolve_fingerprint_profile(&config)
+        let profile = resolve_device_profile(&config)
             .unwrap()
             .expect("profile should resolve");
 
         assert_eq!(
-            profile.user_agent,
+            profile.fingerprint.user_agent,
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
         );
-        assert_eq!(profile.locale, "zh-CN");
-        assert_eq!(profile.timezone, "Asia/Shanghai");
-        assert_eq!(profile.languages, vec!["zh-CN", "zh", "en"]);
+        assert_eq!(profile.fingerprint.locale, "zh-CN");
+        assert_eq!(profile.fingerprint.timezone, "Asia/Shanghai");
+        assert_eq!(profile.fingerprint.languages, vec!["zh-CN", "zh", "en"]);
     }
 
     #[test]
-    fn resolve_fingerprint_profile_returns_firefox_builtin_profile_for_selected_engine() {
+    fn resolve_device_profile_uses_engine_specific_fingerprint_defaults() {
         let config = BrowserConfig::default()
             .with_engine(BrowserEngine::Firefox)
-            .with_fingerprint_preset("desktop_en_us");
+            .with_device_profile(DeviceProfile::new());
 
-        let profile = resolve_fingerprint_profile(&config)
+        let profile = resolve_device_profile(&config)
             .unwrap()
             .expect("profile should resolve");
 
         assert_eq!(
-            profile.user_agent,
+            profile.fingerprint.user_agent,
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:137.0) Gecko/20100101 Firefox/137.0"
         );
-        assert_eq!(profile.platform, "Win32");
-        assert_eq!(profile.vendor, "");
-        assert_eq!(profile.locale, "en-US");
-        assert_eq!(profile.timezone, "America/New_York");
-        assert_eq!(profile.languages, vec!["en-US", "en"]);
+        assert_eq!(profile.fingerprint.platform, "Win32");
+        assert_eq!(profile.fingerprint.vendor, "");
+        assert_eq!(profile.fingerprint.locale, "en-US");
+        assert_eq!(profile.fingerprint.timezone, "America/New_York");
     }
 
     #[test]
-    fn resolve_fingerprint_profile_returns_webkit_builtin_profile_for_selected_engine() {
-        let config = BrowserConfig::default()
-            .with_engine(BrowserEngine::Webkit)
-            .with_fingerprint_preset("desktop_ja_jp");
+    fn resolve_device_profile_derives_screen_defaults_and_missing_sizes() {
+        let config = BrowserConfig::default().with_device_profile(
+            DeviceProfile::new().with_screen(
+                ScreenProfile::new()
+                    .with_viewport(1440, 900)
+                    .with_avail(1728, 1067)
+                    .with_color_depth(30),
+            ),
+        );
 
-        let profile = resolve_fingerprint_profile(&config)
+        let profile = resolve_device_profile(&config)
             .unwrap()
             .expect("profile should resolve");
 
-        assert_eq!(
-            profile.user_agent,
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
-        );
-        assert_eq!(profile.platform, "MacIntel");
-        assert_eq!(profile.vendor, "Apple Computer, Inc.");
-        assert_eq!(profile.locale, "ja-JP");
-        assert_eq!(profile.timezone, "Asia/Tokyo");
-        assert_eq!(profile.languages, vec!["ja-JP", "ja", "en-US", "en"]);
+        assert_eq!(profile.screen.viewport, Size::new(1440, 900));
+        assert_eq!(profile.screen.screen, Size::new(1728, 1067));
+        assert_eq!(profile.screen.avail, Size::new(1728, 1067));
+        assert_eq!(profile.screen.color_depth, 30);
+        assert_eq!(profile.screen.pixel_depth, 24);
+        assert_eq!(profile.screen.device_scale_factor, 1);
     }
 
     #[test]
-    fn resolve_fingerprint_profile_returns_structured_profile() {
-        let config = BrowserConfig::default().with_fingerprint_profile(
-            FingerprintProfile::new()
-                .with_user_agent("custom-agent")
-                .with_locale("fr-FR")
-                .with_timezone("Europe/Paris")
-                .with_accept_language("fr-FR,fr;q=0.9")
-                .with_languages(["fr-FR", "fr"]),
+    fn resolve_device_profile_rejects_conflicting_screen_values() {
+        let config = BrowserConfig::default().with_device_profile(
+            DeviceProfile::new().with_screen(
+                ScreenProfile::new()
+                    .with_screen(1366, 768)
+                    .with_avail(1600, 900),
+            ),
         );
 
-        let profile = resolve_fingerprint_profile(&config)
-            .unwrap()
-            .expect("profile should resolve");
-
-        assert_eq!(profile.user_agent, "custom-agent");
-        assert_eq!(profile.locale, "fr-FR");
-        assert_eq!(profile.timezone, "Europe/Paris");
-        assert_eq!(profile.languages, vec!["fr-FR", "fr"]);
-    }
-
-    #[test]
-    fn resolve_fingerprint_profile_exposes_expanded_builtin_set() {
-        let names = builtin_browser_fingerprint_presets()
-            .iter()
-            .map(|preset| preset.name)
-            .collect::<Vec<_>>();
+        let error = resolve_device_profile(&config).unwrap_err();
 
         assert_eq!(
-            names,
-            vec![
-                "desktop_zh_cn",
-                "desktop_en_us",
-                "desktop_en_gb",
-                "desktop_ja_jp",
-                "desktop_de_de",
-                "desktop_fr_fr",
-            ]
+            error,
+            SpiderError::download("browser device_profile.screen requires screen >= avail")
         );
     }
 
     #[test]
-    fn build_browser_init_script_supports_profile_and_stealth() {
+    fn build_browser_init_script_supports_device_profile_and_stealth() {
         let config = BrowserConfig::default()
             .with_stealth(true)
             .with_stealth_script("window.__thirdPartyStealth = true;")
-            .with_fingerprint_preset("desktop_en_us");
-        let profile = resolve_fingerprint_profile(&config)
+            .with_device_profile(
+                DeviceProfile::new()
+                    .with_fingerprint(
+                        FingerprintProfile::new()
+                            .with_locale("en-US")
+                            .with_timezone("America/New_York")
+                            .with_accept_language("en-US,en;q=0.9")
+                            .with_languages(["en-US", "en"]),
+                    )
+                    .with_screen(
+                        ScreenProfile::new()
+                            .with_screen(1728, 1117)
+                            .with_avail(1728, 1067),
+                    ),
+            );
+        let profile = resolve_device_profile(&config)
             .unwrap()
             .expect("profile should resolve");
         let init_script =
@@ -2187,12 +2307,11 @@ mod tests {
 
         assert!(init_script.contains("Object.defineProperty(navigator, 'webdriver'"));
         assert!(init_script.contains("Object.defineProperty(navigator, 'languages'"));
-        assert!(init_script.contains("Object.defineProperty(navigator, 'language'"));
-        assert!(init_script.contains("Object.defineProperty(navigator, 'hardwareConcurrency'"));
+        assert!(init_script.contains("Object.defineProperty(screen, 'width'"));
+        assert!(init_script.contains("Object.defineProperty(screen, 'availWidth'"));
+        assert!(init_script.contains("Object.defineProperty(window, 'devicePixelRatio'"));
         assert!(init_script.contains("Object.defineProperty(navigator, 'plugins'"));
         assert!(init_script.contains("navigator.permissions.query"));
-        assert!(init_script.contains("en-US"));
-        assert!(init_script.contains("Win32"));
         assert!(init_script.contains("window.__thirdPartyStealth = true;"));
         assert!(
             init_script
@@ -2220,13 +2339,21 @@ mod tests {
         let request = Request::browser("https://example.com")
             .with_header("Accept-Language", "fr-FR,fr;q=0.9")
             .with_header("x-token", "abc");
-        let profile = resolve_fingerprint_profile(
-            &BrowserConfig::default().with_fingerprint_preset("desktop_zh_cn"),
+        let profile = resolve_device_profile(
+            &BrowserConfig::default().with_device_profile(
+                DeviceProfile::new().with_fingerprint(
+                    FingerprintProfile::new()
+                        .with_locale("zh-CN")
+                        .with_timezone("Asia/Shanghai")
+                        .with_accept_language("zh-CN,zh;q=0.9,en;q=0.8")
+                        .with_languages(["zh-CN", "zh", "en"]),
+                ),
+            ),
         )
         .unwrap()
         .expect("profile should resolve");
 
-        let headers = build_browser_context_headers(&request, Some(&profile));
+        let headers = build_browser_context_headers(&request, Some(&profile.fingerprint));
 
         assert_eq!(
             headers.get("Accept-Language").map(String::as_str),
@@ -2287,16 +2414,21 @@ mod tests {
     #[test]
     fn browser_downloader_rejects_unsupported_config_before_launch() {
         let downloader = Browser;
-        let request = Request::browser("https://example.com")
-            .with_browser(BrowserConfig::default().with_fingerprint_preset("desktop_unknown"));
+        let request = Request::browser("https://example.com").with_browser(
+            BrowserConfig::default().with_device_profile(
+                DeviceProfile::new().with_screen(
+                    ScreenProfile::new()
+                        .with_viewport(1440, 900)
+                        .with_screen(1366, 768),
+                ),
+            ),
+        );
 
         let error = block_on(downloader.fetch(&request)).unwrap_err();
 
         assert_eq!(
             error,
-            SpiderError::download(
-                "browser fingerprint_preset is not supported on the Playwright route: desktop_unknown; supported presets: desktop_zh_cn, desktop_en_us, desktop_en_gb, desktop_ja_jp, desktop_de_de, desktop_fr_fr",
-            )
+            SpiderError::download("browser device_profile.screen requires screen >= viewport")
         );
     }
 
@@ -2305,13 +2437,22 @@ mod tests {
     fn build_context_options_matches_browser_contract() {
         let config = BrowserConfig::default()
             .with_headless(false)
-            .with_viewport(1440, 900)
-            .with_fingerprint_preset("desktop_zh_cn");
+            .with_device_profile(
+                DeviceProfile::new()
+                    .with_fingerprint(
+                        FingerprintProfile::new()
+                            .with_locale("zh-CN")
+                            .with_timezone("Asia/Shanghai")
+                            .with_accept_language("zh-CN,zh;q=0.9,en;q=0.8")
+                            .with_languages(["zh-CN", "zh", "en"]),
+                    )
+                    .with_screen(ScreenProfile::new().with_viewport(1440, 900)),
+            );
         let request = Request::browser("https://example.com")
             .with_header("Accept-Language", "fr-FR,fr;q=0.9")
             .with_header("x-token", "abc")
             .with_proxy("http://127.0.0.1:8080");
-        let profile = resolve_fingerprint_profile(&config)
+        let profile = resolve_device_profile(&config)
             .unwrap()
             .expect("profile should resolve");
         let options = build_context_options(
@@ -2332,7 +2473,10 @@ mod tests {
             Some(900)
         );
         assert_eq!(options.timeout, Some(8000.0));
-        assert_eq!(options.user_agent.as_deref(), Some(profile.user_agent));
+        assert_eq!(
+            options.user_agent.as_deref(),
+            Some(profile.fingerprint.user_agent.as_str())
+        );
         assert_eq!(options.locale.as_deref(), Some("zh-CN"));
         assert_eq!(options.timezone_id.as_deref(), Some("Asia/Shanghai"));
         assert_eq!(

@@ -73,49 +73,33 @@ impl TryFrom<&str> for Engine {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Viewport {
+pub struct Size {
     pub width: u32,
     pub height: u32,
 }
 
-impl Default for Viewport {
-    fn default() -> Self {
-        Self {
-            width: 1280,
-            height: 720,
-        }
+impl Size {
+    pub const fn new(width: u32, height: u32) -> Self {
+        Self { width, height }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct FingerprintProfile {
-    pub user_agent: String,
-    pub locale: String,
-    pub timezone: String,
-    pub accept_language: String,
-    pub languages: Vec<String>,
-    pub platform: String,
-    pub vendor: String,
-    pub hardware_concurrency: u8,
-    pub device_memory: u8,
-    pub max_touch_points: u8,
-}
-
-impl Default for FingerprintProfile {
-    fn default() -> Self {
-        Self {
-            user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36".to_string(),
-            locale: "en-US".to_string(),
-            timezone: "America/New_York".to_string(),
-            accept_language: "en-US,en;q=0.9".to_string(),
-            languages: vec!["en-US".to_string(), "en".to_string()],
-            platform: "Win32".to_string(),
-            vendor: "Google Inc.".to_string(),
-            hardware_concurrency: 8,
-            device_memory: 8,
-            max_touch_points: 0,
-        }
-    }
+    #[serde(default)]
+    pub user_agent: Option<String>,
+    #[serde(default)]
+    pub locale: Option<String>,
+    #[serde(default)]
+    pub timezone: Option<String>,
+    #[serde(default)]
+    pub accept_language: Option<String>,
+    #[serde(default)]
+    pub languages: Option<Vec<String>>,
+    #[serde(default)]
+    pub platform: Option<String>,
+    #[serde(default)]
+    pub device_memory: Option<u8>,
 }
 
 impl FingerprintProfile {
@@ -124,22 +108,22 @@ impl FingerprintProfile {
     }
 
     pub fn with_user_agent(mut self, user_agent: impl Into<String>) -> Self {
-        self.user_agent = user_agent.into();
+        self.user_agent = Some(user_agent.into());
         self
     }
 
     pub fn with_locale(mut self, locale: impl Into<String>) -> Self {
-        self.locale = locale.into();
+        self.locale = Some(locale.into());
         self
     }
 
     pub fn with_timezone(mut self, timezone: impl Into<String>) -> Self {
-        self.timezone = timezone.into();
+        self.timezone = Some(timezone.into());
         self
     }
 
     pub fn with_accept_language(mut self, accept_language: impl Into<String>) -> Self {
-        self.accept_language = accept_language.into();
+        self.accept_language = Some(accept_language.into());
         self
     }
 
@@ -148,32 +132,108 @@ impl FingerprintProfile {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        self.languages = languages.into_iter().map(Into::into).collect();
+        self.languages = Some(languages.into_iter().map(Into::into).collect());
         self
     }
 
     pub fn with_platform(mut self, platform: impl Into<String>) -> Self {
-        self.platform = platform.into();
-        self
-    }
-
-    pub fn with_vendor(mut self, vendor: impl Into<String>) -> Self {
-        self.vendor = vendor.into();
-        self
-    }
-
-    pub fn with_hardware_concurrency(mut self, hardware_concurrency: u8) -> Self {
-        self.hardware_concurrency = hardware_concurrency;
+        self.platform = Some(platform.into());
         self
     }
 
     pub fn with_device_memory(mut self, device_memory: u8) -> Self {
-        self.device_memory = device_memory;
+        self.device_memory = Some(device_memory);
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ScreenProfile {
+    #[serde(default)]
+    pub viewport: Option<Size>,
+    #[serde(default)]
+    pub screen: Option<Size>,
+    #[serde(default)]
+    pub avail: Option<Size>,
+    #[serde(default)]
+    pub color_depth: Option<u8>,
+    #[serde(default)]
+    pub pixel_depth: Option<u8>,
+    #[serde(default)]
+    pub device_scale_factor: Option<u32>,
+}
+
+impl ScreenProfile {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_viewport(mut self, width: u32, height: u32) -> Self {
+        self.viewport = Some(Size::new(width, height));
         self
     }
 
-    pub fn with_max_touch_points(mut self, max_touch_points: u8) -> Self {
-        self.max_touch_points = max_touch_points;
+    pub fn with_viewport_size(mut self, viewport: Size) -> Self {
+        self.viewport = Some(viewport);
+        self
+    }
+
+    pub fn with_screen(mut self, width: u32, height: u32) -> Self {
+        self.screen = Some(Size::new(width, height));
+        self
+    }
+
+    pub fn with_screen_size(mut self, screen: Size) -> Self {
+        self.screen = Some(screen);
+        self
+    }
+
+    pub fn with_avail(mut self, width: u32, height: u32) -> Self {
+        self.avail = Some(Size::new(width, height));
+        self
+    }
+
+    pub fn with_avail_size(mut self, avail: Size) -> Self {
+        self.avail = Some(avail);
+        self
+    }
+
+    pub fn with_color_depth(mut self, color_depth: u8) -> Self {
+        self.color_depth = Some(color_depth);
+        self
+    }
+
+    pub fn with_pixel_depth(mut self, pixel_depth: u8) -> Self {
+        self.pixel_depth = Some(pixel_depth);
+        self
+    }
+
+    pub fn with_device_scale_factor(mut self, device_scale_factor: u32) -> Self {
+        self.device_scale_factor = Some(device_scale_factor);
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct DeviceProfile {
+    #[serde(default)]
+    pub fingerprint: Option<FingerprintProfile>,
+    #[serde(default)]
+    pub screen: Option<ScreenProfile>,
+}
+
+impl DeviceProfile {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn with_fingerprint(mut self, fingerprint: FingerprintProfile) -> Self {
+        self.fingerprint = Some(fingerprint);
+        self
+    }
+
+    pub fn with_screen(mut self, screen: ScreenProfile) -> Self {
+        self.screen = Some(screen);
         self
     }
 }
@@ -294,11 +354,9 @@ pub struct Config {
     pub stealth: bool,
     #[serde(default)]
     pub stealth_scripts: Vec<String>,
-    pub fingerprint_preset: Option<String>,
     #[serde(default)]
-    pub fingerprint_profile: Option<FingerprintProfile>,
+    pub device_profile: Option<DeviceProfile>,
     pub wait_for_selector: Option<String>,
-    pub viewport: Viewport,
     #[serde(default)]
     pub keep_alive: KeepAlive,
     #[serde(default)]
@@ -321,10 +379,8 @@ impl Default for Config {
             headless: true,
             stealth: false,
             stealth_scripts: Vec::new(),
-            fingerprint_preset: None,
-            fingerprint_profile: None,
+            device_profile: None,
             wait_for_selector: None,
-            viewport: Viewport::default(),
             keep_alive: KeepAlive::default(),
             keep_alive_scope: KeepAliveScope::default(),
             keep_alive_key: None,
@@ -370,25 +426,13 @@ impl Config {
         self
     }
 
-    pub fn with_fingerprint_preset(mut self, preset: impl Into<String>) -> Self {
-        self.fingerprint_preset = Some(preset.into());
-        self.fingerprint_profile = None;
-        self
-    }
-
-    pub fn with_fingerprint_profile(mut self, profile: FingerprintProfile) -> Self {
-        self.fingerprint_profile = Some(profile);
-        self.fingerprint_preset = None;
+    pub fn with_device_profile(mut self, device_profile: DeviceProfile) -> Self {
+        self.device_profile = Some(device_profile);
         self
     }
 
     pub fn with_wait_for_selector(mut self, selector: impl Into<String>) -> Self {
         self.wait_for_selector = Some(selector.into());
-        self
-    }
-
-    pub fn with_viewport(mut self, width: u32, height: u32) -> Self {
-        self.viewport = Viewport { width, height };
         self
     }
 
@@ -436,8 +480,7 @@ mod tests {
         assert!(config.headless);
         assert!(!config.stealth);
         assert!(config.stealth_scripts.is_empty());
-        assert_eq!(config.fingerprint_preset, None);
-        assert_eq!(config.fingerprint_profile, None);
+        assert_eq!(config.device_profile, None);
         assert_eq!(config.wait_for_selector, None);
         assert_eq!(config.keep_alive, KeepAlive::Isolated);
         assert_eq!(config.keep_alive_scope, KeepAliveScope::Session);
@@ -448,12 +491,33 @@ mod tests {
     }
 
     #[test]
-    fn config_can_switch_browser_engine_builtin_profile_and_reuse_policy() {
+    fn config_can_switch_browser_engine_device_profile_and_reuse_policy() {
         let config = Config::default()
             .with_engine(Engine::Firefox)
             .with_stealth(true)
             .with_stealth_script("window.__thirdPartyStealth = true;")
-            .with_fingerprint_preset("desktop_zh_cn")
+            .with_device_profile(
+                DeviceProfile::new()
+                    .with_fingerprint(
+                        FingerprintProfile::new()
+                            .with_user_agent("custom-agent")
+                            .with_locale("ja-JP")
+                            .with_timezone("Asia/Tokyo")
+                            .with_accept_language("ja-JP,ja;q=0.9")
+                            .with_languages(["ja-JP", "ja"])
+                            .with_platform("MacIntel")
+                            .with_device_memory(16),
+                    )
+                    .with_screen(
+                        ScreenProfile::new()
+                            .with_viewport(1440, 900)
+                            .with_screen(1728, 1117)
+                            .with_avail(1728, 1067)
+                            .with_color_depth(24)
+                            .with_pixel_depth(24)
+                            .with_device_scale_factor(2),
+                    ),
+            )
             .with_wait_for_selector("#app")
             .with_keep_alive(KeepAlive::Context)
             .with_keep_alive_scope(KeepAliveScope::Origin)
@@ -468,8 +532,23 @@ mod tests {
             config.stealth_scripts,
             vec!["window.__thirdPartyStealth = true;".to_string()]
         );
-        assert_eq!(config.fingerprint_preset.as_deref(), Some("desktop_zh_cn"));
-        assert_eq!(config.fingerprint_profile, None);
+        assert_eq!(
+            config
+                .device_profile
+                .as_ref()
+                .and_then(|profile| profile.fingerprint.as_ref())
+                .and_then(|fingerprint| fingerprint.locale.as_deref()),
+            Some("ja-JP")
+        );
+        assert_eq!(
+            config
+                .device_profile
+                .as_ref()
+                .and_then(|profile| profile.screen.as_ref())
+                .and_then(|screen| screen.viewport.as_ref())
+                .cloned(),
+            Some(Size::new(1440, 900))
+        );
         assert_eq!(config.wait_for_selector.as_deref(), Some("#app"));
         assert_eq!(config.keep_alive, KeepAlive::Context);
         assert_eq!(config.keep_alive_scope, KeepAliveScope::Origin);
@@ -480,21 +559,6 @@ mod tests {
         );
         assert_eq!(config.keep_alive_max_uses, Some(20));
         assert_eq!(config.keep_alive_on_error, KeepAliveOnError::Reset);
-    }
-
-    #[test]
-    fn config_can_switch_to_structured_fingerprint_profile() {
-        let profile = FingerprintProfile::new()
-            .with_locale("ja-JP")
-            .with_timezone("Asia/Tokyo")
-            .with_accept_language("ja-JP,ja;q=0.9")
-            .with_languages(["ja-JP", "ja"]);
-        let config = Config::default()
-            .with_fingerprint_preset("desktop_en_us")
-            .with_fingerprint_profile(profile.clone());
-
-        assert_eq!(config.fingerprint_preset, None);
-        assert_eq!(config.fingerprint_profile, Some(profile));
     }
 
     #[test]

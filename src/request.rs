@@ -353,7 +353,10 @@ mod option_signed_duration_millis {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::request::browser::{Driver, Engine, FingerprintProfile, KeepAlive, KeepAliveScope};
+    use crate::request::browser::{
+        DeviceProfile, Driver, Engine, FingerprintProfile, KeepAlive, KeepAliveScope,
+        ScreenProfile, Size,
+    };
     use crate::value::Value;
     use jiff::SignedDuration;
 
@@ -393,7 +396,15 @@ mod tests {
                 .with_driver(Driver::Playwright)
                 .with_engine(Engine::Firefox)
                 .with_stealth(true)
-                .with_fingerprint_preset("desktop_en_us"),
+                .with_device_profile(
+                    DeviceProfile::new().with_fingerprint(
+                        FingerprintProfile::new()
+                            .with_locale("en-US")
+                            .with_timezone("America/New_York")
+                            .with_accept_language("en-US,en;q=0.9")
+                            .with_languages(["en-US", "en"]),
+                    ),
+                ),
         );
 
         assert_eq!(request.mode, RequestMode::Browser);
@@ -410,8 +421,10 @@ mod tests {
             request
                 .browser
                 .as_ref()
-                .and_then(|config| config.fingerprint_preset.as_deref()),
-            Some("desktop_en_us")
+                .and_then(|config| config.device_profile.as_ref())
+                .and_then(|profile| profile.fingerprint.as_ref())
+                .and_then(|fingerprint| fingerprint.locale.as_deref()),
+            Some("en-US")
         );
     }
 
@@ -505,12 +518,21 @@ mod tests {
                     .with_driver(Driver::Playwright)
                     .with_engine(Engine::Chromium)
                     .with_stealth(true)
-                    .with_fingerprint_profile(
-                        FingerprintProfile::new()
-                            .with_locale("zh-CN")
-                            .with_timezone("Asia/Shanghai")
-                            .with_accept_language("zh-CN,zh;q=0.9,en;q=0.8")
-                            .with_languages(["zh-CN", "zh", "en"]),
+                    .with_device_profile(
+                        DeviceProfile::new()
+                            .with_fingerprint(
+                                FingerprintProfile::new()
+                                    .with_locale("zh-CN")
+                                    .with_timezone("Asia/Shanghai")
+                                    .with_accept_language("zh-CN,zh;q=0.9,en;q=0.8")
+                                    .with_languages(["zh-CN", "zh", "en"]),
+                            )
+                            .with_screen(
+                                ScreenProfile::new()
+                                    .with_viewport(1440, 900)
+                                    .with_screen(1728, 1117)
+                                    .with_avail(1728, 1067),
+                            ),
                     )
                     .with_keep_alive(KeepAlive::Context)
                     .with_keep_alive_scope(KeepAliveScope::Origin)
@@ -572,9 +594,20 @@ mod tests {
             decoded
                 .browser
                 .as_ref()
-                .and_then(|config| config.fingerprint_profile.as_ref())
-                .map(|profile| profile.timezone.as_str()),
+                .and_then(|config| config.device_profile.as_ref())
+                .and_then(|profile| profile.fingerprint.as_ref())
+                .and_then(|profile| profile.timezone.as_deref()),
             Some("Asia/Shanghai")
+        );
+        assert_eq!(
+            decoded
+                .browser
+                .as_ref()
+                .and_then(|config| config.device_profile.as_ref())
+                .and_then(|profile| profile.screen.as_ref())
+                .and_then(|screen| screen.viewport.as_ref())
+                .cloned(),
+            Some(Size::new(1440, 900))
         );
     }
 }
