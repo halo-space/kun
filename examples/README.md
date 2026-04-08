@@ -19,6 +19,7 @@
 - `custom_http_cache.rs`：自定义 `middleware::http_cache::Cache` backend，再复用内置 `HttpCache` 行为
 - `robots_site_policy.rs`：`robots::Site::pattern / host / origin` 的 precedence、delay merge 和 sitemap union
 - `custom_middleware.rs`：引擎级中间件注册与执行顺序
+- `middleware_plugin.rs`：最小 middleware plugin 装配示例，展示 manifest / registry / factory / `load_plugins()`
 - `custom_dedup.rs`：自定义 `dedup::Dedup`，替换默认 request 去重实现
 - `custom_scheduler.rs`：自定义 `scheduler::Scheduler` 与自定义 `scheduler::checkpoint::Persist` 的接线方式
 - `plugins_demo.rs`：当前 middleware 插件接入路径、`PluginRegistry` 的 `(kind, name)` 唯一性与 override 规则

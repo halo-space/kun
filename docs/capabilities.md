@@ -16,7 +16,7 @@ README 负责总览，这里负责把每个模块现在到底能做什么、还�
 如果只看“代码爬虫底层能力”这一层，而不看 DSL，当前和 Scrapy 更完整运行时相比，最主要的剩余缺口是：
 
 - 观测主链路已经基本具备：`stats`、`signals / extensions`、`trace`、`telemetry` exporter 都已接通；当前真正还缺的是更完整的持久化事件总线聚合层、跨 job 运维自动化、更高阶的统一看板 / 巡检视图，以及 durable scheduler 的后台守护式运维服务
-- plugin 自动装载与 DSL 对齐仍明显落后于底层 runtime 能力
+- DSL 配置化入口与底层 runtime 能力对齐仍明显落后；plugin 当前则有意只收口在 `middleware` 装配，不承担通用组件扩展
 
 ## Request
 
@@ -1044,12 +1044,12 @@ let section_html = response.xpath("//section[@id='content']").html().one();
 
 ## Plugins
 
-当前 plugin 体系只把 `middleware` 当成已经落地的运行时能力。
+当前 plugin 体系的定位是：只负责 `middleware` 的声明式装配，不作为通用组件扩展机制。
 
-- `middleware`：已支持
-- `store` / `scheduler` / `dedup` / `robots` / `http` / `browser`：当前只保留为明确的 future owner 边界，不作为已落地自动装载能力承诺
+- `middleware`：已支持 manifest / registry / factory / `load_plugins()` 这条装配链路
+- `store` / `scheduler` / `dedup` / `robots` / `http` / `browser`：继续作为明确的组件 owner 边界，优先走 trait + engine 显式注入，不作为 plugin 自动装载目标
 
-这样做是为了避免注册表看起来什么都能扩展，但 engine 实际只接了一部分。
+这样做是为了避免注册表看起来什么都能扩展，但 engine 实际并不打算把所有核心组件都做成 plugin 式接线。
 
 ## DSL 当前定位
 

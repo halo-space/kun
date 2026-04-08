@@ -456,9 +456,9 @@ where
     /// has a registered factory.
     ///
     /// Before calling this method, register each middleware factory with
-    /// `register_middleware()`. `load_plugins()` currently auto-loads only
-    /// `kind = "middleware"` plugins; other known component kinds are kept as
-    /// explicit future extension points and are not auto-wired by the engine.
+    /// `register_middleware()`. `load_plugins()` currently only wires
+    /// `kind = "middleware"` plugins. Other known component kinds stay on the
+    /// explicit trait + engine injection path and are not auto-wired here.
     ///
     /// It verifies that every middleware declared in `plugins.toml` has a
     /// matching engine factory and returns an error otherwise.

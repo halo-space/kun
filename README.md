@@ -47,13 +47,12 @@ README 这里只保留总览；模块级细节统一放到 [docs/capabilities.md
 - `robots` 这块如果想直接看 `Site::pattern / host / origin` 的接法，可以运行 `examples/robots_site_policy.rs`
 - `AutoThrottle` 支持按 origin 基于延迟、错误和目标并发动态调整下一次下载间隔；`Settings::with_auto_throttle(true)` 开启后，`download_delay` 表示初始/最小 delay，`with_auto_throttle_max_delay(...)` 表示最大 delay
 - `HTTP cache / conditional request` 支持内存 backend 和内置 `middleware::http_cache::File` 持久化 backend；`Settings::with_http_cache(true)` 开启后，同一 HTTP `GET` 请求会基于已缓存的 `ETag / Last-Modified` 自动补 `If-None-Match / If-Modified-Since`；命中 `304 Not Modified` 时，在 `response` 策略下会回填缓存 body，并给 `Response.flags` 增加 `http_cache`；当前也支持 `ttl` 和 `validators / response` 两种缓存策略
-- plugin 自动装载当前只支持 `middleware` kind；当前已知但暂未自动装载的 kind 统一收口为 `store`、`scheduler`、`dedup`、`robots`、`http`、`browser`
+- plugin 当前定位为 `middleware` 的声明式装配：manifest / registry / factory / `load_plugins()` 这条链路已可用；`store`、`scheduler`、`dedup`、`robots`、`http`、`browser` 这些核心组件继续走 trait + engine 显式注入，不把 plugin 当通用组件扩展机制
 - DSL 当前定位已经明确为“共享底层能力的配置化入口”，不是另一套独立运行时
 
 当前仍待补齐的底层能力：
 
 - 观测 / 运维剩余缺口：持久化事件总线聚合层、跨 job 仪表盘 / 巡检视图，以及 durable scheduler 的后台守护式运维服务。
-- plugin 自动装载这条线当前仍只自动接 `middleware`；`store`、`scheduler`、`dedup`、`robots`、`http`、`browser` 这些 kind 还没有完成真正的 engine 自动接线。
 - DSL 继续后置；当前它已经共享底层 `Request / parse / scheduler / validation` 模型，但整体能力面仍然没有完全追平代码爬虫主线。
 
 ## 快速开始
@@ -352,6 +351,7 @@ HALO_SPIDER_ES_URL=http://127.0.0.1:9200 cargo run --example elasticsearch
 HALO_SPIDER_KAFKA_BROKERS=127.0.0.1:9092 cargo run --example kafka
 cargo run --example custom_dedup
 cargo run --example custom_middleware
+cargo run --example middleware_plugin
 cargo run --example custom_scheduler
 cargo run --example telemetry
 cargo run --example plugins_demo
