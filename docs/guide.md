@@ -14,6 +14,7 @@ README 只保留项目简介与导航；详细能力、边界和用法按章节�
 3. [示例、Pipeline 与 Store](./guide/examples-and-store.md)
 4. [Browser 与 AI](./guide/browser-and-ai.md)
 5. [DSL 与项目协作](./guide/dsl-and-project.md)
+6. [Rules DSL 设计（v1）](./guide/rules-dsl.md)
 
 ## 章节说明
 
@@ -27,6 +28,8 @@ README 只保留项目简介与导航；详细能力、边界和用法按章节�
   重点看 browser 下载边界、`device_profile`、`keep_alive`、stealth 与 AI selector。
 - [DSL 与项目协作](./guide/dsl-and-project.md)
   重点看 DSL 当前定位、共享模型边界，以及文档 / OpenSpec 协作方式。
+- [Rules DSL 设计（v1）](./guide/rules-dsl.md)
+  重点看新一版 DSL 的链路模型、配置骨架和字段说明。
 
 ## 配套文档
 
