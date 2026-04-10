@@ -1060,6 +1060,7 @@ let section_html = response.xpath("//section[@id='content']").html().one();
 - 不是另一套运行时
 - 不是重新发明一套调度、重试、去重、输出机制
 - 而是把代码爬虫已有的底层能力配置化
+- 在 DSL v1 里，这类共享能力会统一映射到 `engine.schedule / engine.limits / engine.retry / engine.dedup`
 - `validate` 继续走共享 validation 模型
 - `fetch.request` / `fetch.browser` 走共享 `Request`
 - 代码 Spider 的 item 输出当前走统一 `pipeline -> validator -> store`

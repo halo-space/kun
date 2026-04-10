@@ -11,7 +11,7 @@
 
 本版重点是把以下几类能力拆清楚：
 
-- 请求层：`request / schedule / retry / dedup / allow_url_pattern`
+- 请求层：`request / engine(schedule / limits / retry / dedup) / allow_url_pattern`
 - 页面解析层：`fields / bind`
 - 链路上下文：`meta`
 - 结果输出层：`output / validate / sinks`
@@ -55,9 +55,10 @@ start_url -> 列表页 -> 一批 detail_url -> 一批结果
 请求相关能力放在请求链路上：
 
 - `request`
-- `schedule`
-- `retry`
-- `dedup`
+- `engine.schedule`
+- `engine.limits`
+- `engine.retry`
+- `engine.dedup`
 - `allow_url_pattern`
 
 结果相关能力放在输出层：
@@ -68,11 +69,11 @@ start_url -> 列表页 -> 一批 detail_url -> 一批结果
 
 ### 05.1.4 配置集中定义、局部单值引用
 
-以下三类规则统一采用“顶层注册表 + 局部单值引用”的方式：
+以下三类 engine 规则统一采用“顶层注册表 + 局部单值引用”的方式：
 
-- `schedule`
-- `retry`
-- `dedup`
+- `engine.limits`
+- `engine.retry`
+- `engine.dedup`
 
 这样配置不会分散，也方便统一维护。
 
@@ -97,14 +98,11 @@ spider:
   name: "..."
   clock: ...
 
-schedule:
+engine:
+  schedule: ...
   limits: ...
-
-retry:
-  ...
-
-dedup:
-  ...
+  retry: ...
+  dedup: ...
 
 sinks:
   ...
@@ -119,9 +117,7 @@ steps:
 | 顶层字段 | 类型 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
 | `spider` | object | 是 | 无 | 爬虫级基础配置 |
-| `schedule` | object | 否 | 无 | 限流规则注册表 |
-| `retry` | object | 否 | 无 | 重试规则注册表 |
-| `dedup` | object | 否 | 无 | 请求去重规则注册表 |
+| `engine` | object | 否 | 无 | engine 共享能力配置入口 |
 | `sinks` | object | 否 | 无 | 输出目标注册表 |
 | `seeds` | array<object> | 是 | 无 | 起始请求列表 |
 | `steps` | array<object> | 是 | 无 | 页面处理步骤列表 |
@@ -130,12 +126,8 @@ steps:
 
 - `spider`
   爬虫级基础配置。
-- `schedule`
-  限流规则注册表。
-- `retry`
-  重试规则注册表。
-- `dedup`
-  请求去重规则注册表。
+- `engine`
+  engine 共享能力入口，挂 `schedule / limits / retry / dedup`。
 - `sinks`
   输出目标注册表。
 - `seeds`
@@ -154,7 +146,7 @@ spider:
   clock:
     timezone: "Asia/Shanghai"
 
-schedule:
+engine:
   limits:
     spider_global:
       key: "spider"
@@ -172,30 +164,30 @@ schedule:
       concurrency: 1
       interval: 1500
 
-retry:
-  default_retry:
-    inherit: true
-    count: 3
-    http_status: [429, 500, 502, 503, 504]
-    backoff: [1000, 3000, 5000]
+  retry:
+    default_retry:
+      inherit: true
+      count: 3
+      http_status: [429, 500, 502, 503, 504]
+      backoff: [1000, 3000, 5000]
 
-  detail_retry:
-    count: 4
-    http_status: [429, 500, 502, 503, 504]
-    backoff: [1000, 3000, 5000, 8000]
+    detail_retry:
+      count: 4
+      http_status: [429, 500, 502, 503, 504]
+      backoff: [1000, 3000, 5000, 8000]
 
-dedup:
-  request_url:
-    inherit: true
-    key:
-      - "$request.url"
-    ttl: 604800000
+  dedup:
+    request_url:
+      inherit: true
+      key:
+        - "$request.url"
+      ttl: 604800000
 
-  request_url_with_edition:
-    key:
-      - "$request.url"
-      - "$meta.edition_id"
-    ttl: 604800000
+    request_url_with_edition:
+      key:
+        - "$request.url"
+        - "$meta.edition_id"
+      ttl: 604800000
 
 sinks:
   article_db:
@@ -305,8 +297,8 @@ steps:
           page_no:
             from: "$bind.page_no"
 
-        dedup:
-          rule: "request_url"
+        engine:
+          dedup: "request_url"
 
   - id: "parse_front_page"
 
@@ -334,14 +326,10 @@ steps:
         allow_url_pattern:
           - "^https?://"
 
-        schedule:
+        engine:
           limit: "detail_slow"
-
-        retry:
-          rule: "detail_retry"
-
-        dedup:
-          rule: "request_url_with_edition"
+          retry: "detail_retry"
+          dedup: "request_url_with_edition"
 
   - id: "parse_detail"
 
@@ -430,16 +418,91 @@ spider:
 说明：
 
 - `spider` 只放爬虫级基础信息。
-- 不把 `retry / dedup / sinks / steps` 混到这里。
+- 不把 `engine / sinks / steps` 混到这里。
 
 ---
 
-## 05.5 `schedule`
+## 05.5 `engine`
 
 ### 05.5.1 顶层结构
 
 ```yaml
-schedule:
+engine:
+  schedule: ...
+
+  limits:
+    spider_global:
+      key: "spider"
+      inherit: true
+      concurrency: 5
+      interval: 300
+
+  retry:
+    default_retry:
+      inherit: true
+      count: 3
+      http_status: [429, 500, 502, 503, 504]
+      backoff: [1000, 3000, 5000]
+
+  dedup:
+    request_url:
+      inherit: true
+      key:
+        - "$request.url"
+      ttl: 604800000
+```
+
+| 字段 | 类型 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `engine` | object | 否 | 无 | engine 共享能力入口 |
+| `engine.schedule` | object | 否 | 无 | 调度相关配置入口 |
+| `engine.limits` | object | 否 | 无 | 限流规则注册表 |
+| `engine.retry` | object | 否 | 无 | 重试规则注册表 |
+| `engine.dedup` | object | 否 | 无 | 请求去重规则注册表 |
+
+### 05.5.2 为什么挂在 `engine` 下
+
+结合当前项目文档，以及代码侧已经存在的 `Engine::with_dedup(...)` 这类能力入口，`limits / retry / dedup` 更接近 engine 的共享能力，而不是 DSL 自己发明的新能力。
+
+因此本版 DSL 里，`engine` 是统一入口，其中：
+
+- `schedule`
+  只保留“调度语义”本身
+- `limits`
+  表示限流 / 节流规则
+- `retry`
+  表示请求重试规则
+- `dedup`
+  表示请求去重规则
+
+也就是说：
+
+- `schedule / limits / retry / dedup` 是 `engine` 下的并列字段
+- `schedule` 不再兼任限流 / 重试 / 去重的承载层
+- `limits / retry / dedup` 也不再伪装成“调度子字段”
+
+### 05.5.3 `engine.schedule`
+
+`engine.schedule` 表示调度相关配置入口。
+
+这里说的“调度”，只指：
+
+- 请求什么时候进入调度队列
+- 调度器按什么语义排队 / 触发
+- 是否存在延迟、优先级、窗口之类的调度概念
+
+它不负责：
+
+- 限流：看 `engine.limits`
+- 重试：看 `engine.retry`
+- 去重：看 `engine.dedup`
+
+`engine.schedule` 在 v1 里先只保留这个概念入口，不展开具体子字段，避免把“调度”和“限流/重试/去重”再次混在一起。后续如果要补 `priority / delay / cron / window` 这类字段，也继续挂在这里。
+
+### 05.5.4 `engine.limits`
+
+```yaml
+engine:
   limits:
     spider_global:
       key: "spider"
@@ -455,17 +518,14 @@ schedule:
 
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
-| `schedule.limits` | object | 是（若启用 `schedule`） | 无 | 限流规则注册表 |
-| `schedule.limits.<name>.key` | string | 是 | 无 | 限流规则按什么维度分桶生效 |
-| `schedule.limits.<name>.inherit` | bool | 否 | `false` | 是否全局默认生效 |
-| `schedule.limits.<name>.concurrency` | int | 否（与 `interval` 至少一项） | 无 | 最大并发数 |
-| `schedule.limits.<name>.interval` | number | 否（与 `concurrency` 至少一项） | 无 | 最小调度间隔，单位固定 `ms` |
+| `engine.limits.<name>.key` | string | 是 | 无 | 限流规则按什么维度分桶生效 |
+| `engine.limits.<name>.inherit` | bool | 否 | `false` | 是否全局默认生效 |
+| `engine.limits.<name>.concurrency` | int | 否（与 `interval` 至少一项） | 无 | 最大并发数 |
+| `engine.limits.<name>.interval` | number | 否（与 `concurrency` 至少一项） | 无 | 最小调度间隔，单位固定 `ms` |
 
 字段说明：
 
-- `limits`
-  限流规则注册表。
-- `limits.<name>`
+- `engine.limits.<name>`
   一条命名限流规则。
 - `key`
   这条限流规则按什么维度生效。
@@ -475,8 +535,6 @@ schedule:
   最大并发数。
 - `interval`
   最小调度间隔，单位固定 `ms`。
-
-### 05.5.2 `key` 是什么
 
 `key` 表示“这条限流规则，是按什么维度分桶生效”。
 
@@ -494,34 +552,35 @@ v1 推荐固定支持：
 - `key: "origin"`
   代表同域请求受这条规则限制。
 
-### 05.5.3 `inherit`
+`inherit` 规则：
 
 - `inherit: true`
   这条规则默认全局生效。
 - 不写 `inherit`
   默认是 `false`，只在局部显式引用时生效。
 
-### 05.5.4 局部引用
+### 05.5.5 局部引用
 
-`seed` 和 `follow` 都可以额外挂一条限流规则：
+`seed` 和 `follow` 都可以通过 `engine.limit` 额外挂一条限流规则：
 
 ```yaml
 follow:
   - next_step: "parse_detail"
-    schedule:
+    engine:
       limit: "detail_slow"
 ```
 
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
-| `seed.schedule.limit` | string | 否 | 无 | 当前 seed 额外挂一条限流规则 |
-| `follow.schedule.limit` | string | 否 | 无 | 当前 follow 额外挂一条限流规则 |
+| `seed.engine.limit` | string | 否 | 无 | 当前 seed 额外挂一条限流规则 |
+| `follow.engine.limit` | string | 否 | 无 | 当前 follow 额外挂一条限流规则 |
 
 约束：
 
 - `limit` 只能是单值字符串。
 - `limit` 不支持数组。
-- 实际生效规则 = 所有 `inherit: true` 的规则 + 当前局部 `limit`。
+- 实际生效规则 = 所有 `engine.limits.*.inherit=true` 的规则 + 当前局部 `limit`。
+- 局部这里只引用规则名，不在 `seed / follow` 里重复内联具体限流参数。
 
 设计原因：
 
@@ -530,34 +589,35 @@ follow:
 
 ---
 
-## 05.6 `retry`
+## 05.6 `engine.retry`
 
 ### 05.6.1 顶层结构
 
 ```yaml
-retry:
-  default_retry:
-    inherit: true
-    count: 3
-    http_status: [429, 500, 502, 503, 504]
-    backoff: [1000, 3000, 5000]
+engine:
+  retry:
+    default_retry:
+      inherit: true
+      count: 3
+      http_status: [429, 500, 502, 503, 504]
+      backoff: [1000, 3000, 5000]
 
-  detail_retry:
-    count: 4
-    http_status: [429, 500, 502, 503, 504]
-    backoff: [1000, 3000, 5000, 8000]
+    detail_retry:
+      count: 4
+      http_status: [429, 500, 502, 503, 504]
+      backoff: [1000, 3000, 5000, 8000]
 ```
 
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
-| `retry.<name>.inherit` | bool | 否 | `false` | 是否全局默认生效 |
-| `retry.<name>.count` | int | 是 | 无 | 最大重试次数 |
-| `retry.<name>.http_status` | array<int> | 否 | 无 | 哪些状态码触发重试 |
-| `retry.<name>.backoff` | array<number> | 否 | 无 | 每次重试前等待多久，单位固定 `ms` |
+| `engine.retry.<name>.inherit` | bool | 否 | `false` | 是否全局默认生效 |
+| `engine.retry.<name>.count` | int | 是 | 无 | 最大重试次数 |
+| `engine.retry.<name>.http_status` | array<int> | 否 | 无 | 哪些状态码触发重试 |
+| `engine.retry.<name>.backoff` | array<number> | 否 | 无 | 每次重试前等待多久，单位固定 `ms` |
 
 字段说明：
 
-- `retry.<name>`
+- `engine.retry.<name>`
   一条命名重试规则。
 - `inherit`
   是否全局默认生效。
@@ -573,20 +633,20 @@ retry:
 ```yaml
 follow:
   - next_step: "parse_detail"
-    retry:
-      rule: "detail_retry"
+    engine:
+      retry: "detail_retry"
 ```
 
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
-| `seed.retry.rule` | string | 否 | 无 | 当前 seed 额外挂一条重试规则 |
-| `follow.retry.rule` | string | 否 | 无 | 当前 follow 额外挂一条重试规则 |
+| `seed.engine.retry` | string | 否 | 无 | 当前 seed 额外挂一条重试规则 |
+| `follow.engine.retry` | string | 否 | 无 | 当前 follow 额外挂一条重试规则 |
 
 约束：
 
-- `rule` 只能是单值字符串。
-- `rule` 不支持数组。
-- 实际生效规则 = 所有 `inherit: true` 的规则 + 当前局部 `rule`。
+- `retry` 只能是单值字符串。
+- `retry` 不支持数组。
+- 实际生效规则 = 所有 `engine.retry.*.inherit=true` 的规则 + 当前局部 `retry`。
 
 ### 05.6.3 `backoff` 规则
 
@@ -610,34 +670,35 @@ backoff: [1000, 3000]
 
 ---
 
-## 05.7 `dedup`
+## 05.7 `engine.dedup`
 
 ### 05.7.1 顶层结构
 
 ```yaml
-dedup:
-  request_url:
-    inherit: true
-    key:
-      - "$request.url"
-    ttl: 604800000
+engine:
+  dedup:
+    request_url:
+      inherit: true
+      key:
+        - "$request.url"
+      ttl: 604800000
 
-  request_url_with_edition:
-    key:
-      - "$request.url"
-      - "$meta.edition_id"
-    ttl: 604800000
+    request_url_with_edition:
+      key:
+        - "$request.url"
+        - "$meta.edition_id"
+      ttl: 604800000
 ```
 
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
-| `dedup.<name>.inherit` | bool | 否 | `false` | 是否全局默认生效 |
-| `dedup.<name>.key` | array<string> | 是 | 无 | 去重键组成字段列表 |
-| `dedup.<name>.ttl` | number | 是 | 无 | 去重有效期，单位固定 `ms` |
+| `engine.dedup.<name>.inherit` | bool | 否 | `false` | 是否全局默认生效 |
+| `engine.dedup.<name>.key` | array<string> | 是 | 无 | 去重键组成字段列表 |
+| `engine.dedup.<name>.ttl` | number | 是 | 无 | 去重有效期，单位固定 `ms` |
 
 字段说明：
 
-- `dedup.<name>`
+- `engine.dedup.<name>`
   一条命名去重规则。
 - `inherit`
   是否全局默认生效。
@@ -651,20 +712,20 @@ dedup:
 ```yaml
 follow:
   - next_step: "parse_detail"
-    dedup:
-      rule: "request_url_with_edition"
+    engine:
+      dedup: "request_url_with_edition"
 ```
 
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
-| `seed.dedup.rule` | string | 否 | 无 | 当前 seed 额外挂一条去重规则 |
-| `follow.dedup.rule` | string | 否 | 无 | 当前 follow 额外挂一条去重规则 |
+| `seed.engine.dedup` | string | 否 | 无 | 当前 seed 额外挂一条去重规则 |
+| `follow.engine.dedup` | string | 否 | 无 | 当前 follow 额外挂一条去重规则 |
 
 约束：
 
-- `rule` 只能是单值字符串。
-- `rule` 不支持数组。
-- 实际生效规则 = 所有 `inherit: true` 的规则 + 当前局部 `rule`。
+- `dedup` 只能是单值字符串。
+- `dedup` 不支持数组。
+- 实际生效规则 = 所有 `engine.dedup.*.inherit=true` 的规则 + 当前局部 `dedup`。
 
 ### 05.7.3 `key` 怎么算
 
@@ -769,14 +830,10 @@ seeds:
     allow_url_pattern:
       - "^https?://"
 
-    schedule:
+    engine:
       limit: "detail_slow"
-
-    retry:
-      rule: "detail_retry"
-
-    dedup:
-      rule: "request_url"
+      retry: "detail_retry"
+      dedup: "request_url"
 
     next_step: "parse_period_xml"
 ```
@@ -787,9 +844,9 @@ seeds:
 | `seeds[].request` | object | 是 | 无 | 起始请求配置 |
 | `seeds[].meta` | object | 否 | 无 | 初始链路上下文 |
 | `seeds[].allow_url_pattern` | array<string> | 否 | 无 | URL 过滤规则 |
-| `seeds[].schedule.limit` | string | 否 | 无 | 当前 seed 额外挂一条限流规则 |
-| `seeds[].retry.rule` | string | 否 | 无 | 当前 seed 额外挂一条重试规则 |
-| `seeds[].dedup.rule` | string | 否 | 无 | 当前 seed 额外挂一条去重规则 |
+| `seeds[].engine.limit` | string | 否 | 无 | 当前 seed 额外挂一条限流规则 |
+| `seeds[].engine.retry` | string | 否 | 无 | 当前 seed 额外挂一条重试规则 |
+| `seeds[].engine.dedup` | string | 否 | 无 | 当前 seed 额外挂一条去重规则 |
 | `seeds[].next_step` | string | 是 | 无 | 请求成功后进入的 step |
 
 字段说明：
@@ -802,11 +859,11 @@ seeds:
   初始链路上下文，可选。
 - `allow_url_pattern`
   URL 过滤规则，可选。
-- `schedule.limit`
+- `engine.limit`
   额外挂一条限流规则，可选。
-- `retry.rule`
+- `engine.retry`
   额外挂一条重试规则，可选。
-- `dedup.rule`
+- `engine.dedup`
   额外挂一条去重规则，可选。
 - `next_step`
   请求成功后进入哪个 step。
@@ -815,6 +872,7 @@ seeds:
 
 - seed 本质上也是一条请求。
 - 所以它和 follow 一样，可以挂请求层能力。
+- `engine.limit / engine.retry / engine.dedup` 这里只写规则名，具体规则统一在顶层 `engine` 注册表维护。
 
 ---
 
@@ -854,8 +912,8 @@ steps:
 说明：
 
 - 一个 step 至少要有 `follow` 或 `output` 之一。
-- `step` 自己不放 `schedule / retry / dedup` 的具体参数。
-- 请求控制只放在 `seed / follow` 上。
+- `step` 自己不放 `engine.limits / engine.retry / engine.dedup` 的具体参数。
+- 请求控制只放在 `seed / follow` 的 `engine` 上。
 
 ---
 
@@ -1079,26 +1137,22 @@ follow:
     allow_url_pattern:
       - "^https?://"
 
-    schedule:
+    engine:
       limit: "detail_slow"
-
-    retry:
-      rule: "detail_retry"
-
-    dedup:
-      rule: "request_url_with_edition"
+      retry: "detail_retry"
+      dedup: "request_url_with_edition"
 ```
 
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
-| `follow[].item` | string | 否 | 无 | 当前 follow 的单条子链路节点范围 |
+| `follow[].item` | string | 否 | 无 | 当前一条子链路对应哪个页面节点 |
 | `follow[].next_step` | string | 是 | 无 | 子链路进入的下一个 step |
 | `follow[].request` | object | 是 | 无 | 下一跳请求配置 |
 | `follow[].meta` | object | 否 | 无 | 绑定到当前下一跳请求上的上下文 |
 | `follow[].allow_url_pattern` | array<string> | 否 | 无 | URL 过滤规则 |
-| `follow[].schedule.limit` | string | 否 | 无 | 当前 follow 额外挂一条限流规则 |
-| `follow[].retry.rule` | string | 否 | 无 | 当前 follow 额外挂一条重试规则 |
-| `follow[].dedup.rule` | string | 否 | 无 | 当前 follow 额外挂一条去重规则 |
+| `follow[].engine.limit` | string | 否 | 无 | 当前 follow 额外挂一条限流规则 |
+| `follow[].engine.retry` | string | 否 | 无 | 当前 follow 额外挂一条重试规则 |
+| `follow[].engine.dedup` | string | 否 | 无 | 当前 follow 额外挂一条去重规则 |
 
 字段说明：
 
@@ -1112,20 +1166,25 @@ follow:
   绑定到当前下一跳请求上的上下文。
 - `allow_url_pattern`
   允许通过的 URL 正则列表。
-- `schedule.limit`
+- `engine.limit`
   当前 follow 额外挂一条限流规则。
-- `retry.rule`
+- `engine.retry`
   当前 follow 额外挂一条重试规则。
-- `dedup.rule`
+- `engine.dedup`
   当前 follow 额外挂一条去重规则。
+
+补充说明：
+
+- `engine.limit / engine.retry / engine.dedup` 这里只引用顶层 `engine` 中已经注册好的规则名。
+- `follow` 本身不内联具体限流 / 重试 / 去重参数。
 
 ### 05.14.2 `item` 是什么
 
 `item` 不是 `for_each`，也不是数组循环语法。
 
-它的作用只有一个：
+它的作用可以直白理解成：
 
-定义“当前 follow 的单条子链路，是从页面里的哪个子节点产生出来的”。
+“这一条 follow，要先在页面里找到哪一类节点，然后每个节点各走一遍完整链路”。
 
 例如：
 
@@ -1138,6 +1197,7 @@ item: ".news-list li"
 - 每个 `li` 对应一条子链路
 - 引擎按每个 `li` 逐条执行一次完整流程
 - 每条流程里都会产生自己的 `request + meta + next_step`
+- 也就是每个命中的节点，都会变成一条独立的数据流转链路
 
 如果当前页面只会产生一条下一跳请求，可以省略 `item`。
 
@@ -1166,10 +1226,10 @@ item: ".news-list li"
 2. 如果是相对 URL，则补全为绝对 URL
 3. 应用 `request.query`
 4. 执行 `allow_url_pattern`
-5. 执行 `dedup`
-6. 进入 `schedule`
+5. 执行 `engine.dedup`
+6. 进入 `engine.schedule` 调度，并受 `engine.limits` 约束
 7. 发请求
-8. 失败时按 `retry` 处理
+8. 失败时按 `engine.retry` 处理
 9. 成功后进入 `next_step`
 
 ---
@@ -1586,7 +1646,7 @@ allow_url_pattern:
 推荐处理时机：
 
 - 在 URL 生成并规范化之后
-- 在 dedup 之前
+- 在 `engine.dedup` 之前
 
 ---
 
@@ -1609,10 +1669,10 @@ allow_url_pattern:
 3. 生成当前子链路的 `meta`
 4. 如果是相对 URL，则补全
 5. 执行 `allow_url_pattern`
-6. 执行 `dedup`
-7. 进入 `schedule`
+6. 执行 `engine.dedup`
+7. 进入 `engine.schedule` 调度，并受 `engine.limits` 约束
 8. 发请求
-9. 失败时按 `retry` 处理
+9. 失败时按 `engine.retry` 处理
 10. 成功后进入 `next_step`
 
 ### 05.19.3 output 输出结果
@@ -1649,7 +1709,7 @@ allow_url_pattern:
 
 本版 DSL v1 的核心骨架已经固定为：
 
-- 顶层注册表：`schedule / retry / dedup / sinks`
+- 顶层注册表：`engine(schedule / limits / retry / dedup) / sinks`
 - 链路起点：`seeds`
 - 页面处理：`steps`
 - 页面解析：`fields`

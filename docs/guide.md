@@ -29,7 +29,7 @@ README 只保留项目简介与导航；详细能力、边界和用法按章节�
 - [DSL 与项目协作](./guide/dsl-and-project.md)
   重点看 DSL 当前定位、共享模型边界，以及文档 / OpenSpec 协作方式。
 - [Rules DSL 设计（v1）](./guide/rules-dsl.md)
-  重点看新一版 DSL 的链路模型、配置骨架和字段说明。
+  重点看新一版 DSL 的链路模型、`engine` 能力映射、配置骨架和字段说明。
 
 ## 配套文档
 

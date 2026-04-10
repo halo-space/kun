@@ -33,6 +33,7 @@ impl Spider for MyDslSpider {
 
 - 当前优先把代码爬虫与共享底层能力做实
 - DSL 只是这些底层能力的配置化入口，不是另一套独立运行时
+- 新一版 DSL 设计里，这些共享能力会统一收口到 `engine(...)` 配置入口，和 `Engine::with_dedup(...)` 这类代码能力命名保持一致
 - 在配置面重新收敛前，不继续维护容易过期的 DSL 字段清单和外部示例
 
 DSL 当前的定位可以先简单理解成：把代码爬虫已有底层能力做成配置化入口。它不是另一套独立运行时。无论是 Rust 回调模式还是 JSON DSL 模式，底层都走同一套框架执行链路：
@@ -55,7 +56,7 @@ Spider / rules
 - 代码 Spider 现在可以通过 `Spider::validator()` 显式启用共享 validation；item 产出会继续走统一的 `pipeline -> validator -> store` 链路
 - `meta` 是请求级上下文参数，用来携带当前请求和后续链路需要透传的数据
 - `Response.body` 保留原始响应字节，`Response.text` 是从 `body` 派生出的解码文本
-- `dedup`、`schedule`、`retry` 等能力属于框架本身的爬虫能力，DSL 只是这些能力的配置化表达
+- 去重、调度、限流、重试等能力属于框架本身的 engine 能力；在 DSL v1 里会统一映射到 `engine.dedup / engine.schedule / engine.limits / engine.retry`
 
 如果你现在要写新的爬虫，优先建议直接用代码模式；等共享底层能力进一步稳定后，再回到 DSL 配置面做统一收口。
 
