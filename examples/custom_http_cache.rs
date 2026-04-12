@@ -1,3 +1,5 @@
+#![allow(refining_impl_trait)]
+
 //! Custom HTTP cache backend example.
 //!
 //! 展示：
@@ -19,7 +21,7 @@ use halo_spider::pipeline::Pipeline;
 use halo_spider::request::{Headers, Request};
 use halo_spider::response::Response;
 use halo_spider::settings::Config;
-use halo_spider::spider::{Output, Spider};
+use halo_spider::spider::Spider;
 use halo_spider::store::Memory as MemoryStore;
 use halo_spider::value::Value;
 use jiff::SignedDuration;
@@ -116,7 +118,7 @@ impl Spider for CacheSpider {
         vec!["https://example.com/custom-cache".to_string()]
     }
 
-    async fn parse(&self, response: &Response) -> Result<Output, SpiderError> {
+    async fn parse(&self, response: &Response) -> Result<(Item, Vec<Request>), SpiderError> {
         let round = response
             .meta
             .get("round")
@@ -143,10 +145,7 @@ impl Spider for CacheSpider {
             Vec::new()
         };
 
-        Ok(Output {
-            items: vec![item],
-            requests,
-        })
+        Ok((item, requests))
     }
 }
 

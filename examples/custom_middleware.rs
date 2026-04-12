@@ -1,3 +1,5 @@
+#![allow(refining_impl_trait)]
+
 //! 自定义中间件示例
 //!
 //! 演示两种注册自定义中间件的方式：
@@ -21,7 +23,7 @@ use halo_spider::middleware::Stage;
 use halo_spider::middleware::traits::Middleware;
 use halo_spider::response::Response;
 use halo_spider::settings::Config;
-use halo_spider::spider::{Output, Spider};
+use halo_spider::spider::Spider;
 use halo_spider::value::Value;
 use halo_spider::{cb, spider_callbacks};
 use jiff::SignedDuration;
@@ -161,22 +163,20 @@ impl Spider for PeriodDemoSpider {
         vec!["https://ep.shxwcb.com/2026/03/period.xml".to_string()]
     }
 
-    async fn parse(&self, response: &Response) -> Result<Output, SpiderError> {
-        Ok(Output {
-            items: vec![],
-            requests: vec![
-                response
-                    .follow_with_meta(&latest_edition_url(response)?, &latest_meta(response)?)
-                    .with_callback(cb!(Self::parse_edition)),
-            ],
-        })
+    async fn parse(
+        &self,
+        response: &Response,
+    ) -> Result<halo_spider::request::Request, SpiderError> {
+        Ok(response
+            .follow_with_meta(&latest_edition_url(response)?, &latest_meta(response)?)
+            .with_callback(cb!(Self::parse_edition)))
     }
 
-    spider_callbacks!(parse, parse_edition);
+    spider_callbacks!(parse_edition);
 }
 
 impl PeriodDemoSpider {
-    async fn parse_edition(&self, response: &Response) -> Result<Output, SpiderError> {
+    async fn parse_edition(&self, response: &Response) -> Result<Item, SpiderError> {
         let period_date = response
             .meta
             .get("period_date")
@@ -192,15 +192,10 @@ impl PeriodDemoSpider {
             ],
         );
 
-        Ok(Output {
-            items: vec![
-                Item::new()
-                    .with_field("period_date", Value::String(period_date.to_string()))
-                    .with_field("edition_title", Value::String(title))
-                    .with_field("url", Value::String(response.url.clone())),
-            ],
-            requests: vec![],
-        })
+        Ok(Item::new()
+            .with_field("period_date", Value::String(period_date.to_string()))
+            .with_field("edition_title", Value::String(title))
+            .with_field("url", Value::String(response.url.clone())))
     }
 }
 
@@ -281,10 +276,10 @@ async fn main() {
     });
 
     match engine.run(&spider).await {
-        Ok(outputs) => {
-            let total: usize = outputs.iter().map(|o| o.items.len()).sum();
+        Ok(()) => {
+            let total = engine.stats().item_count;
             println!("\n=== Done ===");
-            println!("{} run(s), {} item(s) total", outputs.len(), total);
+            println!("{} item(s) total", total);
         }
         Err(e) => eprintln!("error: {e}"),
     }

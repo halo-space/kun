@@ -176,7 +176,7 @@ let engine = Engine::new().with_stores([
          +--> pipeline.process(item)
          +--> step_validator
          +--> stores.batch_write(items)
-         +--> output.requests -> 回到 enqueue
+         +--> callback 产出的 follow requests -> 回到 enqueue
 ```
 
 几个关键点：
@@ -264,7 +264,10 @@ download(http/browser)
        |    +-- Drop -----> complete/drop
        |    `-- Continue -> task error
        |
-       `-- SpiderOutput { items, requests }
+       `-- callback result
+             - Item / Vec<Item>
+             - Request / Vec<Request>
+             - (items, requests)
              |
              v
            before_item

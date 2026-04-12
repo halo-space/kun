@@ -1,9 +1,11 @@
+#![allow(refining_impl_trait)]
+
 use halo_spider::download::traits::Downloader;
 use halo_spider::engine::Engine;
 use halo_spider::error::SpiderError;
 use halo_spider::request::Request;
 use halo_spider::response::Response;
-use halo_spider::spider::{Output, Spider};
+use halo_spider::spider::Spider;
 use halo_spider::store;
 use halo_spider::telemetry;
 
@@ -32,8 +34,8 @@ impl Spider for DemoSpider {
         vec!["https://example.com/telemetry".to_string()]
     }
 
-    async fn parse(&self, _response: &Response) -> Result<Output, SpiderError> {
-        Ok(Output::empty())
+    async fn parse(&self, _response: &Response) -> Result<(), SpiderError> {
+        Ok(())
     }
 }
 
@@ -52,10 +54,10 @@ async fn main() -> Result<(), SpiderError> {
         .with_store(store::Memory::default())
         .with_telemetry(telemetry);
 
-    let outputs = engine.run(&DemoSpider).await?;
+    engine.run(&DemoSpider).await?;
     let snapshot = collector.snapshot();
 
-    println!("outputs: {}", outputs.len());
+    println!("items: {}", engine.stats().item_count);
     println!(
         "stats: request={} response={} scheduler_claim={}",
         snapshot.stats.request_count,

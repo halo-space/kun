@@ -17,7 +17,7 @@ use crate::request::{Request, RequestMode};
 use crate::rules::Compiled;
 use crate::scheduler::{Scheduler, Task};
 use crate::settings::Config;
-use crate::spider::{Output as SpiderOutput, Spider};
+use crate::spider::Spider;
 use crate::store::{DEFAULT_STORE_KEY, StoreEntry};
 use crate::validator::StepValidator;
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -750,7 +750,7 @@ where
     /// It exits only when:
     /// 1. `engine.stop()` or `shutdown_handle().stop()` is called
     /// 2. Ctrl+C triggers a stop signal
-    pub async fn run<Sp: Spider>(&mut self, spider: &Sp) -> Result<Vec<SpiderOutput>, SpiderError> {
+    pub async fn run<Sp: Spider>(&mut self, spider: &Sp) -> Result<(), SpiderError> {
         let spider_name = spider.name();
         crate::trace::info(
             "engine.start",
@@ -792,7 +792,6 @@ where
 
         type TaskFuture<'a> = Pin<Box<dyn std::future::Future<Output = TaskRun> + 'a>>;
         let mut inflight: FuturesUnordered<TaskFuture<'_>> = FuturesUnordered::new();
-        let mut outputs = Vec::new();
         let mut round = 0usize;
 
         let scheduler = &self.scheduler;
@@ -816,7 +815,6 @@ where
                         engine_middleware,
                         step_executes,
                         allowed_domains,
-                        &mut outputs,
                         &mut round,
                         spider_name,
                         stats.as_ref(),
@@ -920,7 +918,6 @@ where
                     engine_middleware,
                     step_executes,
                     allowed_domains,
-                    &mut outputs,
                     &mut round,
                     spider_name,
                     stats.as_ref(),
@@ -939,14 +936,13 @@ where
             ))
             .await;
 
-        let total_items: usize = outputs.iter().map(|o| o.items.len()).sum();
         let snapshot = stats.snapshot();
         crate::trace::info(
             "engine.stop",
             vec![
                 crate::trace::prop("spider", spider_name),
                 crate::trace::prop("rounds", round),
-                crate::trace::prop("items", total_items),
+                crate::trace::prop("items", snapshot.item_count),
                 crate::trace::prop("requests", snapshot.request_count),
                 crate::trace::prop("responses", snapshot.response_count),
                 crate::trace::prop("errors", snapshot.error_count),
@@ -957,7 +953,7 @@ where
 
         self.scheduler.close().await?;
 
-        Ok(outputs)
+        Ok(())
     }
 
     /// Signal the engine to stop and exit gracefully after the current loop.
@@ -1465,7 +1461,7 @@ where
         spider: &Sp,
         compiled: Option<&Compiled>,
         step_executes: &mut BTreeMap<String, StepExecute>,
-    ) -> Result<Option<crate::spider::Output>, SpiderError> {
+    ) -> Result<Option<crate::engine::task::TaskOutput>, SpiderError> {
         if !self.prepared {
             *step_executes = self.build_step_executes(compiled, spider.validator())?;
             self.pipeline.open(spider.name()).await?;
@@ -1566,10 +1562,7 @@ where
                             .await;
                     }
                 }
-                Ok(Some(crate::spider::Output {
-                    items: output.items,
-                    requests: output.follows,
-                }))
+                Ok(Some(output))
             }
             TaskOutcome::Delay(delayed_task) => {
                 let delayed_task = *delayed_task;
@@ -1707,6 +1700,7 @@ where
 }
 
 #[cfg(test)]
+#[allow(refining_impl_trait)]
 mod tests {
     use super::*;
     use crate::engine::{context, flow};
@@ -1726,7 +1720,7 @@ mod tests {
     use crate::signals::{
         Kind as SignalKind, Listener as SignalListener, SchedulerEventKind, Signal,
     };
-    use crate::spider::{Failure, Output as SpiderOutput, Spider};
+    use crate::spider::{Failure, Spider};
     use crate::stats::Snapshot as StatsSnapshot;
     use crate::stats::{Event as StatsEvent, Reporter as StatsReporter};
     use crate::store::Memory as MemoryStore;
@@ -1931,8 +1925,8 @@ mod tests {
             observer
         };
         let (run_result, observer) = tokio::join!(engine.run(&StartUrlSpider), observer_task);
-        let outputs = run_result.unwrap();
-        assert_eq!(outputs.len(), 1);
+        run_result.unwrap();
+        assert_eq!(engine.stats().response_count, 1);
 
         let final_checkpoint = observer.checkpoint().await.unwrap();
         assert!(!final_checkpoint.has_pending());
@@ -2681,7 +2675,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(first.items.len(), 1);
-        assert_eq!(first.requests.len(), 2);
+        assert_eq!(first.follows.len(), 2);
         assert_eq!(ready_urls, vec!["https://example.com/detail".to_string()]);
         assert_eq!(
             store.items(),
@@ -2738,7 +2732,7 @@ mod tests {
 
         let delayed_checkpoint = engine.scheduler.checkpoint();
 
-        assert_eq!(first.requests.len(), 2);
+        assert_eq!(first.follows.len(), 2);
         assert_eq!(second.items.len(), 1);
         assert!(third.is_none());
         assert_eq!(*fetches.lock().unwrap(), 2);
@@ -2789,7 +2783,7 @@ mod tests {
             .first()
             .expect("retry task should be ready");
 
-        assert_eq!(first.requests.len(), 1);
+        assert_eq!(first.follows.len(), 1);
         assert!(second.is_none());
         assert_eq!(
             retry_task.request.meta.get("_retry_times"),
@@ -3579,9 +3573,7 @@ mod tests {
             shutdown.stop();
         });
 
-        let outputs = engine.run(&IdleSpider).await.unwrap();
-
-        assert!(outputs.is_empty());
+        engine.run(&IdleSpider).await.unwrap();
         assert_eq!(
             recorded_events.lock().unwrap().clone(),
             vec![SignalKind::SpiderOpened, SignalKind::SpiderClosed]
@@ -3608,9 +3600,7 @@ mod tests {
             shutdown.stop();
         });
 
-        let outputs = engine.run(&BatchStartSpider).await.unwrap();
-
-        assert_eq!(outputs.len(), 3);
+        engine.run(&BatchStartSpider).await.unwrap();
         assert!(*batch_calls.lock().unwrap() > 0);
         assert_eq!(*single_calls.lock().unwrap(), 0);
         assert_eq!(
@@ -4490,8 +4480,8 @@ mod tests {
             self.0
         }
 
-        async fn parse(&self, _response: &Response) -> Result<SpiderOutput, SpiderError> {
-            Ok(SpiderOutput::empty())
+        async fn parse(&self, _response: &Response) -> Result<(), SpiderError> {
+            Ok(())
         }
     }
 
@@ -4631,13 +4621,8 @@ mod tests {
             "item_spider"
         }
 
-        async fn parse(&self, _response: &Response) -> Result<SpiderOutput, SpiderError> {
-            Ok(SpiderOutput {
-                items: vec![
-                    crate::item::Item::new().with_field("title", Value::String("post".to_string())),
-                ],
-                requests: Vec::new(),
-            })
+        async fn parse(&self, _response: &Response) -> Result<crate::item::Item, SpiderError> {
+            Ok(crate::item::Item::new().with_field("title", Value::String("post".to_string())))
         }
     }
 
@@ -4680,13 +4665,8 @@ mod tests {
             }))))
         }
 
-        async fn parse(&self, _response: &Response) -> Result<SpiderOutput, SpiderError> {
-            Ok(SpiderOutput {
-                items: vec![
-                    crate::item::Item::new().with_field("title", Value::String("post".to_string())),
-                ],
-                requests: Vec::new(),
-            })
+        async fn parse(&self, _response: &Response) -> Result<crate::item::Item, SpiderError> {
+            Ok(crate::item::Item::new().with_field("title", Value::String("post".to_string())))
         }
     }
 
@@ -4726,13 +4706,8 @@ mod tests {
             }))))
         }
 
-        async fn parse(&self, _response: &Response) -> Result<SpiderOutput, SpiderError> {
-            Ok(SpiderOutput {
-                items: vec![
-                    crate::item::Item::new().with_field("title", Value::String("post".to_string())),
-                ],
-                requests: Vec::new(),
-            })
+        async fn parse(&self, _response: &Response) -> Result<crate::item::Item, SpiderError> {
+            Ok(crate::item::Item::new().with_field("title", Value::String("post".to_string())))
         }
     }
 
@@ -4755,18 +4730,13 @@ mod tests {
             )
         }
 
-        async fn parse(&self, _response: &Response) -> Result<SpiderOutput, SpiderError> {
-            Ok(SpiderOutput {
-                items: vec![
-                    crate::item::Item::new()
-                        .with_field("title", Value::String("post".to_string()))
-                        .with_field(
-                            "published_at",
-                            Value::String("2026-04-08 10:00:00".to_string()),
-                        ),
-                ],
-                requests: Vec::new(),
-            })
+        async fn parse(&self, _response: &Response) -> Result<crate::item::Item, SpiderError> {
+            Ok(crate::item::Item::new()
+                .with_field("title", Value::String("post".to_string()))
+                .with_field(
+                    "published_at",
+                    Value::String("2026-04-08 10:00:00".to_string()),
+                ))
         }
     }
 
@@ -4789,15 +4759,10 @@ mod tests {
             )
         }
 
-        async fn parse(&self, _response: &Response) -> Result<SpiderOutput, SpiderError> {
-            Ok(SpiderOutput {
-                items: vec![
-                    crate::item::Item::new()
-                        .with_field("title", Value::String("post".to_string()))
-                        .with_field("published_at", Value::String("not-a-datetime".to_string())),
-                ],
-                requests: Vec::new(),
-            })
+        async fn parse(&self, _response: &Response) -> Result<crate::item::Item, SpiderError> {
+            Ok(crate::item::Item::new()
+                .with_field("title", Value::String("post".to_string()))
+                .with_field("published_at", Value::String("not-a-datetime".to_string())))
         }
     }
 
@@ -4808,7 +4773,7 @@ mod tests {
             "failing_spider"
         }
 
-        async fn parse(&self, _response: &Response) -> Result<SpiderOutput, SpiderError> {
+        async fn parse(&self, _response: &Response) -> Result<(), SpiderError> {
             Err(SpiderError::parse("parse failed"))
         }
     }
@@ -4828,21 +4793,14 @@ mod tests {
             "response_inspect_spider"
         }
 
-        async fn parse(&self, response: &Response) -> Result<SpiderOutput, SpiderError> {
-            Ok(SpiderOutput {
-                items: vec![
-                    crate::item::Item::new()
-                        .with_field("status", Value::Number(response.status as f64))
-                        .with_field("text", Value::String(response.text.clone()))
-                        .with_field(
-                            "flags",
-                            Value::Array(
-                                response.flags.iter().cloned().map(Value::String).collect(),
-                            ),
-                        ),
-                ],
-                requests: Vec::new(),
-            })
+        async fn parse(&self, response: &Response) -> Result<crate::item::Item, SpiderError> {
+            Ok(crate::item::Item::new()
+                .with_field("status", Value::Number(response.status as f64))
+                .with_field("text", Value::String(response.text.clone()))
+                .with_field(
+                    "flags",
+                    Value::Array(response.flags.iter().cloned().map(Value::String).collect()),
+                ))
         }
     }
 
@@ -4853,27 +4811,23 @@ mod tests {
             "callback_dedup_spider"
         }
 
-        async fn parse(&self, response: &Response) -> Result<SpiderOutput, SpiderError> {
+        async fn parse(
+            &self,
+            response: &Response,
+        ) -> Result<impl crate::spider::IntoSpiderResultParts, SpiderError> {
             if response.url.ends_with("/start") {
-                return Ok(SpiderOutput {
-                    items: vec![
-                        crate::item::Item::new()
-                            .with_field("title", Value::String("root".to_string())),
-                    ],
-                    requests: vec![
+                return Ok(crate::spider::into_spider_result_parts((
+                    crate::item::Item::new().with_field("title", Value::String("root".to_string())),
+                    vec![
                         Request::new("https://example.com/detail"),
                         Request::new("https://example.com/detail"),
                     ],
-                });
+                )));
             }
 
-            Ok(SpiderOutput {
-                items: vec![
-                    crate::item::Item::new()
-                        .with_field("title", Value::String("detail".to_string())),
-                ],
-                requests: Vec::new(),
-            })
+            Ok(crate::spider::into_spider_result_parts(
+                crate::item::Item::new().with_field("title", Value::String("detail".to_string())),
+            ))
         }
     }
 
@@ -4884,26 +4838,22 @@ mod tests {
             "callback_interval_spider"
         }
 
-        async fn parse(&self, response: &Response) -> Result<SpiderOutput, SpiderError> {
+        async fn parse(
+            &self,
+            response: &Response,
+        ) -> Result<impl crate::spider::IntoSpiderResultParts, SpiderError> {
             if response.url.ends_with("/start") {
                 let interval = BTreeMap::from([("interval".to_string(), Value::Number(20.0))]);
-                return Ok(SpiderOutput {
-                    items: Vec::new(),
-                    requests: vec![
-                        Request::new("https://example.com/detail/1")
-                            .with_interval(interval.clone(), 120),
-                        Request::new("https://example.com/detail/2").with_interval(interval, 120),
-                    ],
-                });
+                return Ok(crate::spider::into_spider_result_parts(vec![
+                    Request::new("https://example.com/detail/1")
+                        .with_interval(interval.clone(), 120),
+                    Request::new("https://example.com/detail/2").with_interval(interval, 120),
+                ]));
             }
 
-            Ok(SpiderOutput {
-                items: vec![
-                    crate::item::Item::new()
-                        .with_field("title", Value::String(response.url.clone())),
-                ],
-                requests: Vec::new(),
-            })
+            Ok(crate::spider::into_spider_result_parts(
+                crate::item::Item::new().with_field("title", Value::String(response.url.clone())),
+            ))
         }
     }
 
@@ -4914,32 +4864,28 @@ mod tests {
             "callback_retry_spider"
         }
 
-        async fn parse(&self, response: &Response) -> Result<SpiderOutput, SpiderError> {
+        async fn parse(
+            &self,
+            response: &Response,
+        ) -> Result<impl crate::spider::IntoSpiderResultParts, SpiderError> {
             if response.url.ends_with("/start") {
-                return Ok(SpiderOutput {
-                    items: Vec::new(),
-                    requests: vec![
-                        Request::new("https://example.com/detail").with_retry_by_status(
-                            BTreeMap::from([
-                                ("count".to_string(), Value::Number(1.0)),
-                                (
-                                    "http_status".to_string(),
-                                    Value::Array(vec![Value::Number(500.0)]),
-                                ),
-                            ]),
-                            200,
-                        ),
-                    ],
-                });
+                return Ok(crate::spider::into_spider_result_parts(vec![
+                    Request::new("https://example.com/detail").with_retry_by_status(
+                        BTreeMap::from([
+                            ("count".to_string(), Value::Number(1.0)),
+                            (
+                                "http_status".to_string(),
+                                Value::Array(vec![Value::Number(500.0)]),
+                            ),
+                        ]),
+                        200,
+                    ),
+                ]));
             }
 
-            Ok(SpiderOutput {
-                items: vec![
-                    crate::item::Item::new()
-                        .with_field("title", Value::String("detail".to_string())),
-                ],
-                requests: Vec::new(),
-            })
+            Ok(crate::spider::into_spider_result_parts(
+                crate::item::Item::new().with_field("title", Value::String("detail".to_string())),
+            ))
         }
     }
 
@@ -5005,6 +4951,35 @@ mod tests {
         }
     }
 
+    fn failure_item(failure: &Failure) -> crate::item::Item {
+        crate::item::Item::new()
+            .with_field(
+                "kind",
+                Value::String(match failure.error {
+                    SpiderError::Download(_) => "download".to_string(),
+                    SpiderError::Parse(_) => "parse".to_string(),
+                    _ => "other".to_string(),
+                }),
+            )
+            .with_field("has_response", Value::Bool(failure.response.is_some()))
+            .with_field(
+                "page",
+                failure
+                    .cb_kwargs()
+                    .get("page")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            )
+            .with_field(
+                "source",
+                failure
+                    .cb_kwargs()
+                    .get("source")
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            )
+    }
+
     struct ErrbackSpider;
 
     impl Spider for ErrbackSpider {
@@ -5016,39 +4991,9 @@ mod tests {
             &self,
             name: &str,
             failure: &Failure,
-        ) -> Result<SpiderOutput, SpiderError> {
+        ) -> Result<crate::item::Item, SpiderError> {
             match name {
-                "handle_failure" => Ok(SpiderOutput {
-                    items: vec![
-                        crate::item::Item::new()
-                            .with_field(
-                                "kind",
-                                Value::String(match failure.error {
-                                    SpiderError::Download(_) => "download".to_string(),
-                                    SpiderError::Parse(_) => "parse".to_string(),
-                                    _ => "other".to_string(),
-                                }),
-                            )
-                            .with_field("has_response", Value::Bool(failure.response.is_some()))
-                            .with_field(
-                                "page",
-                                failure
-                                    .cb_kwargs()
-                                    .get("page")
-                                    .cloned()
-                                    .unwrap_or(Value::Null),
-                            )
-                            .with_field(
-                                "source",
-                                failure
-                                    .cb_kwargs()
-                                    .get("source")
-                                    .cloned()
-                                    .unwrap_or(Value::Null),
-                            ),
-                    ],
-                    requests: Vec::new(),
-                }),
+                "handle_failure" => Ok(failure_item(failure)),
                 other => Err(SpiderError::engine(format!("unknown errback: {other}"))),
             }
         }
@@ -5061,7 +5006,7 @@ mod tests {
             "parse_error_spider"
         }
 
-        async fn parse(&self, _response: &Response) -> Result<SpiderOutput, SpiderError> {
+        async fn parse(&self, _response: &Response) -> Result<(), SpiderError> {
             Err(SpiderError::parse("parse exploded"))
         }
 
@@ -5069,8 +5014,11 @@ mod tests {
             &self,
             name: &str,
             failure: &Failure,
-        ) -> Result<SpiderOutput, SpiderError> {
-            ErrbackSpider.handle_error(name, failure).await
+        ) -> Result<crate::item::Item, SpiderError> {
+            match name {
+                "handle_failure" => Ok(failure_item(failure)),
+                other => Err(SpiderError::engine(format!("unknown errback: {other}"))),
+            }
         }
     }
 

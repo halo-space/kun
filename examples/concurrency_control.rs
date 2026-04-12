@@ -1,3 +1,5 @@
+#![allow(refining_impl_trait)]
+
 use halo_spider::download::{Browser, Http};
 use halo_spider::engine::Engine;
 use halo_spider::error::SpiderError;
@@ -5,7 +7,7 @@ use halo_spider::item::Item;
 use halo_spider::response::Response;
 use halo_spider::scheduler::Memory;
 use halo_spider::settings::Config;
-use halo_spider::spider::{Output, Spider};
+use halo_spider::spider::Spider;
 use halo_spider::value::Value;
 use halo_spider::{cb, spider_callbacks};
 use jiff::SignedDuration;
@@ -22,7 +24,10 @@ impl Spider for PeriodConcurrencySpider {
         vec!["https://ep.shxwcb.com/2026/03/period.xml".to_string()]
     }
 
-    async fn parse(&self, response: &Response) -> Result<Output, SpiderError> {
+    async fn parse(
+        &self,
+        response: &Response,
+    ) -> Result<Vec<halo_spider::request::Request>, SpiderError> {
         let requests = recent_periods(response, 6)
             .into_iter()
             .map(|(period_date, front_page)| {
@@ -39,17 +44,14 @@ impl Spider for PeriodConcurrencySpider {
             })
             .collect();
 
-        Ok(Output {
-            items: vec![],
-            requests,
-        })
+        Ok(requests)
     }
 
-    spider_callbacks!(parse, parse_edition);
+    spider_callbacks!(parse_edition);
 }
 
 impl PeriodConcurrencySpider {
-    async fn parse_edition(&self, response: &Response) -> Result<Output, SpiderError> {
+    async fn parse_edition(&self, response: &Response) -> Result<Item, SpiderError> {
         let period_date = response
             .meta
             .get("period_date")
@@ -59,15 +61,10 @@ impl PeriodConcurrencySpider {
 
         println!("Fetched edition: {} -> {}", period_date, response.url);
 
-        Ok(Output {
-            items: vec![
-                Item::new()
-                    .with_field("period_date", Value::String(period_date.to_string()))
-                    .with_field("edition_title", Value::String(title))
-                    .with_field("url", Value::String(response.url.clone())),
-            ],
-            requests: vec![],
-        })
+        Ok(Item::new()
+            .with_field("period_date", Value::String(period_date.to_string()))
+            .with_field("edition_title", Value::String(title))
+            .with_field("url", Value::String(response.url.clone())))
     }
 }
 

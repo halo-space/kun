@@ -1,3 +1,5 @@
+#![allow(refining_impl_trait)]
+
 //! Custom dedup example.
 //!
 //! 展示：
@@ -14,7 +16,7 @@ use halo_spider::item::Item;
 use halo_spider::pipeline::Pipeline;
 use halo_spider::response::Response;
 use halo_spider::settings::Config;
-use halo_spider::spider::{Output, Spider};
+use halo_spider::spider::Spider;
 use halo_spider::store::Memory as MemoryStore;
 use halo_spider::value::Value;
 use jiff::SignedDuration;
@@ -56,7 +58,7 @@ impl Spider for PeriodIssueSpider {
         vec!["https://ep.shxwcb.com/2026/03/period.xml".to_string()]
     }
 
-    async fn parse(&self, response: &Response) -> Result<Output, SpiderError> {
+    async fn parse(&self, response: &Response) -> Result<Item, SpiderError> {
         let period_date = response
             .xml("//period[last()]/period_date")
             .text()
@@ -67,10 +69,7 @@ impl Spider for PeriodIssueSpider {
             .with_field("period_date", Value::String(period_date))
             .with_field("dedup", Value::String("method+url".to_string()));
 
-        Ok(Output {
-            items: vec![item],
-            requests: Vec::new(),
-        })
+        Ok(item)
     }
 }
 
@@ -114,9 +113,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_pipeline(StopAfterFirst::new(handle))
         .with_store(store.clone());
 
-    let outputs = engine.run(&PeriodIssueSpider).await?;
+    engine.run(&PeriodIssueSpider).await?;
 
-    println!("engine returned {} output batch(es)", outputs.len());
+    println!("engine stored {} item(s)", engine.stats().item_count);
     for item in store.items() {
         println!("{item:#?}");
     }

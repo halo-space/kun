@@ -1,3 +1,5 @@
+#![allow(refining_impl_trait)]
+
 //! Kafka store example: period.xml -> Spider item -> store::Kafka
 //!
 //! Shows:
@@ -16,7 +18,7 @@ use halo_spider::item::Item;
 use halo_spider::pipeline::Pipeline;
 use halo_spider::response::Response;
 use halo_spider::settings::Config;
-use halo_spider::spider::{Output, Spider};
+use halo_spider::spider::Spider;
 use halo_spider::store::Kafka;
 use halo_spider::value::Value;
 use jiff::SignedDuration;
@@ -34,7 +36,7 @@ impl Spider for PeriodIssueSpider {
         vec!["https://ep.shxwcb.com/2026/03/period.xml".to_string()]
     }
 
-    async fn parse(&self, response: &Response) -> Result<Output, SpiderError> {
+    async fn parse(&self, response: &Response) -> Result<Item, SpiderError> {
         let (period_date, front_page) = latest_issue(response)?;
         let edition_url = build_edition_url(&period_date, &front_page)?;
         let issue_key = format!("{period_date}-front-{front_page}");
@@ -46,10 +48,7 @@ impl Spider for PeriodIssueSpider {
             .with_field("source", Value::String("period.xml".to_string()))
             .with_field("issue_key", Value::String(issue_key));
 
-        Ok(Output {
-            items: vec![item],
-            requests: Vec::new(),
-        })
+        Ok(item)
     }
 }
 
@@ -98,11 +97,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_pipeline(StopAfterFirst::new(handle))
         .with_store(kafka);
 
-    let outputs = engine.run(&PeriodIssueSpider).await?;
-    let total_items = outputs
-        .iter()
-        .map(|output| output.items.len())
-        .sum::<usize>();
+    engine.run(&PeriodIssueSpider).await?;
+    let total_items = engine.stats().item_count;
 
     println!("engine returned {total_items} item(s)");
     println!("sent item JSON message(s) to Kafka topic `{topic}` via `{brokers}`");

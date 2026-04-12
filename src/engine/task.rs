@@ -8,7 +8,7 @@ use crate::request::{Request, RequestMode};
 use crate::response::Response;
 use crate::rules::Compiled;
 use crate::scheduler::{Scheduler, Task, TaskId, TaskLease};
-use crate::spider::{Failure, Output as SpiderOutput, Spider};
+use crate::spider::{CallbackOutput, Failure, IntoSpiderResultParts, Spider};
 use futures::future::try_join_all;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -156,7 +156,6 @@ pub(super) async fn apply_task_run<S>(
     engine_middleware: &Chain,
     step_executes: &BTreeMap<String, StepExecute>,
     allowed_domains: &[String],
-    outputs: &mut Vec<SpiderOutput>,
     round: &mut usize,
     spider_name: &str,
     stats: &crate::stats::Tracker,
@@ -223,10 +222,6 @@ where
                         .await;
                 }
             }
-            outputs.push(SpiderOutput {
-                items: output.items,
-                requests: output.follows,
-            });
         }
         TaskOutcome::Retry(retry_task) => {
             stats.record_retry();
@@ -535,7 +530,7 @@ where
 
     async fn process_spider_output(
         self,
-        mut output: SpiderOutput,
+        mut output: CallbackOutput,
         task_id: &TaskId,
         request: &Request,
         response: Option<Response>,
@@ -687,8 +682,13 @@ where
 
         match self.spider.handle_error(&errback.name, &failure).await {
             Ok(output) => {
-                self.process_spider_output(output, task_id, request, response)
-                    .await
+                self.process_spider_output(
+                    CallbackOutput::from_parts(output.into_parts()),
+                    task_id,
+                    request,
+                    response,
+                )
+                .await
             }
             Err(errback_error) => self.error_outcome(request, response, errback_error).await,
         }
@@ -921,7 +921,11 @@ where
             }
         }
 
-        let output = self.spider.dispatch(&parse.response, self.compiled).await;
+        let output = self
+            .spider
+            .dispatch(&parse.response, self.compiled)
+            .await
+            .map(|output| CallbackOutput::from_parts(output.into_parts()));
 
         match output {
             Ok(output) => {
@@ -1266,6 +1270,7 @@ pub(super) enum TaskOutcome {
     LeaseLost(SpiderError),
 }
 
+#[derive(Debug)]
 pub(super) struct TaskOutput {
     pub(super) items: Vec<crate::item::Item>,
     pub(super) follows: Vec<Request>,

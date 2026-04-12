@@ -71,10 +71,11 @@ tracing-subscriber = "0.3"
 use halo_spider::download::{Browser, Http};
 use halo_spider::engine::Engine;
 use halo_spider::error::SpiderError;
+use halo_spider::item::Item;
 use halo_spider::response::Response;
 use halo_spider::scheduler::Memory;
 use halo_spider::settings::Config;
-use halo_spider::spider::{Output, Spider};
+use halo_spider::spider::Spider;
 use halo_spider::value::Value;
 use jiff::SignedDuration;
 
@@ -89,7 +90,7 @@ impl Spider for MySpider {
         vec!["https://quotes.toscrape.com/".to_string()]
     }
 
-    async fn parse(&self, response: &Response) -> Result<Output, SpiderError> {
+    async fn parse(&self, response: &Response) -> Result<Vec<Item>, SpiderError> {
         let items = response
             .css("div.quote span.text::text")
             .all()
@@ -97,10 +98,7 @@ impl Spider for MySpider {
             .map(|text| halo_spider::item::Item::new().with_field("text", Value::String(text)))
             .collect();
 
-        Ok(Output {
-            items,
-            requests: vec![],
-        })
+        Ok(items)
     }
 }
 

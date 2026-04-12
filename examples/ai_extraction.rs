@@ -1,10 +1,12 @@
+#![allow(refining_impl_trait)]
+
 use halo_spider::download::{Browser, Http};
 use halo_spider::engine::Engine;
 use halo_spider::error::SpiderError;
 use halo_spider::response::Response;
 use halo_spider::scheduler::Memory;
 use halo_spider::settings::Config;
-use halo_spider::spider::{Output, Spider};
+use halo_spider::spider::Spider;
 use jiff::SignedDuration;
 
 struct AiSpider;
@@ -18,7 +20,7 @@ impl Spider for AiSpider {
         vec!["https://ep.shxwcb.com/2026/03/period.xml".to_string()]
     }
 
-    async fn parse(&self, response: &Response) -> Result<Output, SpiderError> {
+    async fn parse(&self, response: &Response) -> Result<(), SpiderError> {
         let mut query = response
             .ai("Read this XML and return JSON with the latest period_date and front_page from the last <period> node.")
             .with_max_retries(3)
@@ -30,7 +32,7 @@ impl Spider for AiSpider {
             println!("AI extracted: {}", result);
         }
 
-        Ok(Output::empty())
+        Ok(())
     }
 }
 

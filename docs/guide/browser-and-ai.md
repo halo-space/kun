@@ -165,7 +165,7 @@ let config = Config::default()
     .with_openai_model("your-model-name");
 
 // 在 parse 中使用，支持重试和超时配置
-async fn parse(&self, response: &Response) -> Result<Output, SpiderError> {
+async fn parse(&self, response: &Response) -> Result<(), SpiderError> {
     let mut query = response.ai("Extract the main article title and summary")
         .with_max_retries(3)
         .with_timeout(jiff::SignedDuration::from_secs(30));
@@ -174,7 +174,7 @@ async fn parse(&self, response: &Response) -> Result<Output, SpiderError> {
     if let Some(result) = query.one() {
         println!("AI extracted: {}", result);
     }
-    Ok(Output::empty())
+    Ok(())
 }
 ```
 

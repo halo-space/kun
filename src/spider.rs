@@ -35,18 +35,18 @@ macro_rules! cb {
 /// impl Spider for MySpider {
 ///     fn name(&self) -> &str { "my" }
 ///
-///     async fn parse(&self, response: &Response) -> Result<Output, SpiderError> {
+///     async fn parse(&self, response: &Response) -> Result<Request, SpiderError> {
 ///         let req = response.follow(url)
 ///             .with_callback(cb!(Self::parse_detail));
-///         Ok(Output { items: vec![], requests: vec![req] })
+///         Ok(req)
 ///     }
 ///
-///     spider_callbacks!(parse, parse_detail, parse_comment);
+///     spider_callbacks!(parse_detail, parse_comment);
 /// }
 ///
 /// impl MySpider {
-///     async fn parse_detail(&self, r: &Response) -> Result<Output, SpiderError> { ... }
-///     async fn parse_comment(&self, r: &Response) -> Result<Output, SpiderError> { ... }
+///     async fn parse_detail(&self, r: &Response) -> Result<Item, SpiderError> { ... }
+///     async fn parse_comment(&self, r: &Response) -> Result<Vec<Request>, SpiderError> { ... }
 /// }
 /// ```
 #[macro_export]
@@ -56,9 +56,16 @@ macro_rules! spider_callbacks {
             &self,
             name: &str,
             response: &$crate::response::Response,
-        ) -> Result<$crate::spider::Output, $crate::error::SpiderError> {
+        ) -> Result<impl $crate::spider::IntoSpiderResultParts, $crate::error::SpiderError> {
             match name {
-                $(stringify!($method) => self.$method(response).await,)+
+                $(
+                    stringify!($method) => Ok($crate::spider::into_spider_result_parts(
+                        self.$method(response).await?,
+                    )),
+                )+
+                "parse" => Ok($crate::spider::into_spider_result_parts(
+                    self.parse(response).await?,
+                )),
                 other => Err($crate::error::SpiderError::engine(
                     format!("unknown callback: {other}"),
                 )),
@@ -81,7 +88,7 @@ macro_rules! spider_callbacks {
 ///     async fn handle_detail_error(
 ///         &self,
 ///         failure: &halo_spider::spider::Failure,
-///     ) -> Result<halo_spider::spider::Output, halo_spider::error::SpiderError> { ... }
+///     ) -> Result<halo_spider::request::Request, halo_spider::error::SpiderError> { ... }
 /// }
 /// ```
 #[macro_export]
@@ -91,9 +98,13 @@ macro_rules! spider_errbacks {
             &self,
             name: &str,
             failure: &$crate::spider::Failure,
-        ) -> Result<$crate::spider::Output, $crate::error::SpiderError> {
+        ) -> Result<impl $crate::spider::IntoSpiderResultParts, $crate::error::SpiderError> {
             match name {
-                $(stringify!($method) => self.$method(failure).await,)+
+                $(
+                    stringify!($method) => Ok($crate::spider::into_spider_result_parts(
+                        self.$method(failure).await?,
+                    )),
+                )+
                 other => Err($crate::error::SpiderError::engine(
                     format!("unknown errback: {other}"),
                 )),
@@ -102,15 +113,114 @@ macro_rules! spider_errbacks {
     };
 }
 
-#[derive(Debug, Default)]
-pub struct Output {
-    pub items: Vec<Item>,
-    pub requests: Vec<Request>,
+#[doc(hidden)]
+pub type SpiderResultParts = (Vec<Item>, Vec<Request>);
+
+#[doc(hidden)]
+pub trait IntoSpiderItems {
+    fn into_items(self) -> Vec<Item>;
 }
 
-impl Output {
-    pub fn empty() -> Self {
-        Self::default()
+#[doc(hidden)]
+pub trait IntoSpiderRequests {
+    fn into_requests(self) -> Vec<Request>;
+}
+
+#[doc(hidden)]
+pub trait IntoSpiderResultParts {
+    fn into_parts(self) -> SpiderResultParts;
+}
+
+impl IntoSpiderItems for () {
+    fn into_items(self) -> Vec<Item> {
+        Vec::new()
+    }
+}
+
+impl IntoSpiderItems for Item {
+    fn into_items(self) -> Vec<Item> {
+        vec![self]
+    }
+}
+
+impl IntoSpiderItems for Vec<Item> {
+    fn into_items(self) -> Vec<Item> {
+        self
+    }
+}
+
+impl IntoSpiderRequests for () {
+    fn into_requests(self) -> Vec<Request> {
+        Vec::new()
+    }
+}
+
+impl IntoSpiderRequests for Request {
+    fn into_requests(self) -> Vec<Request> {
+        vec![self]
+    }
+}
+
+impl IntoSpiderRequests for Vec<Request> {
+    fn into_requests(self) -> Vec<Request> {
+        self
+    }
+}
+
+impl IntoSpiderResultParts for () {
+    fn into_parts(self) -> SpiderResultParts {
+        (Vec::new(), Vec::new())
+    }
+}
+
+impl IntoSpiderResultParts for Request {
+    fn into_parts(self) -> SpiderResultParts {
+        (Vec::new(), vec![self])
+    }
+}
+
+impl IntoSpiderResultParts for Vec<Request> {
+    fn into_parts(self) -> SpiderResultParts {
+        (Vec::new(), self)
+    }
+}
+
+impl IntoSpiderResultParts for Item {
+    fn into_parts(self) -> SpiderResultParts {
+        (vec![self], Vec::new())
+    }
+}
+
+impl IntoSpiderResultParts for Vec<Item> {
+    fn into_parts(self) -> SpiderResultParts {
+        (self, Vec::new())
+    }
+}
+
+impl<I, R> IntoSpiderResultParts for (I, R)
+where
+    I: IntoSpiderItems,
+    R: IntoSpiderRequests,
+{
+    fn into_parts(self) -> SpiderResultParts {
+        (self.0.into_items(), self.1.into_requests())
+    }
+}
+
+#[doc(hidden)]
+pub fn into_spider_result_parts<T: IntoSpiderResultParts>(value: T) -> SpiderResultParts {
+    value.into_parts()
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct CallbackOutput {
+    pub(crate) items: Vec<Item>,
+    pub(crate) requests: Vec<Request>,
+}
+
+impl CallbackOutput {
+    pub(crate) fn from_parts((items, requests): SpiderResultParts) -> Self {
+        Self { items, requests }
     }
 }
 
@@ -174,45 +284,56 @@ pub trait Spider: Send + Sync {
         None
     }
 
-    async fn parse(&self, _response: &Response) -> Result<Output, SpiderError> {
-        Ok(Output::empty())
+    async fn parse(&self, _response: &Response) -> Result<impl IntoSpiderResultParts, SpiderError> {
+        Ok(())
     }
 
-    async fn call(&self, name: &str, response: &Response) -> Result<Output, SpiderError> {
+    async fn call(
+        &self,
+        name: &str,
+        response: &Response,
+    ) -> Result<impl IntoSpiderResultParts, SpiderError> {
         match name {
-            "parse" => self.parse(response).await,
+            "parse" => Ok(into_spider_result_parts(self.parse(response).await?)),
             other => Err(SpiderError::engine(format!("unknown callback: {other}"))),
         }
     }
 
-    async fn handle_error(&self, name: &str, _failure: &Failure) -> Result<Output, SpiderError> {
-        Err(SpiderError::engine(format!("unknown errback: {name}")))
+    async fn handle_error(
+        &self,
+        name: &str,
+        _failure: &Failure,
+    ) -> Result<impl IntoSpiderResultParts, SpiderError> {
+        Result::<SpiderResultParts, SpiderError>::Err(SpiderError::engine(format!(
+            "unknown errback: {name}"
+        )))
     }
 
     async fn dispatch(
         &self,
         response: &Response,
         compiled: Option<&Compiled>,
-    ) -> Result<Output, SpiderError> {
+    ) -> Result<impl IntoSpiderResultParts, SpiderError> {
         // Prefer an explicit request callback when one is present.
         if let Some(request) = &response.request
             && let Some(callback_target) = &request.callback
         {
-            return self.call(&callback_target.name, response).await;
+            return Ok(into_spider_result_parts(
+                self.call(&callback_target.name, response).await?,
+            ));
         }
 
         let Some(step) = resolve_step(response, compiled)? else {
-            return self.parse(response).await;
+            return Ok(into_spider_result_parts(self.parse(response).await?));
         };
 
         if let Some(callback) = &step.callback {
-            self.call(callback, response).await
+            Ok(into_spider_result_parts(
+                self.call(callback, response).await?,
+            ))
         } else {
             let output = apply_dsl(response, step, compiled.unwrap()).await?;
-            Ok(Output {
-                items: output.items,
-                requests: output.requests,
-            })
+            Ok((output.items, output.requests))
         }
     }
 }

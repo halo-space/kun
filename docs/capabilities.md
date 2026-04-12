@@ -15,7 +15,7 @@ README 负责总览，这里负责把每个模块现在到底能做什么、还�
 
 如果只看“代码爬虫底层能力”这一层，而不看 DSL，当前和 Scrapy 更完整运行时相比，最主要的剩余缺口是：
 
-- plugin 当前继续有意只收口在 `middleware` 装配，不承担通用组件扩展；代码爬虫的 callback / item 主模型则已经稳定为 `Output { items, requests }`，不再是继续漂移的边界
+- plugin 当前继续有意只收口在 `middleware` 装配，不承担通用组件扩展；代码爬虫 callback 现在直接返回 `Request / Vec<Request> / Item / Vec<Item> / ()`，需要同一跳同时产出 item 和 request 时可返回 Rust tuple，而不是继续暴露公开 `Output { items, requests }`
 
 ## Request
 

@@ -1,3 +1,5 @@
+#![allow(refining_impl_trait)]
+
 //! 最小 middleware plugin 示例
 //!
 //! 这个示例只演示 plugin 当前已经落地的那部分能力：
@@ -19,7 +21,7 @@ use halo_spider::middleware::traits::Middleware;
 use halo_spider::plugins::{PluginManifest, PluginRegistry};
 use halo_spider::response::Response;
 use halo_spider::settings::Config;
-use halo_spider::spider::{Output, Spider};
+use halo_spider::spider::Spider;
 use halo_spider::value::Value;
 use jiff::SignedDuration;
 use std::collections::BTreeMap;
@@ -73,7 +75,7 @@ impl Spider for MiddlewarePluginSpider {
         vec!["https://ep.shxwcb.com/2026/03/period.xml".to_string()]
     }
 
-    async fn parse(&self, response: &Response) -> Result<Output, SpiderError> {
+    async fn parse(&self, response: &Response) -> Result<Item, SpiderError> {
         let period_date = response
             .xml("//period[last()]/period_date")
             .text()
@@ -97,16 +99,11 @@ impl Spider for MiddlewarePluginSpider {
             })
             .unwrap_or_else(|| "missing".to_string());
 
-        Ok(Output {
-            items: vec![
-                Item::new()
-                    .with_field("period_date", Value::String(period_date))
-                    .with_field("front_page", Value::String(front_page))
-                    .with_field("plugin_label", Value::String(plugin_label))
-                    .with_field("url", Value::String(response.url.clone())),
-            ],
-            requests: vec![],
-        })
+        Ok(Item::new()
+            .with_field("period_date", Value::String(period_date))
+            .with_field("front_page", Value::String(front_page))
+            .with_field("plugin_label", Value::String(plugin_label))
+            .with_field("url", Value::String(response.url.clone())))
     }
 }
 
@@ -144,14 +141,10 @@ async fn main() -> Result<(), SpiderError> {
         })
         .load_plugins(&registry)?;
 
-    let outputs = engine.run(&MiddlewarePluginSpider).await?;
-    let item_count: usize = outputs.iter().map(|output| output.items.len()).sum();
+    engine.run(&MiddlewarePluginSpider).await?;
+    let item_count = engine.stats().item_count;
 
-    println!(
-        "middleware plugin example finished: {} run(s), {} item(s)",
-        outputs.len(),
-        item_count
-    );
+    println!("middleware plugin example finished: {} item(s)", item_count,);
 
     Ok(())
 }
