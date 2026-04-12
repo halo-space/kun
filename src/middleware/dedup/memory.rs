@@ -1,7 +1,8 @@
-use crate::dedup::{Dedup, Key, fingerprint};
+use super::{Dedup, Key, fingerprint};
 use crate::error::SpiderError;
 use crate::request::Request;
 use std::collections::HashSet;
+use std::future;
 
 /// Exact in-memory request deduplication.
 ///
@@ -45,8 +46,21 @@ impl Default for Memory {
 }
 
 impl Dedup for Memory {
-    async fn check_and_insert(&mut self, request: &Request) -> Result<bool, SpiderError> {
-        Ok(self.seen.insert(fingerprint(request, &self.keys)))
+    fn check_and_insert(
+        &mut self,
+        request: &Request,
+    ) -> impl std::future::Future<Output = Result<bool, SpiderError>> + Send {
+        let accepted = self.seen.insert(fingerprint(request, &self.keys));
+        future::ready(Ok(accepted))
+    }
+
+    fn check_and_insert_with_keys(
+        &mut self,
+        request: &Request,
+        keys: &[Key],
+    ) -> impl std::future::Future<Output = Result<bool, SpiderError>> + Send {
+        let accepted = self.seen.insert(fingerprint(request, keys));
+        future::ready(Ok(accepted))
     }
 }
 

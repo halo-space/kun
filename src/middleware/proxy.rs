@@ -1,7 +1,5 @@
-use crate::engine::context::EngineContext;
-use crate::engine::flow::Flow;
+use crate::engine::{context, flow};
 use crate::error::SpiderError;
-use crate::future::BoxFuture;
 use crate::middleware::traits::Middleware;
 use crate::request::{ProxyConfig, RequestMode};
 use crate::value::Value;
@@ -48,21 +46,19 @@ impl Proxy {
 }
 
 impl Middleware for Proxy {
-    fn process_request<'a>(
-        &'a self,
-        context: &'a mut EngineContext,
-    ) -> BoxFuture<'a, Result<Flow, SpiderError>> {
-        Box::pin(async move {
-            if context.request.mode != RequestMode::Http || context.request.proxy.is_some() {
-                return Ok(Flow::Continue);
-            }
+    async fn before_download(
+        &self,
+        context: &mut context::Download,
+    ) -> Result<flow::Download, SpiderError> {
+        if context.request.mode != RequestMode::Http || context.request.proxy.is_some() {
+            return Ok(flow::Download::Continue);
+        }
 
-            if let Some(proxy) = self.select_proxy() {
-                context.request.proxy = Some(ProxyConfig::new(proxy));
-            }
+        if let Some(proxy) = self.select_proxy() {
+            context.request.proxy = Some(ProxyConfig::new(proxy));
+        }
 
-            Ok(Flow::Continue)
-        })
+        Ok(flow::Download::Continue)
     }
 }
 
@@ -85,11 +81,11 @@ mod tests {
             .into_iter()
             .collect(),
         );
-        let mut context = EngineContext::new(Request::new("https://example.com"));
+        let mut context = context::Download::new(Request::new("https://example.com"));
 
-        let flow = block_on(middleware.process_request(&mut context)).unwrap();
+        let flow = block_on(middleware.before_download(&mut context)).unwrap();
 
-        assert_eq!(flow, Flow::Continue);
+        assert_eq!(flow, flow::Download::Continue);
         assert_eq!(
             context.request.proxy,
             Some(ProxyConfig::new("http://127.0.0.1:8080"))
@@ -106,10 +102,11 @@ mod tests {
             .into_iter()
             .collect(),
         );
-        let mut context =
-            EngineContext::new(Request::new("https://example.com").with_proxy("http://upstream"));
+        let mut context = context::Download::new(
+            Request::new("https://example.com").with_proxy("http://upstream"),
+        );
 
-        block_on(middleware.process_request(&mut context)).unwrap();
+        block_on(middleware.before_download(&mut context)).unwrap();
 
         assert_eq!(
             context.request.proxy,
@@ -130,13 +127,13 @@ mod tests {
             .into_iter()
             .collect(),
         );
-        let mut first = EngineContext::new(Request::new("https://example.com/1"));
-        let mut second = EngineContext::new(Request::new("https://example.com/2"));
-        let mut third = EngineContext::new(Request::new("https://example.com/3"));
+        let mut first = context::Download::new(Request::new("https://example.com/1"));
+        let mut second = context::Download::new(Request::new("https://example.com/2"));
+        let mut third = context::Download::new(Request::new("https://example.com/3"));
 
-        block_on(middleware.process_request(&mut first)).unwrap();
-        block_on(middleware.process_request(&mut second)).unwrap();
-        block_on(middleware.process_request(&mut third)).unwrap();
+        block_on(middleware.before_download(&mut first)).unwrap();
+        block_on(middleware.before_download(&mut second)).unwrap();
+        block_on(middleware.before_download(&mut third)).unwrap();
 
         assert_eq!(
             first.request.proxy,

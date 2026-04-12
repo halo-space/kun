@@ -1,8 +1,8 @@
 # 05 Rules DSL 设计（v1）
 
-本章给出新的 rules DSL v1 设计稿。
+本章给出 rules DSL v1 设计稿。
 
-本版 DSL 不再沿用旧的 `parse / next_url_config / schemas` 那套结构，而是改为更直观的“单链路流转模型”：
+本版 DSL 采用更直观的“单链路流转模型”：
 
 - 从 `seed` 开始发起一条链路
 - 链路进入某个 `step`
@@ -11,10 +11,19 @@
 
 本版重点是把以下几类能力拆清楚：
 
-- 请求层：`request / engine(schedule / limits / retry / dedup) / allow_url_pattern`
+- 请求层：`request / engine(dedup / concurrency / interval / rate_limit / auto_throttle / retry_by_status / retry_by_error) / allow_url_pattern`
 - 页面解析层：`fields / bind`
 - 链路上下文：`meta`
 - 结果输出层：`output / validate / sinks`
+
+当前实现边界：
+
+- `seed.engine.*` / `follow.engine.*` 已经编译为 request 级 middleware override，并沿现有 enqueue / download / retry 主链执行。
+- `allow_url_pattern` 已在 `src/rules/run.rs` 中真实执行。
+- `output.validate.required`、`output.validate.fields` 已经编译为 step 级共享 validator，并在 engine 的 `item -> pipeline -> validator -> store` 主链里真实执行。
+- `seeds` 已经接入引擎起始请求生成；当 `rules.seeds` 非空时，engine 会以它为真正的启动请求来源；当 `rules.seeds` 为空时，仍回退到 `Spider::build_start_requests()` / `start_urls()`。
+- `output.sinks` 已经接入运行时路由：rules 编译结果会保留 sink 名称，engine 在构建 step 运行时阶段把它解析为目标 store 实例列表，并 fan-out 到已注册的 store。
+- 顶层 `sinks` 目前仍只负责 DSL 注册表、结构校验和引用校验；它不会自动实例化底层 store，真实 store 仍由业务侧通过 `Engine::with_store(...)` / `Engine::with_stores(...)` 注入。
 
 ---
 
@@ -55,10 +64,13 @@ start_url -> 列表页 -> 一批 detail_url -> 一批结果
 请求相关能力放在请求链路上：
 
 - `request`
-- `engine.schedule`
-- `engine.limits`
-- `engine.retry`
 - `engine.dedup`
+- `engine.concurrency`
+- `engine.interval`
+- `engine.rate_limit`
+- `engine.auto_throttle`
+- `engine.retry_by_status`
+- `engine.retry_by_error`
 - `allow_url_pattern`
 
 结果相关能力放在输出层：
@@ -69,11 +81,15 @@ start_url -> 列表页 -> 一批 detail_url -> 一批结果
 
 ### 05.1.4 配置集中定义、局部单值引用
 
-以下三类 engine 规则统一采用“顶层注册表 + 局部单值引用”的方式：
+本版 engine middleware 统一采用“顶层注册表 + 局部单值引用”的方式：
 
-- `engine.limits`
-- `engine.retry`
 - `engine.dedup`
+- `engine.concurrency`
+- `engine.interval`
+- `engine.rate_limit`
+- `engine.auto_throttle`
+- `engine.retry_by_status`
+- `engine.retry_by_error`
 
 这样配置不会分散，也方便统一维护。
 
@@ -99,10 +115,13 @@ spider:
   clock: ...
 
 engine:
-  schedule: ...
-  limits: ...
-  retry: ...
   dedup: ...
+  concurrency: ...
+  interval: ...
+  rate_limit: ...
+  auto_throttle: ...
+  retry_by_status: ...
+  retry_by_error: ...
 
 sinks:
   ...
@@ -127,7 +146,7 @@ steps:
 - `spider`
   爬虫级基础配置。
 - `engine`
-  engine 共享能力入口，挂 `schedule / limits / retry / dedup`。
+  engine 共享能力入口，直接挂当前真实 middleware 注册表。
 - `sinks`
   输出目标注册表。
 - `seeds`
@@ -147,47 +166,48 @@ spider:
     timezone: "Asia/Shanghai"
 
 engine:
-  limits:
+  concurrency:
     spider_global:
-      key: "spider"
-      inherit: true
+      bucket: "spider"
       concurrency: 5
-      interval: 300
 
+    detail_serial:
+      bucket: "origin"
+      concurrency: 1
+
+  interval:
     origin_guard:
-      key: "origin"
-      concurrency: 2
+      bucket: "origin"
       interval: 800
 
-    detail_slow:
-      key: "origin"
-      concurrency: 1
-      interval: 1500
+  rate_limit:
+    origin_budget:
+      bucket: "origin"
+      rate_per_minute: 120
 
-  retry:
-    default_retry:
-      inherit: true
+  retry_by_status:
+    default_http_retry:
       count: 3
-      http_status: [429, 500, 502, 503, 504]
+      status: [429, 500, 502, 503, 504]
       backoff: [1000, 3000, 5000]
 
-    detail_retry:
+  retry_by_error:
+    default_error_retry:
+      count: 2
+      backoff: [1000, 3000]
+
+    detail_error_retry:
       count: 4
-      http_status: [429, 500, 502, 503, 504]
       backoff: [1000, 3000, 5000, 8000]
 
   dedup:
     request_url:
-      inherit: true
-      key:
-        - "$request.url"
-      ttl: 604800000
+      backend: "memory"
+      key: ["url"]
 
     request_url_with_edition:
-      key:
-        - "$request.url"
-        - "$meta.edition_id"
-      ttl: 604800000
+      backend: "memory"
+      key: ["url", "meta.edition_id"]
 
 sinks:
   article_db:
@@ -227,45 +247,35 @@ steps:
   - id: "parse_period_xml"
 
     fields:
-      latest_node:
-        selector: "//period[last()]"
-        kind: "node"
-
-    bind:
       period_date:
-        from: "$fields.latest_node"
-        transforms:
-          - type: "xpath_text"
-            expr: "./@date"
+        selector: "//period[last()]"
+        attr: "date"
 
       edition_id:
-        from: "$fields.latest_node"
-        transforms:
-          - type: "xpath_text"
-            expr: "./@id"
+        selector: "//period[last()]"
+        attr: "id"
 
       page_no:
-        from: "$fields.latest_node"
-        transforms:
-          - type: "xpath_text"
-            expr: "./@number"
+        selector: "//period[last()]"
+        attr: "number"
 
+    bind:
       year:
-        from: "$bind.period_date"
+        from: "$fields.period_date"
         transforms:
           - type: "date_format"
             input_format: "%Y-%m-%d"
             format: "%Y"
 
       month:
-        from: "$bind.period_date"
+        from: "$fields.period_date"
         transforms:
           - type: "date_format"
             input_format: "%Y-%m-%d"
             format: "%m"
 
       day:
-        from: "$bind.period_date"
+        from: "$fields.period_date"
         transforms:
           - type: "date_format"
             input_format: "%Y-%m-%d"
@@ -291,11 +301,11 @@ steps:
 
         meta:
           period_date:
-            from: "$bind.period_date"
+            from: "$fields.period_date"
           edition_id:
-            from: "$bind.edition_id"
+            from: "$fields.edition_id"
           page_no:
-            from: "$bind.page_no"
+            from: "$fields.page_no"
 
         engine:
           dedup: "request_url"
@@ -327,8 +337,11 @@ steps:
           - "^https?://"
 
         engine:
-          limit: "detail_slow"
-          retry: "detail_retry"
+          concurrency: "detail_serial"
+          interval: "origin_guard"
+          rate_limit: "origin_budget"
+          retry_by_status: "default_http_retry"
+          retry_by_error: "detail_error_retry"
           dedup: "request_url_with_edition"
 
   - id: "parse_detail"
@@ -428,231 +441,251 @@ spider:
 
 ```yaml
 engine:
-  schedule: ...
-
-  limits:
-    spider_global:
-      key: "spider"
-      inherit: true
-      concurrency: 5
-      interval: 300
-
-  retry:
-    default_retry:
-      inherit: true
-      count: 3
-      http_status: [429, 500, 502, 503, 504]
-      backoff: [1000, 3000, 5000]
-
-  dedup:
-    request_url:
-      inherit: true
-      key:
-        - "$request.url"
-      ttl: 604800000
+  dedup: ...
+  concurrency: ...
+  interval: ...
+  rate_limit: ...
+  auto_throttle: ...
+  retry_by_status: ...
+  retry_by_error: ...
 ```
 
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
 | `engine` | object | 否 | 无 | engine 共享能力入口 |
-| `engine.schedule` | object | 否 | 无 | 调度相关配置入口 |
-| `engine.limits` | object | 否 | 无 | 限流规则注册表 |
-| `engine.retry` | object | 否 | 无 | 重试规则注册表 |
-| `engine.dedup` | object | 否 | 无 | 请求去重规则注册表 |
+| `engine.dedup` | object | 否 | 无 | 请求入队前去重配置注册表 |
+| `engine.concurrency` | object | 否 | 无 | 下载前并发控制配置注册表 |
+| `engine.interval` | object | 否 | 无 | 下载前固定间隔控制配置注册表 |
+| `engine.rate_limit` | object | 否 | 无 | 下载前速率限制配置注册表 |
+| `engine.auto_throttle` | object | 否 | 无 | 下载前自适应节流配置注册表 |
+| `engine.retry_by_status` | object | 否 | 无 | 按响应状态码重试配置注册表 |
+| `engine.retry_by_error` | object | 否 | 无 | 按下载异常重试配置注册表 |
 
-### 05.5.2 为什么挂在 `engine` 下
+### 05.5.2 为什么直接用 middleware 名称
 
-结合当前项目文档，以及代码侧已经存在的 `Engine::with_dedup(...)` 这类能力入口，`limits / retry / dedup` 更接近 engine 的共享能力，而不是 DSL 自己发明的新能力。
-
-因此本版 DSL 里，`engine` 是统一入口，其中：
-
-- `schedule`
-  只保留“调度语义”本身
-- `limits`
-  表示限流 / 节流规则
-- `retry`
-  表示请求重试规则
-- `dedup`
-  表示请求去重规则
+本版文档改为按当前代码里真实存在的内置 middleware key 反向驱动，不再额外包装成 `schedule` 或组级运行策略抽象层。
 
 也就是说：
 
-- `schedule / limits / retry / dedup` 是 `engine` 下的并列字段
-- `schedule` 不再兼任限流 / 重试 / 去重的承载层
-- `limits / retry / dedup` 也不再伪装成“调度子字段”
+- DSL 中 `engine` 下的字段名，直接对应底层 middleware 名称
+- 顶层 `engine.<middleware_name>` 负责注册命名配置
+- `seed.engine.<middleware_name>` / `follow.engine.<middleware_name>` 只负责引用名字
 
-### 05.5.3 `engine.schedule`
+这样做的好处是：
 
-`engine.schedule` 表示调度相关配置入口。
+- DSL 与底层实现同名，减少歧义
+- rules 编译时不需要再做一层概念翻译
+- 用户看到 DSL 字段名，就能直接对应到实际中间件能力
 
-这里说的“调度”，只指：
+### 05.5.3 关于 `schedule`
 
-- 请求什么时候进入调度队列
-- 调度器按什么语义排队 / 触发
-- 是否存在延迟、优先级、窗口之类的调度概念
+`schedule` 在当前代码里不是一个独立的 middleware key，也不是一个单独的配置块。
 
-它不负责：
+与下载前调度控制相关的能力，直接使用这些真实 middleware：
 
-- 限流：看 `engine.limits`
-- 重试：看 `engine.retry`
-- 去重：看 `engine.dedup`
+- `concurrency`
+- `interval`
+- `rate_limit`
+- `auto_throttle`
 
-`engine.schedule` 在 v1 里先只保留这个概念入口，不展开具体子字段，避免把“调度”和“限流/重试/去重”再次混在一起。后续如果要补 `priority / delay / cron / window` 这类字段，也继续挂在这里。
+下载前调度控制直接围绕这些 concrete middleware 配置展开。
 
-### 05.5.4 `engine.limits`
+### 05.5.4 `bucket` 规则
+
+DSL authored 层统一使用 `bucket` 表示下载前中间件的分桶维度，适用于：
+
+- `engine.concurrency`
+- `engine.interval`
+- `engine.rate_limit`
+- `engine.auto_throttle`
+
+| 字段 | 类型 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `engine.<download_middleware>.<name>.bucket` | string / array<string> | 否 | `origin` | 当前 middleware 的分桶维度 |
+
+说明：
+
+- DSL 中写 `bucket`
+
+当前代码支持的 `bucket` token：
+
+- `spider`
+- `origin`
+- `domain`
+- `url`
+- `method`
+- `meta.xxx`
+
+说明：
+
+- `bucket: "origin"` 表示同源站共用一个桶
+- `bucket: "spider"` 表示整个 spider 共用一个桶
+- `bucket: ["origin", "meta.channel"]` 表示按复合维度分桶
+
+### 05.5.5 `engine.concurrency`
 
 ```yaml
 engine:
-  limits:
+  concurrency:
     spider_global:
-      key: "spider"
-      inherit: true
+      bucket: "spider"
       concurrency: 5
-      interval: 300
 
-    detail_slow:
-      key: "origin"
+    detail_serial:
+      bucket: "origin"
       concurrency: 1
-      interval: 1500
 ```
 
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
-| `engine.limits.<name>.key` | string | 是 | 无 | 限流规则按什么维度分桶生效 |
-| `engine.limits.<name>.inherit` | bool | 否 | `false` | 是否全局默认生效 |
-| `engine.limits.<name>.concurrency` | int | 否（与 `interval` 至少一项） | 无 | 最大并发数 |
-| `engine.limits.<name>.interval` | number | 否（与 `concurrency` 至少一项） | 无 | 最小调度间隔，单位固定 `ms` |
+| `engine.concurrency.<name>.bucket` | string / array<string> | 否 | `origin` | 并发控制分桶维度 |
+| `engine.concurrency.<name>.concurrency` | int | 是 | 无 | 每个桶允许的最大并发数 |
 
-字段说明：
+### 05.5.6 `engine.interval`
 
-- `engine.limits.<name>`
-  一条命名限流规则。
-- `key`
-  这条限流规则按什么维度生效。
-- `inherit`
-  是否全局默认生效。
-- `concurrency`
-  最大并发数。
-- `interval`
-  最小调度间隔，单位固定 `ms`。
+```yaml
+engine:
+  interval:
+    origin_guard:
+      bucket: "origin"
+      interval: 800
+```
 
-`key` 表示“这条限流规则，是按什么维度分桶生效”。
+| 字段 | 类型 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `engine.interval.<name>.bucket` | string / array<string> | 否 | `origin` | 间隔控制分桶维度 |
+| `engine.interval.<name>.interval` | number | 是 | 无 | 同一桶两次请求之间的最小间隔，单位 `ms` |
 
-v1 推荐固定支持：
+### 05.5.7 `engine.rate_limit`
 
-- `spider`
-  整个 spider 共用一个限流桶。
-- `origin`
-  同一个源站共用一个限流桶，通常指 `scheme + host + port`。
+```yaml
+engine:
+  rate_limit:
+    origin_budget:
+      bucket: "origin"
+      rate_per_minute: 120
+```
 
-例如：
+| 字段 | 类型 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `engine.rate_limit.<name>.bucket` | string / array<string> | 否 | `origin` | 速率限制分桶维度 |
+| `engine.rate_limit.<name>.rate_per_minute` | int | 是 | 无 | 每个桶每分钟允许的请求数 |
 
-- `key: "spider"`
-  代表整个任务统一受这条规则限制。
-- `key: "origin"`
-  代表同域请求受这条规则限制。
+### 05.5.8 `engine.auto_throttle`
 
-`inherit` 规则：
+```yaml
+engine:
+  auto_throttle:
+    origin_adaptive:
+      bucket: "origin"
+      target_concurrency: 1.5
+      start_interval: 300
+      min_interval: 100
+      max_interval: 3000
+      error_backoff_ratio: 2.0
+```
 
-- `inherit: true`
-  这条规则默认全局生效。
-- 不写 `inherit`
-  默认是 `false`，只在局部显式引用时生效。
+| 字段 | 类型 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `engine.auto_throttle.<name>.bucket` | string / array<string> | 否 | `origin` | 自适应节流分桶维度 |
+| `engine.auto_throttle.<name>.target_concurrency` | number | 否 | `1.0` | 目标并发度 |
+| `engine.auto_throttle.<name>.start_interval` | number | 否 | `0` | 初始间隔，单位 `ms` |
+| `engine.auto_throttle.<name>.min_interval` | number | 否 | `0` | 最小间隔，单位 `ms` |
+| `engine.auto_throttle.<name>.max_interval` | number | 否 | `60000` | 最大间隔，单位 `ms` |
+| `engine.auto_throttle.<name>.error_backoff_ratio` | number | 否 | `2.0` | 下载异常时的退避倍率 |
 
-### 05.5.5 局部引用
+### 05.5.9 局部引用
 
-`seed` 和 `follow` 都可以通过 `engine.limit` 额外挂一条限流规则：
+`seed` 和 `follow` 可以按真实 middleware 名称引用下载前能力：
 
 ```yaml
 follow:
   - next_step: "parse_detail"
     engine:
-      limit: "detail_slow"
+      concurrency: "detail_serial"
+      interval: "origin_guard"
+      rate_limit: "origin_budget"
+      auto_throttle: "origin_adaptive"
 ```
 
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
-| `seed.engine.limit` | string | 否 | 无 | 当前 seed 额外挂一条限流规则 |
-| `follow.engine.limit` | string | 否 | 无 | 当前 follow 额外挂一条限流规则 |
+| `seed.engine.concurrency` | string | 否 | 无 | 引用一条 `engine.concurrency` 配置 |
+| `seed.engine.interval` | string | 否 | 无 | 引用一条 `engine.interval` 配置 |
+| `seed.engine.rate_limit` | string | 否 | 无 | 引用一条 `engine.rate_limit` 配置 |
+| `seed.engine.auto_throttle` | string | 否 | 无 | 引用一条 `engine.auto_throttle` 配置 |
+| `follow.engine.concurrency` | string | 否 | 无 | 引用一条 `engine.concurrency` 配置 |
+| `follow.engine.interval` | string | 否 | 无 | 引用一条 `engine.interval` 配置 |
+| `follow.engine.rate_limit` | string | 否 | 无 | 引用一条 `engine.rate_limit` 配置 |
+| `follow.engine.auto_throttle` | string | 否 | 无 | 引用一条 `engine.auto_throttle` 配置 |
 
 约束：
 
-- `limit` 只能是单值字符串。
-- `limit` 不支持数组。
-- 实际生效规则 = 所有 `engine.limits.*.inherit=true` 的规则 + 当前局部 `limit`。
-- 局部这里只引用规则名，不在 `seed / follow` 里重复内联具体限流参数。
-
-设计原因：
-
-- 用户不用处理多规则组合的歧义。
-- 每个步骤最多只补一条特殊限制，配置边界更清晰。
+- 每个字段都是单值字符串，不支持数组
+- 字段名和顶层注册表同名，不做跨类型引用
+- `seed / follow` 里只引用名字，不重复内联具体参数
 
 ---
 
-## 05.6 `engine.retry`
+## 05.6 `engine.retry_by_status / engine.retry_by_error`
 
 ### 05.6.1 顶层结构
 
 ```yaml
 engine:
-  retry:
-    default_retry:
-      inherit: true
+  retry_by_status:
+    default_http_retry:
       count: 3
-      http_status: [429, 500, 502, 503, 504]
+      status: [429, 500, 502, 503, 504]
       backoff: [1000, 3000, 5000]
 
-    detail_retry:
-      count: 4
-      http_status: [429, 500, 502, 503, 504]
-      backoff: [1000, 3000, 5000, 8000]
+  retry_by_error:
+    default_error_retry:
+      count: 2
+      backoff: [1000, 3000]
 ```
+
+### 05.6.2 `engine.retry_by_status`
 
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
-| `engine.retry.<name>.inherit` | bool | 否 | `false` | 是否全局默认生效 |
-| `engine.retry.<name>.count` | int | 是 | 无 | 最大重试次数 |
-| `engine.retry.<name>.http_status` | array<int> | 否 | 无 | 哪些状态码触发重试 |
-| `engine.retry.<name>.backoff` | array<number> | 否 | 无 | 每次重试前等待多久，单位固定 `ms` |
+| `engine.retry_by_status.<name>.count` | int | 是 | 无 | 最大重试次数 |
+| `engine.retry_by_status.<name>.status` | array<int> | 否 | `[]` | 触发重试的 HTTP 状态码 |
+| `engine.retry_by_status.<name>.backoff` | array<number> | 否 | `[]` | 各次重试的等待时间，单位 `ms` |
 
-字段说明：
+说明：
 
-- `engine.retry.<name>`
-  一条命名重试规则。
-- `inherit`
-  是否全局默认生效。
-- `count`
-  最大重试次数。
-- `http_status`
-  哪些状态码触发重试。
-- `backoff`
-  每次重试前的等待时间列表，单位固定 `ms`。
+- 文档推荐使用 `status`
 
-### 05.6.2 局部引用
+### 05.6.3 `engine.retry_by_error`
+
+| 字段 | 类型 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `engine.retry_by_error.<name>.count` | int | 是 | 无 | 最大重试次数 |
+| `engine.retry_by_error.<name>.backoff` | array<number> | 否 | `[]` | 各次重试的等待时间，单位 `ms` |
+
+### 05.6.4 局部引用
 
 ```yaml
 follow:
   - next_step: "parse_detail"
     engine:
-      retry: "detail_retry"
+      retry_by_status: "default_http_retry"
+      retry_by_error: "detail_error_retry"
 ```
 
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
-| `seed.engine.retry` | string | 否 | 无 | 当前 seed 额外挂一条重试规则 |
-| `follow.engine.retry` | string | 否 | 无 | 当前 follow 额外挂一条重试规则 |
+| `seed.engine.retry_by_status` | string | 否 | 无 | 引用一条 `engine.retry_by_status` 配置 |
+| `seed.engine.retry_by_error` | string | 否 | 无 | 引用一条 `engine.retry_by_error` 配置 |
+| `follow.engine.retry_by_status` | string | 否 | 无 | 引用一条 `engine.retry_by_status` 配置 |
+| `follow.engine.retry_by_error` | string | 否 | 无 | 引用一条 `engine.retry_by_error` 配置 |
 
-约束：
+### 05.6.5 `backoff` 规则
 
-- `retry` 只能是单值字符串。
-- `retry` 不支持数组。
-- 实际生效规则 = 所有 `engine.retry.*.inherit=true` 的规则 + 当前局部 `retry`。
-
-### 05.6.3 `backoff` 规则
-
-- `count` 表示最多重试几次。
-- `backoff` 可以比 `count` 短。
-- 如果 `count` 大于 `backoff` 长度，超出的重试继续使用最后一个 `backoff` 值。
+- `count` 表示最多重试几次
+- `backoff` 可以比 `count` 短
+- 如果 `count` 大于 `backoff` 长度，超出的重试继续使用最后一个 `backoff` 值
 
 例如：
 
@@ -678,34 +711,25 @@ backoff: [1000, 3000]
 engine:
   dedup:
     request_url:
-      inherit: true
-      key:
-        - "$request.url"
-      ttl: 604800000
+      backend: "memory"
+      key: ["url"]
 
     request_url_with_edition:
-      key:
-        - "$request.url"
-        - "$meta.edition_id"
-      ttl: 604800000
+      backend: "memory"
+      key: ["url", "meta.edition_id"]
 ```
 
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
-| `engine.dedup.<name>.inherit` | bool | 否 | `false` | 是否全局默认生效 |
-| `engine.dedup.<name>.key` | array<string> | 是 | 无 | 去重键组成字段列表 |
-| `engine.dedup.<name>.ttl` | number | 是 | 无 | 去重有效期，单位固定 `ms` |
+| `engine.dedup.<name>.backend` | string | 否 | `memory` | 去重后端，当前内置支持 `memory / bloom / noop` |
+| `engine.dedup.<name>.key` | array<string> | 否 | `["url"]` | 去重指纹字段列表 |
+| `engine.dedup.<name>.expected_items` | int | 否 | `100000` | 当 `backend=bloom` 时的预计元素数 |
+| `engine.dedup.<name>.false_positive_rate` | number | 否 | `0.01` | 当 `backend=bloom` 时的误判率 |
 
-字段说明：
+说明：
 
-- `engine.dedup.<name>`
-  一条命名去重规则。
-- `inherit`
-  是否全局默认生效。
-- `key`
-  去重键由哪些字段组成。
-- `ttl`
-  去重有效期，单位固定 `ms`。
+- 当前代码同时接受 `key` 和 `keys`，文档统一推荐写 `key`
+- 如果不写 `key`，默认等价于 `["url"]`
 
 ### 05.7.2 局部引用
 
@@ -718,54 +742,45 @@ follow:
 
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
-| `seed.engine.dedup` | string | 否 | 无 | 当前 seed 额外挂一条去重规则 |
-| `follow.engine.dedup` | string | 否 | 无 | 当前 follow 额外挂一条去重规则 |
-
-约束：
-
-- `dedup` 只能是单值字符串。
-- `dedup` 不支持数组。
-- 实际生效规则 = 所有 `engine.dedup.*.inherit=true` 的规则 + 当前局部 `dedup`。
+| `seed.engine.dedup` | string | 否 | 无 | 引用一条 `engine.dedup` 配置 |
+| `follow.engine.dedup` | string | 否 | 无 | 引用一条 `engine.dedup` 配置 |
 
 ### 05.7.3 `key` 怎么算
 
-`key` 中的值按顺序取出，然后拼成最终的去重值。
+`key` 中的值按顺序取出，然后拼成最终去重指纹。
 
 例如：
 
 ```yaml
 key:
-  - "$request.url"
-  - "$meta.edition_id"
+  - "url"
+  - "meta.edition_id"
 ```
 
 则最终可规范化为：
 
 ```text
-{request.url}|{meta.edition_id}
+url={request.url}|meta.edition_id={meta.edition_id}
 ```
 
-推荐支持的引用来源：
+当前代码支持的 key token：
 
-- `$request.url`
-- `$request.method`
-- `$meta.xxx`
+- `url`
+- `method`
+- `body`
+- `meta.xxx`
 
-规则建议：
+### 05.7.4 当前不支持 `ttl`
 
-- 任一 key 值缺失或为空时，当前请求直接丢弃，并记录 `invalid_dedup_key`。
-- 拼接顺序必须严格按 `key` 数组顺序执行。
+当前内置 dedup 没有 `ttl` 字段，也不会按时间自动过期。
 
-### 05.7.4 作用边界
+这意味着：
 
-本版 `dedup` 只做请求层去重，不做结果层去重。
+- `dedup` 只负责“这条请求要不要进入队列”
+- 不负责“过几天自动解除去重”
+- 也不负责结果层幂等
 
-也就是说：
-
-- 它作用于“这条请求要不要继续发”
-- 不作用于“最终 output.item 要不要重复写入”
-
-结果层幂等由 sink 自己负责，例如数据库 `upsert`。
+如果后续需要“7 天去重”这类时效能力，应通过自定义 dedup backend 实现，而不是先在 DSL 文档里写一个运行时还不支持的 `ttl`。
 
 ---
 
@@ -811,6 +826,7 @@ sinks:
 
 - `sinks` 是注册表。
 - `output.sinks` 里只引用名字。
+- 进入 runtime 后，`output.sinks` 会被解析为当前 step 的目标 store 列表。
 - v1 不再单独写 `mapping`，因为 `output.item` 已经决定了最终输出结构。
 
 ---
@@ -831,8 +847,11 @@ seeds:
       - "^https?://"
 
     engine:
-      limit: "detail_slow"
-      retry: "detail_retry"
+      concurrency: "spider_global"
+      interval: "origin_guard"
+      rate_limit: "origin_budget"
+      retry_by_status: "default_http_retry"
+      retry_by_error: "default_error_retry"
       dedup: "request_url"
 
     next_step: "parse_period_xml"
@@ -844,8 +863,12 @@ seeds:
 | `seeds[].request` | object | 是 | 无 | 起始请求配置 |
 | `seeds[].meta` | object | 否 | 无 | 初始链路上下文 |
 | `seeds[].allow_url_pattern` | array<string> | 否 | 无 | URL 过滤规则 |
-| `seeds[].engine.limit` | string | 否 | 无 | 当前 seed 额外挂一条限流规则 |
-| `seeds[].engine.retry` | string | 否 | 无 | 当前 seed 额外挂一条重试规则 |
+| `seeds[].engine.concurrency` | string | 否 | 无 | 引用一条 `engine.concurrency` 配置 |
+| `seeds[].engine.interval` | string | 否 | 无 | 引用一条 `engine.interval` 配置 |
+| `seeds[].engine.rate_limit` | string | 否 | 无 | 引用一条 `engine.rate_limit` 配置 |
+| `seeds[].engine.auto_throttle` | string | 否 | 无 | 引用一条 `engine.auto_throttle` 配置 |
+| `seeds[].engine.retry_by_status` | string | 否 | 无 | 引用一条 `engine.retry_by_status` 配置 |
+| `seeds[].engine.retry_by_error` | string | 否 | 无 | 引用一条 `engine.retry_by_error` 配置 |
 | `seeds[].engine.dedup` | string | 否 | 无 | 当前 seed 额外挂一条去重规则 |
 | `seeds[].next_step` | string | 是 | 无 | 请求成功后进入的 step |
 
@@ -859,10 +882,10 @@ seeds:
   初始链路上下文，可选。
 - `allow_url_pattern`
   URL 过滤规则，可选。
-- `engine.limit`
-  额外挂一条限流规则，可选。
-- `engine.retry`
-  额外挂一条重试规则，可选。
+- `engine.concurrency / engine.interval / engine.rate_limit / engine.auto_throttle`
+  额外挂下载前 middleware 配置，可选。
+- `engine.retry_by_status / engine.retry_by_error`
+  额外挂重试 middleware 配置，可选。
 - `engine.dedup`
   额外挂一条去重规则，可选。
 - `next_step`
@@ -872,7 +895,13 @@ seeds:
 
 - seed 本质上也是一条请求。
 - 所以它和 follow 一样，可以挂请求层能力。
-- `engine.limit / engine.retry / engine.dedup` 这里只写规则名，具体规则统一在顶层 `engine` 注册表维护。
+- `engine.*` 这里只写规则名，具体规则统一在顶层 `engine` 注册表维护。
+
+当前实现说明：
+
+- 当 `rules.seeds` 非空时，引擎会直接用它们生成真正的起始请求。
+- 当 `rules.seeds` 为空时，引擎回退到 `Spider::build_start_requests()` / `start_urls()`。
+- `seed.request` 和 `follow.request` 走同一套 request plan 求值与构建语义。
 
 ---
 
@@ -912,7 +941,7 @@ steps:
 说明：
 
 - 一个 step 至少要有 `follow` 或 `output` 之一。
-- `step` 自己不放 `engine.limits / engine.retry / engine.dedup` 的具体参数。
+- `step` 自己不放 `engine.*` 的具体 middleware 参数。
 - 请求控制只放在 `seed / follow` 的 `engine` 上。
 
 ---
@@ -934,19 +963,14 @@ fields:
   detail_url:
     selector: "a"
     attr: "href"
-
-  node_ref:
-    selector: "//period[last()]"
-    kind: "node"
 ```
 
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
 | `fields.<name>.selector` | string | 是 | 无 | 当前页面中的提取表达式 |
-| `fields.<name>.text` | bool | 否 | `false` | 取文本 |
+| `fields.<name>.text` | bool | 否 | 实际默认提取文本 | 取文本 |
 | `fields.<name>.html` | bool | 否 | `false` | 取 HTML |
 | `fields.<name>.attr` | string | 否 | 无 | 取指定属性 |
-| `fields.<name>.kind` | string | 否 | 无 | 特殊提取模式，例如 `node` |
 
 字段说明：
 
@@ -958,12 +982,13 @@ fields:
   取 HTML。
 - `attr: "<name>"`
   取指定属性。
-- `kind: "node"`
-  直接保留节点对象，供后续 transform 使用。
 
 约束：
 
-- `text / html / attr / kind` 建议一次只写一种。
+- `text / html / attr` 一次只能写一种。
+- 如果三者都不写，当前实现默认按 `text` 提取。
+- v1 的 `fields` 只负责提取值，不暴露 `node` 对象。
+- 节点级作用域统一由 `follow.item` 表达。
 - `fields` 解析结果统一通过 `$fields.xxx` 引用。
 
 ### 05.11.2 关于选择器
@@ -986,10 +1011,7 @@ fields:
 ```yaml
 bind:
   period_date:
-    from: "$fields.latest_node"
-    transforms:
-      - type: "xpath_text"
-        expr: "./@date"
+    from: "$fields.period_date"
 
   year:
     from: "$bind.period_date"
@@ -1042,6 +1064,14 @@ url:
     page: 1
 ```
 
+`selector`：
+
+```yaml
+title:
+  selector: "h1"
+  text: true
+```
+
 带 `transforms` 和 `fallback`：
 
 ```yaml
@@ -1056,8 +1086,12 @@ title:
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
 | `literal` | string / number / bool / object / array | 否 | 无 | 直接写常量值 |
-| `from` | string | 否（与 `template` 二选一） | 无 | 从上下文中取值 |
-| `template` | string | 否（与 `from` 二选一） | 无 | 模板字符串 |
+| `from` | string | 否（与 `template / selector` 互斥） | 无 | 从上下文中取值 |
+| `template` | string | 否（与 `from / selector` 互斥） | 无 | 模板字符串 |
+| `selector` | string | 否（与 `from / template` 互斥） | 无 | 从当前页面或当前 `follow.item` 作用域中提取值 |
+| `text` | bool | 否 | `false` | 配合 `selector` 表示取文本 |
+| `html` | bool | 否 | `false` | 配合 `selector` 表示取 HTML |
+| `attr` | string | 否 | 无 | 配合 `selector` 表示取属性 |
 | `vars` | object | 否 | `{}` | 模板变量集合 |
 | `transforms` | array<object> | 否 | `[]` | 对当前值按顺序做加工 |
 | `fallback` | value | 否 | 无 | 主值为空或取不到时的兜底值 |
@@ -1068,12 +1102,23 @@ title:
   从上下文中取值。
 - `template`
   模板字符串。
+- `selector`
+  从当前页面，或当前 `follow.item` 的节点作用域中提取值。
 - `vars`
   模板变量，变量值本身也遵循统一值模型。
 - `transforms`
   对当前值按顺序做加工。
 - `fallback`
   当前值为空或取不到时的兜底值。
+
+补充说明：
+
+- `from / template / selector` 三者互斥。
+- `vars` 只在 `template` 场景下生效。
+- `selector` 场景下，`text / html / attr` 一次最多写一种。
+- `selector` 如果不写 `html / attr`，当前实现默认按文本提取。
+- `object / array` 字面量当前按“常量值”处理，不会递归解释其内部的 `from / template / selector`。
+- 如果要在结构化对象里继续写值表达式，这个能力后续再单独设计；当前 v1 不支持。
 
 ### 05.13.3 推荐上下文前缀
 
@@ -1087,7 +1132,7 @@ title:
 - `$response.url`
 - `$response.status`
 
-### 05.13.4 推荐内置 `transforms`
+### 05.13.4 当前支持的 `transforms`
 
 - `trim`
   去首尾空白。
@@ -1103,10 +1148,13 @@ title:
   从数组中取指定位置。
 - `date_format`
   日期格式转换。
-- `xpath_text`
-  从 node 中按 XPath 取值。
 - `resolve_url`
   把相对路径补全为绝对 URL。
+
+说明：
+
+- 当前 `validate` 阶段会直接校验 `transforms[].type` 是否在这份支持列表里。
+- 缺少关键参数的 transform 也会在 `validate` 阶段直接报错。
 
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
@@ -1138,8 +1186,11 @@ follow:
       - "^https?://"
 
     engine:
-      limit: "detail_slow"
-      retry: "detail_retry"
+      concurrency: "detail_serial"
+      interval: "origin_guard"
+      rate_limit: "origin_budget"
+      retry_by_status: "default_http_retry"
+      retry_by_error: "detail_error_retry"
       dedup: "request_url_with_edition"
 ```
 
@@ -1150,8 +1201,12 @@ follow:
 | `follow[].request` | object | 是 | 无 | 下一跳请求配置 |
 | `follow[].meta` | object | 否 | 无 | 绑定到当前下一跳请求上的上下文 |
 | `follow[].allow_url_pattern` | array<string> | 否 | 无 | URL 过滤规则 |
-| `follow[].engine.limit` | string | 否 | 无 | 当前 follow 额外挂一条限流规则 |
-| `follow[].engine.retry` | string | 否 | 无 | 当前 follow 额外挂一条重试规则 |
+| `follow[].engine.concurrency` | string | 否 | 无 | 引用一条 `engine.concurrency` 配置 |
+| `follow[].engine.interval` | string | 否 | 无 | 引用一条 `engine.interval` 配置 |
+| `follow[].engine.rate_limit` | string | 否 | 无 | 引用一条 `engine.rate_limit` 配置 |
+| `follow[].engine.auto_throttle` | string | 否 | 无 | 引用一条 `engine.auto_throttle` 配置 |
+| `follow[].engine.retry_by_status` | string | 否 | 无 | 引用一条 `engine.retry_by_status` 配置 |
+| `follow[].engine.retry_by_error` | string | 否 | 无 | 引用一条 `engine.retry_by_error` 配置 |
 | `follow[].engine.dedup` | string | 否 | 无 | 当前 follow 额外挂一条去重规则 |
 
 字段说明：
@@ -1166,16 +1221,16 @@ follow:
   绑定到当前下一跳请求上的上下文。
 - `allow_url_pattern`
   允许通过的 URL 正则列表。
-- `engine.limit`
-  当前 follow 额外挂一条限流规则。
-- `engine.retry`
-  当前 follow 额外挂一条重试规则。
+- `engine.concurrency / engine.interval / engine.rate_limit / engine.auto_throttle`
+  当前 follow 额外挂下载前 middleware 配置。
+- `engine.retry_by_status / engine.retry_by_error`
+  当前 follow 额外挂重试 middleware 配置。
 - `engine.dedup`
   当前 follow 额外挂一条去重规则。
 
 补充说明：
 
-- `engine.limit / engine.retry / engine.dedup` 这里只引用顶层 `engine` 中已经注册好的规则名。
+- `engine.*` 这里只引用顶层 `engine` 中已经注册好的规则名。
 - `follow` 本身不内联具体限流 / 重试 / 去重参数。
 
 ### 05.14.2 `item` 是什么
@@ -1227,10 +1282,11 @@ item: ".news-list li"
 3. 应用 `request.query`
 4. 执行 `allow_url_pattern`
 5. 执行 `engine.dedup`
-6. 进入 `engine.schedule` 调度，并受 `engine.limits` 约束
-7. 发请求
-8. 失败时按 `engine.retry` 处理
-9. 成功后进入 `next_step`
+6. 请求入队
+7. 在下载前执行 `engine.concurrency / engine.interval / engine.rate_limit / engine.auto_throttle`
+8. 发请求
+9. 在下载结果阶段执行 `engine.retry_by_status / engine.retry_by_error`
+10. 成功后进入 `next_step`
 
 ---
 
@@ -1240,6 +1296,7 @@ item: ".news-list li"
 
 ```yaml
 request:
+  mode: "http"
   method: "GET"
   url: ...
   query: ...
@@ -1247,22 +1304,41 @@ request:
   cookies: ...
   timeout: 10000
   proxy: ...
+  session: ...
+  encoding: ...
+  priority: ...
+  flags: ...
+  cb_kwargs: ...
+  errback: ...
+  allow_redirects: true
+  skip: ...
   body: ...
 ```
 
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
+| `request.mode` | string | 否 | `http` | 下载模式，当前支持 `http / browser` |
 | `request.method` | string | 否 | `GET` | HTTP 方法 |
 | `request.url` | string / object | 是 | 无 | 请求地址 |
 | `request.query` | object | 否 | `{}` | Query 参数 |
 | `request.headers` | object | 否 | `{}` | 请求头 |
 | `request.cookies` | object | 否 | `{}` | Cookie |
-| `request.timeout` | number | 否 | 无 | 请求超时，单位固定 `ms` |
+| `request.timeout` | number / object | 否 | 无 | 请求超时，单位固定 `ms`，也可写统一值表达式 |
 | `request.proxy` | string / object | 否 | 无 | 代理配置 |
+| `request.session` | string / object | 否 | 无 | session 标识，或统一值表达式 |
+| `request.encoding` | string / object | 否 | 无 | 响应解码编码，或统一值表达式 |
+| `request.priority` | number / object | 否 | 无 | 调度优先级，或统一值表达式 |
+| `request.flags` | array<value> | 否 | `[]` | 当前请求附带的 flag 列表 |
+| `request.cb_kwargs` | object | 否 | `{}` | 传给 callback 的参数映射 |
+| `request.errback` | string | 否 | 无 | 下载失败时调用哪个 errback |
+| `request.allow_redirects` | bool | 否 | 下载器默认值 | 是否允许自动跟随重定向 |
+| `request.skip` | array<string> | 否 | `[]` | 显式跳过哪些 middleware |
 | `request.body` | object | 否 | 无 | 请求体 |
 
 字段说明：
 
+- `mode`
+  下载模式，当前支持 `http` 与 `browser`。
 - `method`
   HTTP 方法，默认 `GET`。
 - `url`
@@ -1277,8 +1353,29 @@ request:
   请求超时，单位固定 `ms`。
 - `proxy`
   代理配置。
+- `session`
+  session 标识。
+- `encoding`
+  响应解码编码。
+- `priority`
+  调度优先级。
+- `flags`
+  当前请求附带的 flag 列表。
+- `cb_kwargs`
+  传给 callback 的参数映射。
+- `errback`
+  下载失败时调用哪个 errback。
+- `allow_redirects`
+  是否允许自动跟随重定向。
+- `skip`
+  显式跳过指定 middleware，例如 `["dedup"]`。
 - `body`
   请求体。
+
+说明：
+
+- `request.dont_filter` 已移除。
+- 如果要跳过去重，直接写 `request.skip: ["dedup"]`。
 
 ### 05.15.2 `url`
 
@@ -1331,6 +1428,12 @@ url:
 - 取其 `href`
 - 当前 item 产生一条子链路
 
+补充说明：
+
+- `request.url` 的对象形态只表示统一值表达式。
+- 也就是只能写 `from / template / selector / transforms / fallback` 这一套键。
+- 不支持任意对象字面量，例如 `{ value: "https://example.com" }`。
+
 ### 05.15.3 `query / headers / cookies`
 
 这三个字段都建议使用统一值模型。
@@ -1352,9 +1455,38 @@ cookies:
     from: "$meta.sid"
 ```
 
+`session / encoding / priority / flags / cb_kwargs` 也沿用同一套值模型。
+
+例如：
+
+```yaml
+session:
+  from: "$meta.session_id"
+
+encoding: "utf-8"
+
+priority:
+  from: "$meta.priority"
+
+flags:
+  - "detail"
+  - from: "$meta.channel"
+
+cb_kwargs:
+  channel:
+    from: "$meta.channel"
+```
+
 ### 05.15.4 `timeout`
 
 `timeout` 单位固定为 `ms`。
+
+它也支持统一值表达式，例如：
+
+```yaml
+timeout:
+  from: "$meta.timeout_ms"
+```
 
 约定：
 
@@ -1365,9 +1497,11 @@ cookies:
 
 - `interval`
 - `backoff`
-- `ttl`
+- `start_interval`
+- `min_interval`
+- `max_interval`
 
-### 05.15.5 `proxy`
+### 05.15.5 `proxy / session / encoding / priority`
 
 最小可支持两种形式：
 
@@ -1377,19 +1511,47 @@ cookies:
 proxy: "http://user:pass@ip:port"
 ```
 
-引用运行时已有代理配置：
+从上下文引用已有代理地址：
 
 ```yaml
 proxy:
-  ref: "default_proxy"
+  from: "$meta.proxy_url"
 ```
 
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
-| `request.proxy` | string | 否 | 无 | 直接写代理地址 |
-| `request.proxy.ref` | string | 否 | 无 | 引用运行时已有代理配置 |
+| `request.proxy` | string / object | 否 | 无 | 代理地址，或统一值表达式 |
+| `request.proxy.from` | string | 否 | 无 | 从已有上下文引用代理地址 |
+| `request.session` | string / object | 否 | 无 | session 标识，或统一值表达式 |
+| `request.encoding` | string / object | 否 | 无 | 解码编码，或统一值表达式 |
+| `request.priority` | number / object | 否 | 无 | 调度优先级，或统一值表达式 |
 
-### 05.15.6 `body`
+说明：
+
+- 当前 `proxy` 走统一值模型，所以也可以继续使用 `template / transforms / fallback` 这些表达式能力。
+- 当前不支持 `request.proxy.ref` 这类代理注册表引用写法。
+- `session / encoding / priority` 也都走同一套统一值模型。
+- 这些字段的对象形态也只表示统一值表达式，不支持任意对象字面量。
+
+### 05.15.6 `errback / allow_redirects`
+
+```yaml
+request:
+  errback: "handle_detail_error"
+  allow_redirects: false
+```
+
+| 字段 | 类型 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `request.errback` | string | 否 | 无 | 下载失败时调用哪个 errback |
+| `request.allow_redirects` | bool | 否 | 下载器默认值 | 是否允许自动跟随重定向 |
+
+说明：
+
+- `errback` 这里只写回调名字。
+- `allow_redirects` 当前是布尔值，不走值表达式。
+
+### 05.15.7 `body`
 
 v1 建议只支持三种：
 
@@ -1410,16 +1572,54 @@ body:
   raw: "{\"keyword\":\"test\"}"
 ```
 
+```yaml
+body:
+  raw:
+    from: "$meta.raw_body"
+```
+
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
 | `request.body.json` | object | 否（三选一） | 无 | JSON 请求体 |
 | `request.body.form` | object | 否（三选一） | 无 | Form 请求体 |
-| `request.body.raw` | string | 否（三选一） | 无 | 原始请求体 |
+| `request.body.raw` | string / object | 否（三选一） | 无 | 原始请求体，或统一值表达式 |
 
 约束：
 
 - `json / form / raw` 三选一
 - `GET` 通常不写 `body`
+- `body.raw` 的对象形态只表示统一值表达式，不支持任意对象字面量
+
+### 05.15.8 `skip`
+
+`skip` 用来在 request 级别显式跳过某些 middleware。
+
+例如：
+
+```yaml
+request:
+  url: "https://example.com/detail/1"
+  skip:
+    - "dedup"
+```
+
+```yaml
+request:
+  url: "https://example.com/detail/1"
+  skip:
+    - "retry_by_status"
+    - "retry_by_error"
+```
+
+| 字段 | 类型 | 必填 | 默认值 | 说明 |
+| --- | --- | --- | --- | --- |
+| `request.skip` | array<string> | 否 | `[]` | 当前请求要跳过的 middleware 名称 |
+
+说明：
+
+- `skip` 中直接写 middleware 名称。
+- 内置中间件例如：`dedup`、`concurrency`、`interval`、`rate_limit`、`auto_throttle`、`retry_by_status`、`retry_by_error`。
+- 如果有自定义 middleware，也可以直接写自定义导出的名称。
 
 ---
 
@@ -1492,15 +1692,21 @@ output:
 - 可以同时输出到多个 sink。
 - 同一条结果会 fan-out 到所有目标 sink。
 
+当前实现说明：
+
+- 当前版本会校验 `output.sinks` 是否引用了已声明的顶层 `sinks`。
+- 运行时会把 `output.sinks` 解析为目标 store 实例，并在统一 `pipeline -> store` 主链末端 fan-out 到目标 store。
+- 顶层 `sinks` 注册表本身不会自动创建 store 实例；业务侧仍需用 `Engine::with_store(...)` / `Engine::with_stores(...)` 注册真实 store。
+
 ---
 
 ## 05.17 `validate`
 
 ### 05.17.1 内联校验
 
-v1 不单独引入顶层 `schemas`。
+校验直接写在 `output.validate` 中。
 
-原因：
+这样更适合当前 DSL 的单链路输出模型：
 
 - 大多数任务只有一种输出结构
 - 直接把校验写在 `output.validate` 更直观
@@ -1534,13 +1740,12 @@ validate:
 | --- | --- | --- | --- | --- |
 | `validate.required` | array<string> | 否 | `[]` | 哪些字段必须存在 |
 | `validate.fields` | object | 否 | `{}` | 字段级校验规则 |
-| `validate.rule` | string | 否 | 无 | 引用运行时已有代码校验器 |
 
 | 字段 | 类型 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
 | `validate.fields.<name>.type` | string | 是（若声明该字段） | 无 | 字段类型 |
-| `validate.fields.<name>.min_length` | number | 否 | 无 | 最小长度 |
-| `validate.fields.<name>.max_length` | number | 否 | 无 | 最大长度 |
+| `validate.fields.<name>.min_length` | int | 否 | 无 | 最小长度，要求非负整数 |
+| `validate.fields.<name>.max_length` | int | 否 | 无 | 最大长度，要求非负整数 |
 | `validate.fields.<name>.format` | string | 否 | 无 | 特定格式，例如 `url` |
 | `validate.fields.<name>.pattern` | string | 否 | 无 | 正则表达式 |
 | `validate.fields.<name>.enum` | array<any> | 否 | 无 | 枚举值列表 |
@@ -1561,6 +1766,11 @@ validate:
   正则表达式。
 - `enum`
   枚举值列表。
+
+补充说明：
+
+- `format` 当前只支持 `url / datetime / date`。
+- `min_length / max_length` 当前要求写非负整数。
 
 ### 05.17.3 推荐支持的校验规则
 
@@ -1591,36 +1801,12 @@ validate:
 
 ### 05.17.4 代码校验
 
-如果运行时已经支持代码校验，可以在 `validate` 中加一个轻量引用：
+本版 DSL 只保留声明式校验：
 
-```yaml
-validate:
-  required:
-    - "title"
-    - "content"
+- `required`
+- `fields`
 
-  fields:
-    title:
-      type: "string"
-      min_length: 1
-
-  rule: "article_guard"
-```
-
-其中：
-
-- `rule`
-  引用运行时预注册的代码校验器
-
-用途：
-
-- 适合做声明式规则不方便表达的复杂校验
-- 例如两个字段互斥、时间先后关系、跨字段一致性等
-
-说明：
-
-- `rule` 的注册方式属于运行时实现，不由 DSL 本身管理
-- DSL 只负责引用名字
+`output.validate.rule` 已从当前 DSL 中移除，不再作为支持字段。
 
 ---
 
@@ -1670,10 +1856,11 @@ allow_url_pattern:
 4. 如果是相对 URL，则补全
 5. 执行 `allow_url_pattern`
 6. 执行 `engine.dedup`
-7. 进入 `engine.schedule` 调度，并受 `engine.limits` 约束
-8. 发请求
-9. 失败时按 `engine.retry` 处理
-10. 成功后进入 `next_step`
+7. 请求入队
+8. 在下载前执行 `engine.concurrency / engine.interval / engine.rate_limit / engine.auto_throttle`
+9. 发请求
+10. 在下载结果阶段执行 `engine.retry_by_status / engine.retry_by_error`
+11. 成功后进入 `next_step`
 
 ### 05.19.3 output 输出结果
 
@@ -1681,35 +1868,17 @@ allow_url_pattern:
 
 1. 组装 `output.item`
 2. 执行 `output.validate`
-3. 校验通过后写入 `output.sinks`
-4. 校验失败则丢弃当前结果，并记录失败原因
+3. 校验通过后按 `output.sinks` 从 engine store 注册表解析目标 store 实例
+4. item 进入统一 `pipeline -> store` 主链，并 fan-out 到目标 store
+5. 校验失败则丢弃当前结果，并记录失败原因
 
 ---
 
-## 05.20 本版明确不纳入的旧概念
-
-为了保证 v1 简洁，本版明确不把以下概念作为核心 DSL 结构：
-
-- `parse` 大对象
-- `next_url_config`
-- `collections`
-- `for_each`
-- 顶层 `schemas`
-
-原因如下：
-
-- `fields` 已经承担当前页面解析职责，不需要再包一层 `parse`
-- `follow.request.url` 已经承担下一跳生成职责，不需要单独的 `next_url_config`
-- `item` 已经能表达“当前子链路从哪个节点产生”，不需要再引入 `collections / for_each`
-- 一个任务通常只有一种输出结构，v1 直接使用 `output.validate` 即可
-
----
-
-## 05.21 小结
+## 05.20 小结
 
 本版 DSL v1 的核心骨架已经固定为：
 
-- 顶层注册表：`engine(schedule / limits / retry / dedup) / sinks`
+- 顶层注册表：`engine(dedup / concurrency / interval / rate_limit / auto_throttle / retry_by_status / retry_by_error) / sinks`
 - 链路起点：`seeds`
 - 页面处理：`steps`
 - 页面解析：`fields`

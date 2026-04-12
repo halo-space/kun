@@ -1,7 +1,5 @@
-use crate::engine::context::EngineContext;
-use crate::engine::flow::Flow;
+use crate::engine::{context, flow};
 use crate::error::SpiderError;
-use crate::future::BoxFuture;
 use crate::middleware::traits::Middleware;
 use crate::request::{Headers, SessionConfig};
 use crate::value::Value;
@@ -22,7 +20,7 @@ impl Cookies {
         }
     }
 
-    fn apply_default_session(&self, context: &mut EngineContext) {
+    fn apply_default_session(&self, context: &mut context::Download) {
         if context.request.session.is_none()
             && let Some(session_id) = &self.default_session
         {
@@ -30,7 +28,7 @@ impl Cookies {
         }
     }
 
-    fn normalize_cookie_headers(&self, context: &mut EngineContext) {
+    fn normalize_cookie_headers(&self, context: &mut context::Download) {
         let cookie_headers = take_cookie_headers(&mut context.request.headers);
         if cookie_headers.is_empty() {
             return;
@@ -44,15 +42,13 @@ impl Cookies {
 }
 
 impl Middleware for Cookies {
-    fn process_request<'a>(
-        &'a self,
-        context: &'a mut EngineContext,
-    ) -> BoxFuture<'a, Result<Flow, SpiderError>> {
-        Box::pin(async move {
-            self.apply_default_session(context);
-            self.normalize_cookie_headers(context);
-            Ok(Flow::Continue)
-        })
+    async fn before_download(
+        &self,
+        context: &mut context::Download,
+    ) -> Result<flow::Download, SpiderError> {
+        self.apply_default_session(context);
+        self.normalize_cookie_headers(context);
+        Ok(flow::Download::Continue)
     }
 }
 
@@ -107,15 +103,15 @@ mod tests {
                 .into_iter()
                 .collect(),
         );
-        let mut context = EngineContext::new(
+        let mut context = context::Download::new(
             Request::new("https://example.com")
                 .with_header("Cookie", "sid=abc; theme=light")
                 .with_cookie("theme", "dark"),
         );
 
-        let flow = block_on(middleware.process_request(&mut context)).unwrap();
+        let flow = block_on(middleware.before_download(&mut context)).unwrap();
 
-        assert_eq!(flow, Flow::Continue);
+        assert_eq!(flow, flow::Download::Continue);
         assert_eq!(context.request.session, Some(SessionConfig::new("shared")));
         assert!(context.request.headers.is_empty());
         assert_eq!(
@@ -136,9 +132,9 @@ mod tests {
                 .collect(),
         );
         let mut context =
-            EngineContext::new(Request::new("https://example.com").with_session("custom"));
+            context::Download::new(Request::new("https://example.com").with_session("custom"));
 
-        block_on(middleware.process_request(&mut context)).unwrap();
+        block_on(middleware.before_download(&mut context)).unwrap();
 
         assert_eq!(context.request.session, Some(SessionConfig::new("custom")));
     }
@@ -146,13 +142,13 @@ mod tests {
     #[test]
     fn cookies_middleware_normalizes_browser_request_cookie_header_without_switching_mode() {
         let middleware = Cookies::default();
-        let mut context = EngineContext::new(
+        let mut context = context::Download::new(
             Request::browser("https://example.com").with_header("Cookie", "sid=abc; theme=light"),
         );
 
-        let flow = block_on(middleware.process_request(&mut context)).unwrap();
+        let flow = block_on(middleware.before_download(&mut context)).unwrap();
 
-        assert_eq!(flow, Flow::Continue);
+        assert_eq!(flow, flow::Download::Continue);
         assert_eq!(context.request.mode, crate::request::RequestMode::Browser);
         assert!(context.request.headers.is_empty());
         assert_eq!(

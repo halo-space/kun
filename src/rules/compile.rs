@@ -1,34 +1,26 @@
 use crate::error::SpiderError;
-use crate::middleware::{Config as MiddlewareConfig, Map as MiddlewareMap, Stage};
-use crate::request::browser::{
-    Config as BrowserConfig, DeviceProfile, Driver, Engine, FingerprintProfile, KeepAlive,
-    KeepAliveScope, ScreenProfile, Size,
+use crate::middleware::{
+    AUTO_THROTTLE, CONCURRENCY, DEDUP, INTERVAL, Map as MiddlewareMap, RATE_LIMIT, RETRY_BY_ERROR,
+    RETRY_BY_STATUS, Stage,
 };
-use crate::request::http::Config as HttpConfig;
-use crate::request::{Headers, ProxyConfig, RequestMode, SessionConfig};
+use crate::request::RequestMode;
 use crate::rules::schema::{
-    Compiled, CompiledStep, Dsl, FetchConfig, FetchPlan, FieldConfig, FieldPlan, LinkConfig,
-    LinkPlan, ParseConfig, ParsePlan, SelectorKind, SourceKind, StepConfig,
+    BodyConfig, ClockConfig, Compiled, CompiledSeed, CompiledStep, Dsl, EngineRefs,
+    EngineRegistryConfig, ExtractKind, FieldConfig, FieldPlan, FollowConfig, FollowPlan,
+    OutputConfig, OutputFieldValidatorConfig, OutputPlan, OutputValidatorConfig, RequestConfig,
+    RequestPlan, SeedConfig, SelectorKind, SelectorValueKind, SinkConfig, SpiderConfig, StepConfig,
+    TransformConfig, ValueExpr, ValueSource,
 };
 use crate::rules::validate::validate_rules;
-use crate::runtime::{Config as RuntimeConfig, merge as merge_runtime};
-use crate::validator::{Validation, ValidationRule, ValidationType};
+use crate::validator::{FieldValidator, Transform, Type, field as validator_field};
 use crate::value::Value;
-use jiff::SignedDuration;
 use std::collections::BTreeMap;
 
 pub fn compile_rules(value: Value) -> Result<Compiled, SpiderError> {
     let normalized = normalize(value)?;
     validate_rules(&normalized)?;
     let dsl = parse_dsl(&normalized)?;
-
-    Ok(Compiled {
-        steps: dsl
-            .steps
-            .into_iter()
-            .map(compile_step)
-            .collect::<Result<Vec<_>, _>>()?,
-    })
+    compile_dsl(dsl)
 }
 
 fn normalize(value: Value) -> Result<Value, SpiderError> {
@@ -40,795 +32,763 @@ fn normalize(value: Value) -> Result<Value, SpiderError> {
     }
 }
 
+fn compile_dsl(dsl: Dsl) -> Result<Compiled, SpiderError> {
+    let steps = dsl
+        .steps
+        .into_iter()
+        .map(|step| compile_step(step, &dsl.engine, &dsl.sinks))
+        .collect::<Result<Vec<_>, _>>()?;
+    let seeds = dsl
+        .seeds
+        .into_iter()
+        .map(|seed| compile_seed(seed, &dsl.engine))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(Compiled {
+        spider: dsl.spider,
+        engine: dsl.engine,
+        sinks: dsl.sinks,
+        seeds,
+        steps,
+    })
+}
+
 fn parse_dsl(value: &Value) -> Result<Dsl, SpiderError> {
-    let root = value
-        .as_object()
-        .ok_or_else(|| SpiderError::rules("rules dsl must be an object"))?;
-    let steps = root
-        .get("steps")
-        .and_then(Value::as_array)
-        .ok_or_else(|| SpiderError::rules("rules.steps must be an array"))?;
+    let root = expect_object(value, "rules")?;
 
     Ok(Dsl {
-        steps: steps
+        spider: parse_spider(root.get("spider"))?,
+        engine: parse_engine(root.get("engine"))?,
+        sinks: parse_sinks(root.get("sinks"))?,
+        seeds: root
+            .get("seeds")
+            .and_then(Value::as_array)
+            .ok_or_else(|| SpiderError::rules("rules.seeds must be an array"))?
+            .iter()
+            .map(parse_seed)
+            .collect::<Result<Vec<_>, _>>()?,
+        steps: root
+            .get("steps")
+            .and_then(Value::as_array)
+            .ok_or_else(|| SpiderError::rules("rules.steps must be an array"))?
             .iter()
             .map(parse_step)
             .collect::<Result<Vec<_>, _>>()?,
     })
 }
 
-fn parse_step(value: &Value) -> Result<StepConfig, SpiderError> {
-    let step = value
-        .as_object()
-        .ok_or_else(|| SpiderError::rules("rules.steps[*] must be an object"))?;
+fn parse_spider(value: Option<&Value>) -> Result<SpiderConfig, SpiderError> {
+    let spider = value
+        .ok_or_else(|| SpiderError::rules("rules.spider is required"))
+        .and_then(|value| expect_object(value, "rules.spider"))?;
 
-    Ok(StepConfig {
-        id: required_string(step, "id")?.to_string(),
-        r#type: optional_string(step, "type").map(str::to_string),
-        callback: optional_string(step, "callback").map(str::to_string),
-        fetch: parse_fetch(step.get("fetch"))?,
-        parse: parse_parse(step.get("parse"))?,
-        validate: parse_list(step.get("validate"), parse_validation)?,
-        route: optional_map(step, "route"),
-        output: optional_map(step, "output"),
-        runtime: optional_map(step, "runtime"),
-        middlewares: parse_step_middlewares(step.get("MIDDLEWARES"))?,
-        meta: step.get("meta").and_then(|v| v.as_object().cloned()),
-        dedup: parse_dedup(step.get("dedup"))?,
-        schedule: parse_schedule(step.get("schedule"))?,
-        retry: parse_retry(step.get("retry"))?,
+    Ok(SpiderConfig {
+        name: required_string(spider, "name", "rules.spider.name")?.to_string(),
+        clock: parse_clock(spider.get("clock"))?,
     })
 }
 
-fn parse_fetch(value: Option<&Value>) -> Result<FetchConfig, SpiderError> {
-    let Some(value) = value else {
-        return Ok(FetchConfig::default());
+fn parse_clock(value: Option<&Value>) -> Result<ClockConfig, SpiderError> {
+    let Some(clock) = value else {
+        return Ok(ClockConfig::default());
     };
-    let fetch = value
-        .as_object()
-        .ok_or_else(|| SpiderError::rules("step fetch must be an object"))?;
+    let clock = expect_object(clock, "rules.spider.clock")?;
 
-    Ok(FetchConfig {
-        mode: optional_string(fetch, "mode").map(str::to_string),
-        request: optional_map_value(fetch, "request"),
-        browser: optional_map_value(fetch, "browser"),
+    Ok(ClockConfig {
+        timezone: optional_string(clock, "timezone").map(str::to_string),
     })
 }
 
-fn parse_parse(value: Option<&Value>) -> Result<ParseConfig, SpiderError> {
-    let Some(value) = value else {
-        return Ok(ParseConfig::default());
+fn parse_engine(value: Option<&Value>) -> Result<EngineRegistryConfig, SpiderError> {
+    let Some(engine) = value else {
+        return Ok(EngineRegistryConfig::default());
     };
-    let parse = value
-        .as_object()
-        .ok_or_else(|| SpiderError::rules("step parse must be an object"))?;
+    let engine = expect_object(engine, "rules.engine")?;
 
-    Ok(ParseConfig {
-        fields: parse_list(parse.get("fields"), parse_field)?,
-        links: parse_list(parse.get("links"), parse_link)?,
-        next_url_config: optional_map(parse, "next_url_config"),
+    Ok(EngineRegistryConfig {
+        dedup: parse_named_registry(engine.get("dedup"), "rules.engine.dedup")?,
+        concurrency: parse_named_registry(engine.get("concurrency"), "rules.engine.concurrency")?,
+        interval: parse_named_registry(engine.get("interval"), "rules.engine.interval")?,
+        rate_limit: parse_named_registry(engine.get("rate_limit"), "rules.engine.rate_limit")?,
+        auto_throttle: parse_named_registry(
+            engine.get("auto_throttle"),
+            "rules.engine.auto_throttle",
+        )?,
+        retry_by_status: parse_named_registry(
+            engine.get("retry_by_status"),
+            "rules.engine.retry_by_status",
+        )?,
+        retry_by_error: parse_named_registry(
+            engine.get("retry_by_error"),
+            "rules.engine.retry_by_error",
+        )?,
     })
 }
 
-fn parse_field(value: &Value) -> Result<FieldConfig, SpiderError> {
-    let field = value
-        .as_object()
-        .ok_or_else(|| SpiderError::rules("parse.fields[*] must be an object"))?;
-
-    Ok(FieldConfig {
-        name: required_string(field, "name")?.to_string(),
-        source: required_string(field, "source")?.to_string(),
-        selector_type: required_string(field, "selector_type")?.to_string(),
-        selector: string_list(field.get("selector"), "parse.fields[*].selector")?,
-        attribute: optional_string(field, "attribute")
-            .unwrap_or("text")
-            .to_string(),
-        required: field
-            .get("required")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        default: field.get("default").cloned().unwrap_or(Value::Null),
-        multiple: field
-            .get("multiple")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        options: optional_map_value(field, "options"),
-    })
-}
-
-fn parse_link(value: &Value) -> Result<LinkConfig, SpiderError> {
-    let link = value
-        .as_object()
-        .ok_or_else(|| SpiderError::rules("parse.links[*] must be an object"))?;
-
-    Ok(LinkConfig {
-        name: required_string(link, "name")?.to_string(),
-        source: required_string(link, "source")?.to_string(),
-        selector_type: required_string(link, "selector_type")?.to_string(),
-        selector: string_list(link.get("selector"), "parse.links[*].selector")?,
-        attribute: optional_string(link, "attribute")
-            .unwrap_or("attr:href")
-            .to_string(),
-        required: link
-            .get("required")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        default: link
-            .get("default")
-            .cloned()
-            .unwrap_or_else(|| Value::Array(Vec::new())),
-        multiple: link
-            .get("multiple")
-            .and_then(Value::as_bool)
-            .unwrap_or(true),
-        allow: string_list_optional(link.get("allow"), "parse.links[*].allow")?,
-        deny: string_list_optional(link.get("deny"), "parse.links[*].deny")?,
-        next_step: optional_string(link, "next_step").map(str::to_string),
-        meta: optional_map_value(link, "meta"),
-        options: optional_map_value(link, "options"),
-    })
-}
-
-fn compile_step(step: StepConfig) -> Result<CompiledStep, SpiderError> {
-    let derived_runtime = runtime_from_step_options(
-        step.dedup.as_ref(),
-        step.schedule.as_ref(),
-        step.retry.as_ref(),
-    );
-    let explicit_runtime = compile_runtime(step.runtime)?;
-
-    Ok(CompiledStep {
-        id: step.id,
-        step_type: step.r#type,
-        callback: step.callback,
-        fetch: compile_fetch(step.fetch)?,
-        parse: compile_parse(step.parse)?,
-        validate: step.validate,
-        runtime: merge_runtime(&derived_runtime, &explicit_runtime),
-        middlewares: compile_middlewares(step.middlewares)?,
-        meta: step.meta,
-        dedup: step.dedup,
-        schedule: step.schedule,
-        retry: step.retry,
-    })
-}
-
-fn compile_fetch(fetch: FetchConfig) -> Result<FetchPlan, SpiderError> {
-    let mode = fetch
-        .mode
-        .as_deref()
-        .map(RequestMode::try_from)
-        .transpose()
-        .map_err(SpiderError::rules)?;
-    let method = fetch
-        .request
-        .get("method")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let headers = parse_headers(fetch.request.get("headers"))?;
-    let body = parse_body(fetch.request.get("body"))?;
-    let cookies = parse_request_cookies(&fetch.request)?;
-    let timeout = parse_request_timeout(fetch.request.get("timeout"))?;
-    let proxy = parse_request_proxy(fetch.request.get("proxy"))?;
-    let session = parse_request_session(fetch.request.get("session"))?;
-    let dont_filter = fetch.request.get("dont_filter").and_then(Value::as_bool);
-    let http = parse_http_config(&fetch.request)?;
-    let browser = parse_browser_config(&fetch.browser)?;
-
-    Ok(FetchPlan {
-        mode,
-        method,
-        headers,
-        body,
-        cookies,
-        timeout,
-        proxy,
-        session,
-        dont_filter,
-        http,
-        browser,
-    })
-}
-
-fn compile_parse(parse: ParseConfig) -> Result<ParsePlan, SpiderError> {
-    Ok(ParsePlan {
-        fields: parse
-            .fields
-            .into_iter()
-            .map(compile_field)
-            .collect::<Result<Vec<_>, _>>()?,
-        links: parse
-            .links
-            .into_iter()
-            .map(compile_link)
-            .collect::<Result<Vec<_>, _>>()?,
-        next_url_config: parse.next_url_config,
-    })
-}
-
-fn compile_runtime(runtime: BTreeMap<String, Value>) -> Result<RuntimeConfig, SpiderError> {
-    Ok(RuntimeConfig {
-        schedule: section_map(&runtime, "schedule", "step.runtime.schedule")?,
-        retry: section_map(&runtime, "retry", "step.runtime.retry")?,
-        dedup: section_map(&runtime, "dedup", "step.runtime.dedup")?,
-    })
-}
-
-fn parse_validation(value: &Value) -> Result<Validation, SpiderError> {
-    let entry = value
-        .as_object()
-        .ok_or_else(|| SpiderError::rules("step validate entry must be an object"))?;
-    let field = required_string(entry, "name")?.to_string();
-    let value_type =
-        ValidationType::try_from(required_string(entry, "type")?).map_err(SpiderError::rules)?;
-    let rule = entry.get("rule").and_then(Value::as_object);
-    let required = rule
-        .and_then(|rule| rule.get("required"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let regex = rule
-        .and_then(|rule| rule.get("regex"))
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    let min = rule
-        .and_then(|rule| rule.get("min"))
-        .and_then(Value::as_f64);
-    let max = rule
-        .and_then(|rule| rule.get("max"))
-        .and_then(Value::as_f64);
-    let enum_values = rule
-        .and_then(|rule| rule.get("enum"))
-        .and_then(Value::as_array)
-        .map(|values| values.to_vec())
-        .unwrap_or_default();
-
-    Ok(Validation {
-        field,
-        value_type,
-        transforms: Vec::new(),
-        conditions: Vec::new(),
-        object_validations: Vec::new(),
-        each_validations: Vec::new(),
-        groups: Vec::new(),
-        rule: ValidationRule {
-            required,
-            regex,
-            min,
-            max,
-            enum_values,
-            ..ValidationRule::default()
-        },
-    })
-}
-
-fn runtime_from_step_options(
-    dedup: Option<&crate::rules::schema::DedupConfig>,
-    schedule: Option<&crate::rules::schema::ScheduleConfig>,
-    retry: Option<&crate::rules::schema::RetryConfig>,
-) -> RuntimeConfig {
-    RuntimeConfig {
-        schedule: schedule.map(schedule_runtime_map).unwrap_or_default(),
-        retry: retry.map(retry_runtime_map).unwrap_or_default(),
-        dedup: dedup.map(dedup_runtime_map).unwrap_or_default(),
-    }
-}
-
-fn dedup_runtime_map(dedup: &crate::rules::schema::DedupConfig) -> BTreeMap<String, Value> {
-    let mut map = BTreeMap::new();
-    map.insert("enabled".to_string(), Value::Bool(dedup.enabled));
-    if !dedup.key.is_empty() {
-        map.insert(
-            "key".to_string(),
-            Value::Array(dedup.key.iter().cloned().map(Value::String).collect()),
-        );
-    }
-    map.insert("ttl".to_string(), Value::Number(dedup.ttl as f64));
-    map.insert("scope".to_string(), Value::String(dedup.scope.clone()));
-    if let Some(namespace) = &dedup.namespace {
-        map.insert("namespace".to_string(), Value::String(namespace.clone()));
-    }
-    map
-}
-
-fn schedule_runtime_map(
-    schedule: &crate::rules::schema::ScheduleConfig,
-) -> BTreeMap<String, Value> {
-    let mut map = BTreeMap::new();
-    if let Some(concurrency) = schedule.concurrency {
-        map.insert("concurrency".to_string(), Value::Number(concurrency as f64));
-    }
-    if let Some(interval) = schedule.interval {
-        map.insert("interval".to_string(), Value::Number(interval as f64));
-    }
-    map
-}
-
-fn retry_runtime_map(retry: &crate::rules::schema::RetryConfig) -> BTreeMap<String, Value> {
-    let mut map = BTreeMap::new();
-    map.insert("count".to_string(), Value::Number(retry.count as f64));
-    if !retry.http_status.is_empty() {
-        map.insert(
-            "http_status".to_string(),
-            Value::Array(
-                retry
-                    .http_status
-                    .iter()
-                    .map(|status| Value::Number(*status as f64))
-                    .collect(),
-            ),
-        );
-    }
-    if !retry.backoff.is_empty() {
-        map.insert(
-            "backoff".to_string(),
-            Value::Array(
-                retry
-                    .backoff
-                    .iter()
-                    .map(|backoff| Value::Number(*backoff as f64))
-                    .collect(),
-            ),
-        );
-    }
-    map
-}
-
-fn compile_field(field: FieldConfig) -> Result<FieldPlan, SpiderError> {
-    Ok(FieldPlan {
-        source_ref: field.source.clone(),
-        name: field.name,
-        source: compile_source(&field.source)?,
-        selector_type: compile_selector_type(&field.selector_type)?,
-        selector: field.selector,
-        attribute: field.attribute,
-        required: field.required,
-        default: field.default,
-        multiple: field.multiple,
-        options: field.options,
-    })
-}
-
-fn compile_link(link: LinkConfig) -> Result<LinkPlan, SpiderError> {
-    Ok(LinkPlan {
-        source_ref: link.source.clone(),
-        name: link.name,
-        source: compile_source(&link.source)?,
-        selector_type: compile_selector_type(&link.selector_type)?,
-        selector: link.selector,
-        attribute: link.attribute,
-        required: link.required,
-        default: link.default,
-        multiple: link.multiple,
-        allow: link.allow,
-        deny: link.deny,
-        next_step: link.next_step,
-        meta: link.meta,
-        options: link.options,
-    })
-}
-
-fn compile_source(value: &str) -> Result<SourceKind, SpiderError> {
-    match value {
-        "html" => Ok(SourceKind::Html),
-        "text" => Ok(SourceKind::Text),
-        "json" => Ok(SourceKind::Json),
-        "xml" => Ok(SourceKind::Xml),
-        "headers" => Ok(SourceKind::Headers),
-        "final_url" | "url" => Ok(SourceKind::Url),
-        value if value.starts_with("meta.") => Ok(SourceKind::Meta),
-        other => Err(SpiderError::rules(format!(
-            "unsupported parse source: {other}"
-        ))),
-    }
-}
-
-fn compile_selector_type(value: &str) -> Result<SelectorKind, SpiderError> {
-    match value {
-        "css" => Ok(SelectorKind::Css),
-        "xpath" => Ok(SelectorKind::XPath),
-        "json" => Ok(SelectorKind::Json),
-        "xml" => Ok(SelectorKind::Xml),
-        "regex" => Ok(SelectorKind::Regex),
-        "ai" => Ok(SelectorKind::Ai),
-        other => Err(SpiderError::rules(format!(
-            "unsupported selector_type: {other}"
-        ))),
-    }
-}
-
-fn parse_http_config(value: &BTreeMap<String, Value>) -> Result<Option<HttpConfig>, SpiderError> {
-    let has_http_fields = value.contains_key("query") || value.contains_key("allow_redirects");
-    if !has_http_fields {
-        return Ok(None);
-    }
-
-    let mut config = HttpConfig::default();
-
-    if let Some(query) = value.get("query") {
-        for (key, value) in expect_object(query, "fetch.request.query")? {
-            let value = value.as_str().ok_or_else(|| {
-                SpiderError::rules(format!("query value for {key} must be string"))
-            })?;
-            config = config.with_query(key.clone(), value.to_string());
-        }
-    }
-
-    if let Some(allow_redirects) = value.get("allow_redirects").and_then(Value::as_bool) {
-        config = config.with_redirects(allow_redirects);
-    }
-
-    Ok(Some(config))
-}
-
-fn parse_request_cookies(
-    value: &BTreeMap<String, Value>,
-) -> Result<BTreeMap<String, String>, SpiderError> {
-    let Some(cookies) = value.get("cookies") else {
+fn parse_named_registry(
+    value: Option<&Value>,
+    label: &str,
+) -> Result<BTreeMap<String, BTreeMap<String, Value>>, SpiderError> {
+    let Some(value) = value else {
         return Ok(BTreeMap::new());
     };
-
+    let registry = expect_object(value, label)?;
     let mut parsed = BTreeMap::new();
-    for (key, value) in expect_object(cookies, "fetch.request.cookies")? {
-        let value = value
-            .as_str()
-            .ok_or_else(|| SpiderError::rules(format!("cookie value for {key} must be string")))?;
-        parsed.insert(key.clone(), value.to_string());
+
+    for (name, config) in registry {
+        parsed.insert(
+            name.clone(),
+            expect_object(config, &format!("{label}.{name}"))?.clone(),
+        );
     }
 
     Ok(parsed)
 }
 
-fn parse_browser_config(
-    value: &BTreeMap<String, Value>,
-) -> Result<Option<BrowserConfig>, SpiderError> {
-    if value.is_empty() {
-        return Ok(None);
-    }
-
-    let mut config = BrowserConfig::default();
-
-    if let Some(driver) = value.get("driver").and_then(Value::as_str) {
-        config = config.with_driver(Driver::try_from(driver).map_err(SpiderError::rules)?);
-    }
-    if let Some(engine) = value.get("engine").and_then(Value::as_str) {
-        config = config.with_engine(Engine::try_from(engine).map_err(SpiderError::rules)?);
-    }
-    if let Some(headless) = value.get("headless").and_then(Value::as_bool) {
-        config = config.with_headless(headless);
-    }
-    if let Some(stealth) = value.get("stealth").and_then(Value::as_bool) {
-        config = config.with_stealth(stealth);
-    }
-    if let Some(device_profile) = value.get("device_profile") {
-        let device_profile = expect_object(device_profile, "fetch.browser.device_profile")?;
-        let mut resolved = DeviceProfile::new();
-
-        if let Some(fingerprint) = device_profile.get("fingerprint") {
-            let fingerprint =
-                expect_object(fingerprint, "fetch.browser.device_profile.fingerprint")?;
-            let mut profile = FingerprintProfile::new();
-
-            if let Some(user_agent) = fingerprint.get("user_agent").and_then(Value::as_str) {
-                profile = profile.with_user_agent(user_agent.to_string());
-            }
-            if let Some(locale) = fingerprint.get("locale").and_then(Value::as_str) {
-                profile = profile.with_locale(locale.to_string());
-            }
-            if let Some(timezone) = fingerprint.get("timezone").and_then(Value::as_str) {
-                profile = profile.with_timezone(timezone.to_string());
-            }
-            if let Some(accept_language) =
-                fingerprint.get("accept_language").and_then(Value::as_str)
-            {
-                profile = profile.with_accept_language(accept_language.to_string());
-            }
-            if let Some(languages) = fingerprint.get("languages") {
-                let values = languages
-                    .as_array()
-                    .ok_or_else(|| {
-                        SpiderError::rules(
-                            "fetch.browser.device_profile.fingerprint.languages must be an array",
-                        )
-                    })?
-                    .iter()
-                    .map(|value| {
-                        value.as_str().map(str::to_string).ok_or_else(|| {
-                            SpiderError::rules(
-                                "fetch.browser.device_profile.fingerprint.languages must be string[]",
-                            )
-                        })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                profile = profile.with_languages(values);
-            }
-            if let Some(platform) = fingerprint.get("platform").and_then(Value::as_str) {
-                profile = profile.with_platform(platform.to_string());
-            }
-            if let Some(mobile) = fingerprint.get("mobile").and_then(Value::as_bool) {
-                profile = profile.with_mobile(mobile);
-            }
-            if let Some(device_memory) = fingerprint.get("device_memory").and_then(Value::as_f64) {
-                profile = profile.with_device_memory(device_memory as u8);
-            }
-
-            resolved = resolved.with_fingerprint(profile);
-        }
-
-        if let Some(screen) = device_profile.get("screen") {
-            let screen = expect_object(screen, "fetch.browser.device_profile.screen")?;
-            let mut profile = ScreenProfile::new();
-
-            if let Some(viewport) = screen.get("viewport") {
-                profile = profile.with_viewport_size(parse_browser_size(
-                    viewport,
-                    "fetch.browser.device_profile.screen.viewport",
-                )?);
-            }
-            if let Some(screen_size) = screen.get("screen") {
-                profile = profile.with_screen_size(parse_browser_size(
-                    screen_size,
-                    "fetch.browser.device_profile.screen.screen",
-                )?);
-            }
-            if let Some(avail) = screen.get("avail") {
-                profile = profile.with_avail_size(parse_browser_size(
-                    avail,
-                    "fetch.browser.device_profile.screen.avail",
-                )?);
-            }
-            if let Some(color_depth) = screen.get("color_depth").and_then(Value::as_f64) {
-                profile = profile.with_color_depth(color_depth as u8);
-            }
-            if let Some(pixel_depth) = screen.get("pixel_depth").and_then(Value::as_f64) {
-                profile = profile.with_pixel_depth(pixel_depth as u8);
-            }
-            if let Some(device_scale_factor) =
-                screen.get("device_scale_factor").and_then(Value::as_f64)
-            {
-                profile = profile.with_device_scale_factor(device_scale_factor as u32);
-            }
-
-            resolved = resolved.with_screen(profile);
-        }
-
-        config = config.with_device_profile(resolved);
-    }
-    if let Some(wait_for_selector) = value.get("wait_for_selector").and_then(Value::as_str) {
-        config = config.with_wait_for_selector(wait_for_selector.to_string());
-    }
-    if let Some(keep_alive) = value.get("keep_alive").and_then(Value::as_str) {
-        config =
-            config.with_keep_alive(KeepAlive::try_from(keep_alive).map_err(SpiderError::rules)?);
-    }
-    if let Some(keep_alive_scope) = value.get("keep_alive_scope").and_then(Value::as_str) {
-        config = config.with_keep_alive_scope(
-            KeepAliveScope::try_from(keep_alive_scope).map_err(SpiderError::rules)?,
-        );
-    }
-
-    Ok(Some(config))
-}
-
-fn parse_browser_size(value: &Value, field: &str) -> Result<Size, SpiderError> {
-    let size = expect_object(value, field)?;
-    let width = size
-        .get("width")
-        .and_then(Value::as_f64)
-        .map(|value| value as u32)
-        .ok_or_else(|| SpiderError::rules(format!("{field}.width must be a number")))?;
-    let height = size
-        .get("height")
-        .and_then(Value::as_f64)
-        .map(|value| value as u32)
-        .ok_or_else(|| SpiderError::rules(format!("{field}.height must be a number")))?;
-
-    Ok(Size::new(width, height))
-}
-
-fn parse_request_timeout(value: Option<&Value>) -> Result<Option<SignedDuration>, SpiderError> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-
-    let Some(milliseconds) = value.as_f64() else {
-        return Err(SpiderError::rules("fetch.request.timeout must be a number"));
-    };
-
-    Ok(Some(SignedDuration::from_millis(
-        milliseconds.max(0.0) as i64
-    )))
-}
-
-fn parse_request_proxy(value: Option<&Value>) -> Result<Option<ProxyConfig>, SpiderError> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-
-    let Some(url) = value.as_str() else {
-        return Err(SpiderError::rules("fetch.request.proxy must be a string"));
-    };
-
-    Ok(Some(ProxyConfig::new(url)))
-}
-
-fn parse_request_session(value: Option<&Value>) -> Result<Option<SessionConfig>, SpiderError> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-
-    let Some(id) = value.as_str() else {
-        return Err(SpiderError::rules("fetch.request.session must be a string"));
-    };
-
-    Ok(Some(SessionConfig::new(id)))
-}
-
-fn parse_headers(value: Option<&Value>) -> Result<Headers, SpiderError> {
-    let mut headers = Headers::new();
-    let Some(value) = value else {
-        return Ok(headers);
-    };
-
-    for (key, value) in expect_object(value, "fetch.request.headers")? {
-        let header_value = value
-            .as_str()
-            .ok_or_else(|| SpiderError::rules(format!("header value for {key} must be string")))?;
-        headers
-            .entry(key.clone())
-            .or_default()
-            .push(header_value.to_string());
-    }
-
-    Ok(headers)
-}
-
-fn parse_body(value: Option<&Value>) -> Result<Option<Vec<u8>>, SpiderError> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-
-    match value {
-        Value::Null => Ok(None),
-        Value::String(value) => Ok(Some(value.as_bytes().to_vec())),
-        _ => Err(SpiderError::rules(
-            "fetch.request.body must be string or null",
-        )),
-    }
-}
-
-fn required_string<'a>(
-    value: &'a BTreeMap<String, Value>,
-    key: &str,
-) -> Result<&'a str, SpiderError> {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .ok_or_else(|| SpiderError::rules(format!("missing required field: {key}")))
-}
-
-fn optional_string<'a>(value: &'a BTreeMap<String, Value>, key: &str) -> Option<&'a str> {
-    value.get(key).and_then(Value::as_str)
-}
-
-fn optional_map(value: &BTreeMap<String, Value>, key: &str) -> BTreeMap<String, Value> {
-    optional_map_value(value, key)
-}
-
-fn optional_map_value(value: &BTreeMap<String, Value>, key: &str) -> BTreeMap<String, Value> {
-    value
-        .get(key)
-        .and_then(Value::as_object)
-        .cloned()
-        .unwrap_or_default()
-}
-
-fn section_map(
-    value: &BTreeMap<String, Value>,
-    key: &str,
-    label: &str,
-) -> Result<BTreeMap<String, Value>, SpiderError> {
-    let Some(value) = value.get(key) else {
-        return Ok(BTreeMap::new());
-    };
-
-    expect_object(value, label).cloned()
-}
-
-fn parse_step_middlewares(value: Option<&Value>) -> Result<BTreeMap<String, Value>, SpiderError> {
+fn parse_sinks(value: Option<&Value>) -> Result<BTreeMap<String, SinkConfig>, SpiderError> {
     let Some(value) = value else {
         return Ok(BTreeMap::new());
     };
-    value
-        .as_object()
-        .cloned()
-        .ok_or_else(|| SpiderError::rules("step MIDDLEWARES must be an object"))
+    let sinks = expect_object(value, "rules.sinks")?;
+    let mut parsed = BTreeMap::new();
+
+    for (name, sink) in sinks {
+        let sink = expect_object(sink, &format!("rules.sinks.{name}"))?;
+        let mut options = sink.clone();
+        let kind = required_string(sink, "type", &format!("rules.sinks.{name}.type"))?.to_string();
+        options.remove("type");
+        parsed.insert(name.clone(), SinkConfig { kind, options });
+    }
+
+    Ok(parsed)
 }
 
-fn compile_middlewares(raw: BTreeMap<String, Value>) -> Result<MiddlewareMap, SpiderError> {
-    let mut map = MiddlewareMap::new();
+fn parse_seed(value: &Value) -> Result<SeedConfig, SpiderError> {
+    let seed = expect_object(value, "rules.seeds[*]")?;
 
-    for (key, value) in raw {
-        let entry = value
-            .as_object()
-            .ok_or_else(|| SpiderError::rules(format!("MIDDLEWARES.{key} must be an object")))?;
+    Ok(SeedConfig {
+        id: required_string(seed, "id", "rules.seeds[*].id")?.to_string(),
+        request: parse_request(
+            seed.get("request")
+                .ok_or_else(|| SpiderError::rules("seed request is required"))?,
+            "seed request",
+        )?,
+        meta: parse_value_map(seed.get("meta"), "seed meta")?,
+        allow_url_pattern: string_list(seed.get("allow_url_pattern"), "seed allow_url_pattern")?,
+        engine: parse_engine_refs(seed.get("engine"))?,
+        next_step: required_string(seed, "next_step", "seed next_step")?.to_string(),
+    })
+}
 
-        let enabled = entry
-            .get("enabled")
-            .and_then(Value::as_bool)
-            .unwrap_or(true);
-        let stage = match entry
-            .get("type")
-            .and_then(Value::as_str)
-            .unwrap_or("download")
-        {
-            "download" => Stage::Download,
-            "spider" => Stage::Spider,
-            other => {
-                return Err(SpiderError::rules(format!(
-                    "MIDDLEWARES.{key}.type: unsupported {other}"
-                )));
-            }
-        };
-        let order = entry.get("order").and_then(Value::as_f64).unwrap_or(100.0) as i32;
-        let options = entry
-            .get("options")
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default();
+fn parse_step(value: &Value) -> Result<StepConfig, SpiderError> {
+    let step = expect_object(value, "rules.steps[*]")?;
 
-        map.insert(
-            key,
-            MiddlewareConfig {
-                enabled,
-                stage,
-                order,
-                options,
+    Ok(StepConfig {
+        id: required_string(step, "id", "rules.steps[*].id")?.to_string(),
+        callback: optional_string(step, "callback").map(str::to_string),
+        fields: parse_fields(step.get("fields"))?,
+        bind: parse_value_map(step.get("bind"), "step bind")?,
+        follow: parse_follow_list(step.get("follow"))?,
+        output: step.get("output").map(parse_output).transpose()?,
+    })
+}
+
+fn parse_fields(value: Option<&Value>) -> Result<BTreeMap<String, FieldConfig>, SpiderError> {
+    let Some(value) = value else {
+        return Ok(BTreeMap::new());
+    };
+    let fields = expect_object(value, "step fields")?;
+    let mut parsed = BTreeMap::new();
+
+    for (name, field) in fields {
+        let field = expect_object(field, &format!("step fields.{name}"))?;
+        parsed.insert(
+            name.clone(),
+            FieldConfig {
+                selector: required_string(
+                    field,
+                    "selector",
+                    &format!("step fields.{name}.selector"),
+                )?
+                .to_string(),
+                kind: extract_kind_from_object(field),
             },
         );
     }
 
-    Ok(map)
+    Ok(parsed)
 }
 
-fn parse_list<T>(
+fn parse_follow_list(value: Option<&Value>) -> Result<Vec<FollowConfig>, SpiderError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let list = expect_array(value, "step follow")?;
+    list.iter().map(parse_follow).collect()
+}
+
+fn parse_follow(value: &Value) -> Result<FollowConfig, SpiderError> {
+    let follow = expect_object(value, "step follow[*]")?;
+
+    Ok(FollowConfig {
+        item: optional_string(follow, "item").map(str::to_string),
+        next_step: required_string(follow, "next_step", "follow next_step")?.to_string(),
+        request: parse_request(
+            follow
+                .get("request")
+                .ok_or_else(|| SpiderError::rules("follow request is required"))?,
+            "follow request",
+        )?,
+        meta: parse_value_map(follow.get("meta"), "follow meta")?,
+        allow_url_pattern: string_list(
+            follow.get("allow_url_pattern"),
+            "follow allow_url_pattern",
+        )?,
+        engine: parse_engine_refs(follow.get("engine"))?,
+    })
+}
+
+fn parse_output(value: &Value) -> Result<OutputConfig, SpiderError> {
+    let output = expect_object(value, "step output")?;
+
+    Ok(OutputConfig {
+        item: parse_value_map(output.get("item"), "step output.item")?,
+        validator: output
+            .get("validate")
+            .map(parse_output_validator)
+            .transpose()?,
+        sinks: string_list(output.get("sinks"), "step output.sinks")?,
+    })
+}
+
+fn parse_output_validator(value: &Value) -> Result<OutputValidatorConfig, SpiderError> {
+    let validate = expect_object(value, "step output.validate")?;
+    let mut fields = BTreeMap::new();
+
+    if let Some(value) = validate.get("fields") {
+        let configured = expect_object(value, "step output.validate.fields")?;
+        for (name, config) in configured {
+            let config = expect_object(config, &format!("step output.validate.fields.{name}"))?;
+            fields.insert(
+                name.clone(),
+                OutputFieldValidatorConfig {
+                    value_type: required_string(
+                        config,
+                        "type",
+                        &format!("step output.validate.fields.{name}.type"),
+                    )?
+                    .to_string(),
+                    min_length: config
+                        .get("min_length")
+                        .and_then(Value::as_f64)
+                        .map(|value| value as usize),
+                    max_length: config
+                        .get("max_length")
+                        .and_then(Value::as_f64)
+                        .map(|value| value as usize),
+                    format: optional_string(config, "format").map(str::to_string),
+                    pattern: optional_string(config, "pattern").map(str::to_string),
+                    enum_values: config
+                        .get("enum")
+                        .and_then(Value::as_array)
+                        .map(|values| values.to_vec())
+                        .unwrap_or_default(),
+                },
+            );
+        }
+    }
+
+    Ok(OutputValidatorConfig {
+        required: string_list(validate.get("required"), "step output.validate.required")?,
+        fields,
+    })
+}
+
+fn parse_request(value: &Value, label: &str) -> Result<RequestConfig, SpiderError> {
+    let request = expect_object(value, label)?;
+
+    Ok(RequestConfig {
+        mode: optional_string(request, "mode").map(str::to_string),
+        method: optional_string(request, "method").map(str::to_string),
+        url: parse_value_expr(
+            request
+                .get("url")
+                .ok_or_else(|| SpiderError::rules(format!("{label}.url is required")))?,
+        )?,
+        query: parse_value_map(request.get("query"), &format!("{label}.query"))?,
+        headers: parse_value_map(request.get("headers"), &format!("{label}.headers"))?,
+        cookies: parse_value_map(request.get("cookies"), &format!("{label}.cookies"))?,
+        timeout: request.get("timeout").map(parse_value_expr).transpose()?,
+        proxy: request.get("proxy").map(parse_value_expr).transpose()?,
+        session: request.get("session").map(parse_value_expr).transpose()?,
+        encoding: request.get("encoding").map(parse_value_expr).transpose()?,
+        priority: request.get("priority").map(parse_value_expr).transpose()?,
+        flags: request
+            .get("flags")
+            .and_then(Value::as_array)
+            .map(|values| values.iter().map(parse_value_expr).collect())
+            .transpose()?
+            .unwrap_or_default(),
+        cb_kwargs: parse_value_map(request.get("cb_kwargs"), &format!("{label}.cb_kwargs"))?,
+        errback: optional_string(request, "errback").map(str::to_string),
+        body: request.get("body").map(parse_body).transpose()?,
+        allow_redirects: request.get("allow_redirects").and_then(Value::as_bool),
+        skip: string_list(request.get("skip"), &format!("{label}.skip"))?,
+    })
+}
+
+fn parse_body(value: &Value) -> Result<BodyConfig, SpiderError> {
+    let body = expect_object(value, "request body")?;
+
+    if let Some(json) = body.get("json") {
+        return Ok(BodyConfig::Json(parse_value_map(
+            Some(json),
+            "request body.json",
+        )?));
+    }
+
+    if let Some(form) = body.get("form") {
+        return Ok(BodyConfig::Form(parse_value_map(
+            Some(form),
+            "request body.form",
+        )?));
+    }
+
+    if let Some(raw) = body.get("raw") {
+        return Ok(BodyConfig::Raw(parse_value_expr(raw)?));
+    }
+
+    Err(SpiderError::rules(
+        "request body must declare exactly one of json/form/raw".to_string(),
+    ))
+}
+
+fn parse_engine_refs(value: Option<&Value>) -> Result<EngineRefs, SpiderError> {
+    let Some(value) = value else {
+        return Ok(EngineRefs::default());
+    };
+    let refs = expect_object(value, "engine refs")?;
+
+    Ok(EngineRefs {
+        dedup: optional_string(refs, "dedup").map(str::to_string),
+        concurrency: optional_string(refs, "concurrency").map(str::to_string),
+        interval: optional_string(refs, "interval").map(str::to_string),
+        rate_limit: optional_string(refs, "rate_limit").map(str::to_string),
+        auto_throttle: optional_string(refs, "auto_throttle").map(str::to_string),
+        retry_by_status: optional_string(refs, "retry_by_status").map(str::to_string),
+        retry_by_error: optional_string(refs, "retry_by_error").map(str::to_string),
+    })
+}
+
+fn parse_value_map(
     value: Option<&Value>,
-    parse: impl Fn(&Value) -> Result<T, SpiderError>,
-) -> Result<Vec<T>, SpiderError> {
+    label: &str,
+) -> Result<BTreeMap<String, ValueExpr>, SpiderError> {
+    let Some(value) = value else {
+        return Ok(BTreeMap::new());
+    };
+    let map = expect_object(value, label)?;
+    let mut parsed = BTreeMap::new();
+
+    for (key, value) in map {
+        parsed.insert(key.clone(), parse_value_expr(value)?);
+    }
+
+    Ok(parsed)
+}
+
+fn parse_value_expr(value: &Value) -> Result<ValueExpr, SpiderError> {
+    let Some(object) = value.as_object() else {
+        return Ok(ValueExpr::literal(value.clone()));
+    };
+
+    let mut expr = if let Some(from) = object.get("from") {
+        ValueExpr::from_ref(
+            from.as_str()
+                .ok_or_else(|| SpiderError::rules("value.from must be a string"))?,
+        )
+    } else if let Some(template) = object.get("template") {
+        ValueExpr {
+            source: ValueSource::Template {
+                template: template
+                    .as_str()
+                    .ok_or_else(|| SpiderError::rules("value.template must be a string"))?
+                    .to_string(),
+                vars: parse_value_map(object.get("vars"), "value.vars")?,
+            },
+            transforms: Vec::new(),
+            fallback: None,
+        }
+    } else if let Some(selector) = object.get("selector") {
+        ValueExpr {
+            source: ValueSource::Selector {
+                selector: selector
+                    .as_str()
+                    .ok_or_else(|| SpiderError::rules("value.selector must be a string"))?
+                    .to_string(),
+                kind: selector_value_kind_from_object(object)?,
+            },
+            transforms: Vec::new(),
+            fallback: None,
+        }
+    } else {
+        ValueExpr::literal(value.clone())
+    };
+
+    expr.transforms = parse_transforms(object.get("transforms"))?;
+    expr.fallback = object
+        .get("fallback")
+        .map(parse_value_expr)
+        .transpose()?
+        .map(Box::new);
+
+    Ok(expr)
+}
+
+fn parse_transforms(value: Option<&Value>) -> Result<Vec<TransformConfig>, SpiderError> {
     let Some(value) = value else {
         return Ok(Vec::new());
     };
-
-    value
-        .as_array()
-        .ok_or_else(|| SpiderError::rules("parse list must be an array"))?
-        .iter()
-        .map(parse)
-        .collect()
-}
-
-fn string_list(value: Option<&Value>, label: &str) -> Result<Vec<String>, SpiderError> {
-    let Some(value) = value else {
-        return Err(SpiderError::rules(format!("{label} is required")));
-    };
-    string_list_optional(Some(value), label)
-}
-
-fn string_list_optional(value: Option<&Value>, label: &str) -> Result<Vec<String>, SpiderError> {
-    let Some(value) = value else {
-        return Ok(Vec::new());
-    };
-
-    value
-        .as_array()
-        .ok_or_else(|| SpiderError::rules(format!("{label} must be an array")))?
+    let transforms = expect_array(value, "value.transforms")?;
+    transforms
         .iter()
         .map(|value| {
-            value
-                .as_str()
-                .map(str::to_string)
-                .ok_or_else(|| SpiderError::rules(format!("{label} entries must be strings")))
+            let object = expect_object(value, "value.transforms[*]")?;
+            let mut options = object.clone();
+            let kind = required_string(object, "type", "value.transforms[*].type")?.to_string();
+            options.remove("type");
+            Ok(TransformConfig { kind, options })
         })
         .collect()
+}
+
+fn compile_seed(
+    seed: SeedConfig,
+    registry: &EngineRegistryConfig,
+) -> Result<CompiledSeed, SpiderError> {
+    Ok(CompiledSeed {
+        id: seed.id,
+        request: compile_request_plan(seed.request)?,
+        meta: seed.meta,
+        allow_url_pattern: seed.allow_url_pattern,
+        middleware: lower_engine_refs(&seed.engine, registry)?,
+        next_step: seed.next_step,
+    })
+}
+
+fn compile_step(
+    step: StepConfig,
+    registry: &EngineRegistryConfig,
+    sinks: &BTreeMap<String, SinkConfig>,
+) -> Result<CompiledStep, SpiderError> {
+    Ok(CompiledStep {
+        id: step.id,
+        callback: step.callback,
+        fetch: crate::rules::schema::FetchPlan::default(),
+        fields: step
+            .fields
+            .into_iter()
+            .map(|(name, field)| compile_field(name, field))
+            .collect::<Result<BTreeMap<_, _>, _>>()?,
+        bind: step.bind,
+        follow: step
+            .follow
+            .into_iter()
+            .map(|follow| compile_follow(follow, registry))
+            .collect::<Result<Vec<_>, _>>()?,
+        output: step
+            .output
+            .map(|output| compile_output(output, sinks))
+            .transpose()?,
+        default_middlewares: MiddlewareMap::new(),
+        middlewares: MiddlewareMap::new(),
+    })
+}
+
+fn compile_field(name: String, field: FieldConfig) -> Result<(String, FieldPlan), SpiderError> {
+    Ok((
+        name.clone(),
+        FieldPlan {
+            name,
+            selector_kind: detect_selector_kind(&field.selector),
+            selector: field.selector,
+            kind: field.kind,
+        },
+    ))
+}
+
+fn compile_follow(
+    follow: FollowConfig,
+    registry: &EngineRegistryConfig,
+) -> Result<FollowPlan, SpiderError> {
+    Ok(FollowPlan {
+        item_selector_kind: follow
+            .item
+            .as_ref()
+            .map(|selector| detect_selector_kind(selector)),
+        item: follow.item,
+        next_step: follow.next_step,
+        request: compile_request_plan(follow.request)?,
+        meta: follow.meta,
+        allow_url_pattern: follow.allow_url_pattern,
+        middleware: lower_engine_refs(&follow.engine, registry)?,
+    })
+}
+
+fn compile_output(
+    output: OutputConfig,
+    _sinks: &BTreeMap<String, SinkConfig>,
+) -> Result<OutputPlan, SpiderError> {
+    let validators = compile_output_validator(output.validator)?;
+
+    Ok(OutputPlan {
+        item: output.item,
+        validators,
+        sinks: output.sinks,
+    })
+}
+
+fn compile_output_validator(
+    validator: Option<OutputValidatorConfig>,
+) -> Result<Vec<FieldValidator>, SpiderError> {
+    let Some(validator) = validator else {
+        return Ok(Vec::new());
+    };
+
+    let mut validators = BTreeMap::new();
+
+    for required in &validator.required {
+        validators
+            .entry(required.clone())
+            .or_insert_with(|| validator_field(required.clone(), Type::Text).required());
+    }
+
+    for (field, config) in validator.fields {
+        let compiled = compile_field_validator(field.clone(), config)?;
+        let compiled = if validator.required.iter().any(|required| required == &field) {
+            compiled.required()
+        } else {
+            compiled
+        };
+        validators.insert(field, compiled);
+    }
+
+    Ok(validators.into_values().collect())
+}
+
+fn compile_field_validator(
+    field: String,
+    config: OutputFieldValidatorConfig,
+) -> Result<FieldValidator, SpiderError> {
+    let value_type = match config.value_type.as_str() {
+        "string" | "text" => Type::Text,
+        "number" => Type::Number,
+        "bool" => Type::Bool,
+        "list" => Type::List,
+        "object" => Type::Object,
+        other => {
+            return Err(SpiderError::rules(format!(
+                "unsupported output validation type: {other}"
+            )));
+        }
+    };
+
+    let mut validation = validator_field(field, value_type);
+
+    if let Some(min_length) = config.min_length {
+        validation = validation.min_length(min_length);
+    }
+    if let Some(max_length) = config.max_length {
+        validation = validation.max_length(max_length);
+    }
+    if let Some(pattern) = config.pattern {
+        validation = validation.regex(pattern);
+    }
+    if !config.enum_values.is_empty() {
+        validation = validation.enum_values(config.enum_values);
+    }
+    if let Some(format) = config.format {
+        validation = apply_validator_format(validation, &format)?;
+    }
+
+    Ok(validation)
+}
+
+fn apply_validator_format(
+    validation: FieldValidator,
+    format: &str,
+) -> Result<FieldValidator, SpiderError> {
+    match format {
+        "url" => Ok(validation.regex(r"^https?://\S+$")),
+        "datetime" | "date" => Ok(validation.transform(Transform::ParseDatetime)),
+        other => Err(SpiderError::rules(format!(
+            "unsupported output validation format: {other}"
+        ))),
+    }
+}
+
+fn compile_request_plan(request: RequestConfig) -> Result<RequestPlan, SpiderError> {
+    Ok(RequestPlan {
+        mode: request
+            .mode
+            .as_deref()
+            .map(RequestMode::try_from)
+            .transpose()
+            .map_err(SpiderError::rules)?,
+        method: request.method,
+        url: request.url,
+        query: request.query,
+        headers: request.headers,
+        cookies: request.cookies,
+        timeout: request.timeout,
+        proxy: request.proxy,
+        session: request.session,
+        encoding: request.encoding,
+        priority: request.priority,
+        flags: request.flags,
+        cb_kwargs: request.cb_kwargs,
+        errback: request.errback,
+        body: request.body,
+        allow_redirects: request.allow_redirects,
+        skip: request.skip,
+    })
+}
+
+fn lower_engine_refs(
+    refs: &EngineRefs,
+    registry: &EngineRegistryConfig,
+) -> Result<MiddlewareMap, SpiderError> {
+    let mut middleware = MiddlewareMap::new();
+
+    lower_registry_ref(
+        &mut middleware,
+        DEDUP,
+        refs.dedup.as_deref(),
+        &registry.dedup,
+        Stage::Enqueue,
+        0,
+    )?;
+    lower_registry_ref(
+        &mut middleware,
+        CONCURRENCY,
+        refs.concurrency.as_deref(),
+        &registry.concurrency,
+        Stage::Download,
+        225,
+    )?;
+    lower_registry_ref(
+        &mut middleware,
+        INTERVAL,
+        refs.interval.as_deref(),
+        &registry.interval,
+        Stage::Download,
+        120,
+    )?;
+    lower_registry_ref(
+        &mut middleware,
+        RATE_LIMIT,
+        refs.rate_limit.as_deref(),
+        &registry.rate_limit,
+        Stage::Download,
+        130,
+    )?;
+    lower_registry_ref(
+        &mut middleware,
+        AUTO_THROTTLE,
+        refs.auto_throttle.as_deref(),
+        &registry.auto_throttle,
+        Stage::Download,
+        120,
+    )?;
+    lower_registry_ref(
+        &mut middleware,
+        RETRY_BY_STATUS,
+        refs.retry_by_status.as_deref(),
+        &registry.retry_by_status,
+        Stage::Download,
+        200,
+    )?;
+    lower_registry_ref(
+        &mut middleware,
+        RETRY_BY_ERROR,
+        refs.retry_by_error.as_deref(),
+        &registry.retry_by_error,
+        Stage::Download,
+        210,
+    )?;
+
+    Ok(middleware)
+}
+
+fn lower_registry_ref(
+    target: &mut MiddlewareMap,
+    key: &str,
+    reference: Option<&str>,
+    registry: &BTreeMap<String, BTreeMap<String, Value>>,
+    stage: Stage,
+    order: i32,
+) -> Result<(), SpiderError> {
+    let Some(reference) = reference else {
+        return Ok(());
+    };
+    let options = registry.get(reference).ok_or_else(|| {
+        SpiderError::rules(format!(
+            "engine middleware reference not found: {key}.{reference}"
+        ))
+    })?;
+
+    target.insert(
+        key.to_string(),
+        crate::middleware::Config {
+            enabled: true,
+            stage,
+            order,
+            options: options.clone(),
+        },
+    );
+
+    Ok(())
+}
+
+fn selector_value_kind_from_object(
+    object: &BTreeMap<String, Value>,
+) -> Result<SelectorValueKind, SpiderError> {
+    if object.get("html").and_then(Value::as_bool) == Some(true) {
+        return Ok(SelectorValueKind::Html);
+    }
+
+    if let Some(attr) = object.get("attr") {
+        let attr = attr
+            .as_str()
+            .ok_or_else(|| SpiderError::rules("value.attr must be a string"))?;
+        return Ok(SelectorValueKind::Attribute(attr.to_string()));
+    }
+
+    Ok(SelectorValueKind::Text)
+}
+
+fn extract_kind_from_object(object: &BTreeMap<String, Value>) -> ExtractKind {
+    if object.get("html").and_then(Value::as_bool) == Some(true) {
+        ExtractKind::Html
+    } else if let Some(attr) = object.get("attr").and_then(Value::as_str) {
+        ExtractKind::Attribute(attr.to_string())
+    } else {
+        ExtractKind::Text
+    }
+}
+
+pub(crate) fn detect_selector_kind(selector: &str) -> SelectorKind {
+    let selector = selector.trim();
+    if selector.starts_with("//")
+        || selector.starts_with(".//")
+        || selector.starts_with("./")
+        || selector.starts_with('/')
+        || selector.starts_with('(')
+    {
+        SelectorKind::XPath
+    } else {
+        SelectorKind::Css
+    }
 }
 
 fn expect_object<'a>(
@@ -840,96 +800,169 @@ fn expect_object<'a>(
         .ok_or_else(|| SpiderError::rules(format!("{label} must be an object")))
 }
 
-fn parse_dedup(
-    value: Option<&Value>,
-) -> Result<Option<crate::rules::schema::DedupConfig>, SpiderError> {
-    let Some(v) = value else { return Ok(None) };
-    let obj = v
-        .as_object()
-        .ok_or_else(|| SpiderError::rules("dedup must be an object"))?;
-
-    Ok(Some(crate::rules::schema::DedupConfig {
-        enabled: obj.get("enabled").and_then(Value::as_bool).unwrap_or(true),
-        key: obj
-            .get("key")
-            .and_then(Value::as_array)
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(Value::as_str)
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default(),
-        ttl: obj
-            .get("ttl")
-            .and_then(Value::as_f64)
-            .map(|n| n as u64)
-            .unwrap_or(86400),
-        scope: obj
-            .get("scope")
-            .and_then(Value::as_str)
-            .unwrap_or("TASK")
-            .to_string(),
-        namespace: obj
-            .get("namespace")
-            .and_then(Value::as_str)
-            .map(str::to_string),
-    }))
+fn expect_array<'a>(value: &'a Value, label: &str) -> Result<&'a [Value], SpiderError> {
+    value
+        .as_array()
+        .ok_or_else(|| SpiderError::rules(format!("{label} must be an array")))
 }
 
-fn parse_schedule(
-    value: Option<&Value>,
-) -> Result<Option<crate::rules::schema::ScheduleConfig>, SpiderError> {
-    let Some(v) = value else { return Ok(None) };
-    let obj = v
-        .as_object()
-        .ok_or_else(|| SpiderError::rules("schedule must be an object"))?;
-
-    Ok(Some(crate::rules::schema::ScheduleConfig {
-        concurrency: obj
-            .get("concurrency")
-            .and_then(Value::as_f64)
-            .map(|n| n as u32),
-        interval: obj
-            .get("interval")
-            .and_then(Value::as_f64)
-            .map(|n| n as u64),
-    }))
+fn required_string<'a>(
+    value: &'a BTreeMap<String, Value>,
+    key: &str,
+    label: &str,
+) -> Result<&'a str, SpiderError> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| SpiderError::rules(format!("{label} is required")))
 }
 
-fn parse_retry(
-    value: Option<&Value>,
-) -> Result<Option<crate::rules::schema::RetryConfig>, SpiderError> {
-    let Some(v) = value else { return Ok(None) };
-    let obj = v
-        .as_object()
-        .ok_or_else(|| SpiderError::rules("retry must be an object"))?;
+fn optional_string<'a>(value: &'a BTreeMap<String, Value>, key: &str) -> Option<&'a str> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+}
 
-    Ok(Some(crate::rules::schema::RetryConfig {
-        count: obj
-            .get("count")
-            .and_then(Value::as_f64)
-            .map(|n| n as u32)
-            .unwrap_or(3),
-        http_status: obj
-            .get("http_status")
-            .and_then(Value::as_array)
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(Value::as_f64)
-                    .map(|n| n as u16)
-                    .collect()
-            })
-            .unwrap_or_default(),
-        backoff: obj
-            .get("backoff")
-            .and_then(Value::as_array)
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(Value::as_f64)
-                    .map(|n| n as u64)
-                    .collect()
-            })
-            .unwrap_or_default(),
-    }))
+fn string_list(value: Option<&Value>, label: &str) -> Result<Vec<String>, SpiderError> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let values = expect_array(value, label)?;
+    values
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| SpiderError::rules(format!("{label} entries must be strings")))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::middleware::{DEDUP, RATE_LIMIT, RETRY_BY_STATUS};
+    use serde_json::json;
+
+    #[test]
+    fn compile_rules_parses_v1_structure_and_lowers_engine_refs() {
+        let compiled = compile_rules(Value::from(json!({
+            "spider": { "name": "demo" },
+            "engine": {
+                "dedup": {
+                    "request_url": {
+                        "backend": "memory",
+                        "key": ["url"]
+                    }
+                },
+                "rate_limit": {
+                    "origin_budget": {
+                        "bucket": "origin",
+                        "rate_per_minute": 120
+                    }
+                },
+                "retry_by_status": {
+                    "default_http_retry": {
+                        "count": 3,
+                        "status": [429, 500],
+                        "backoff": [1000, 3000]
+                    }
+                }
+            },
+            "sinks": {
+                "article_file": {
+                    "type": "file",
+                    "path": "./output/articles.jsonl"
+                }
+            },
+            "seeds": [{
+                "id": "seed-a",
+                "request": {
+                    "url": "https://example.com/start"
+                },
+                "engine": {
+                    "dedup": "request_url"
+                },
+                "next_step": "parse_list"
+            }],
+            "steps": [{
+                "id": "parse_list",
+                "fields": {
+                    "title": {
+                        "selector": "h1",
+                        "text": true
+                    }
+                },
+                "follow": [{
+                    "item": ".news li",
+                    "next_step": "parse_detail",
+                    "request": {
+                        "url": {
+                            "selector": "a",
+                            "attr": "href"
+                        }
+                    },
+                    "engine": {
+                        "rate_limit": "origin_budget",
+                        "retry_by_status": "default_http_retry",
+                        "dedup": "request_url"
+                    }
+                }]
+            }, {
+                "id": "parse_detail",
+                "output": {
+                    "item": {
+                        "title": { "from": "$meta.title" }
+                    },
+                    "validate": {
+                        "required": ["title"],
+                        "fields": {
+                            "title": {
+                                "type": "string",
+                                "min_length": 1
+                            }
+                        }
+                    },
+                    "sinks": ["article_file"]
+                }
+            }]
+        })))
+        .expect("rules should compile");
+
+        assert_eq!(compiled.spider.name, "demo");
+        assert_eq!(compiled.seeds.len(), 1);
+        assert_eq!(compiled.steps.len(), 2);
+
+        let seed = compiled.seeds.first().expect("seed should exist");
+        assert!(seed.middleware.contains_key(DEDUP));
+
+        let follow = compiled.steps[0]
+            .follow
+            .first()
+            .expect("follow should exist");
+        assert_eq!(follow.item.as_deref(), Some(".news li"));
+        assert_eq!(follow.item_selector_kind, Some(SelectorKind::Css));
+        assert!(follow.middleware.contains_key(DEDUP));
+        assert!(follow.middleware.contains_key(RATE_LIMIT));
+        assert!(follow.middleware.contains_key(RETRY_BY_STATUS));
+
+        let output = compiled.steps[1]
+            .output
+            .as_ref()
+            .expect("output should exist");
+        assert_eq!(output.validators.len(), 1);
+        assert_eq!(output.sinks, vec!["article_file".to_string()]);
+    }
+
+    #[test]
+    fn detect_selector_kind_treats_xpath_shapes_as_xpath() {
+        assert_eq!(detect_selector_kind("//article/a"), SelectorKind::XPath);
+        assert_eq!(detect_selector_kind(".//a"), SelectorKind::XPath);
+        assert_eq!(detect_selector_kind(".news a"), SelectorKind::Css);
+        assert_eq!(detect_selector_kind("a.detail-link"), SelectorKind::Css);
+    }
 }

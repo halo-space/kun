@@ -1,13 +1,23 @@
 use crate::error::SpiderError;
 use crate::item::Item;
-use crate::request::Request;
+use crate::middleware::Map as MiddlewareMap;
+use crate::parser::{CssQuery, XPathQuery};
+use crate::request::{Headers, Request, RequestMode, SessionConfig};
 use crate::response::Response;
+use crate::rules::compile::detect_selector_kind;
 use crate::rules::schema::{
-    Compiled, CompiledStep, FieldPlan, LinkPlan, ParsePlan, SelectorKind, SourceKind,
+    BodyConfig, Compiled, CompiledSeed, CompiledStep, ExtractKind, FieldPlan, FollowPlan,
+    OutputPlan, RequestPlan, SelectorKind, SelectorValueKind, ValueExpr, ValueSource,
 };
 use crate::value::Value;
+use jiff::{
+    Timestamp, Zoned,
+    civil::{Date, DateTime},
+    tz::TimeZone,
+};
 use regex::Regex;
 use std::collections::{BTreeMap, HashSet};
+use url::Url;
 
 #[derive(Debug, Default)]
 pub struct Output {
@@ -20,917 +30,1348 @@ pub async fn apply(
     step: &CompiledStep,
     compiled: &Compiled,
 ) -> Result<Output, SpiderError> {
-    let parsed_fields = build_parsed_fields(response, &step.parse).await?;
-    crate::validator::validate_fields(&parsed_fields, &step.validate)?;
-    let item = build_item_from_fields(&parsed_fields);
+    let fields = resolve_fields(response, &step.fields)?;
+    let bind = BindResolver::new(response, compiled, &fields, &step.bind).resolve_all()?;
 
-    match step.step_type.as_deref() {
-        Some("node") => {
-            // 只生成 requests，不生成 items
-            let requests = build_request_from_next_url_config(
-                response,
-                &step.parse,
-                step,
-                &compiled.steps,
-                &parsed_fields,
-            )
-            .await?;
-            Ok(Output {
-                items: vec![],
-                requests,
-            })
-        }
-        Some("end") => {
-            // 只生成 items，不生成 requests
-            Ok(Output {
-                items: item.into_iter().collect(),
-                requests: vec![],
-            })
-        }
-        _ => {
-            // 默认行为：使用 links
-            let requests = build_requests(
-                response,
-                &step.parse.links,
-                step,
-                &compiled.steps,
-                &parsed_fields,
-            )
-            .await?;
-            Ok(Output {
-                items: item.into_iter().collect(),
-                requests,
-            })
-        }
-    }
+    let requests = build_follow_requests(response, step, compiled, &fields, &bind)?;
+    let items = build_output_items(response, step.output.as_ref(), compiled, &fields, &bind)?;
+
+    Ok(Output { items, requests })
 }
 
-async fn build_parsed_fields(
-    response: &Response,
-    parse: &ParsePlan,
-) -> Result<BTreeMap<String, Value>, SpiderError> {
-    let mut parsed_fields = BTreeMap::new();
-    for field in &parse.fields {
-        parsed_fields.insert(field.name.clone(), resolve_field(response, field).await?);
-    }
-    Ok(parsed_fields)
-}
-
-fn build_item_from_fields(parsed_fields: &BTreeMap<String, Value>) -> Option<Item> {
-    if parsed_fields.is_empty() {
-        return None;
-    }
-
-    let mut item = Item::new();
-    for (key, value) in parsed_fields {
-        item.insert(key.clone(), value.clone());
-    }
-    Some(item)
-}
-
-async fn build_requests(
-    response: &Response,
-    links: &[LinkPlan],
-    current_step: &CompiledStep,
-    all_steps: &[CompiledStep],
-    parsed_fields: &BTreeMap<String, Value>,
-) -> Result<Vec<Request>, SpiderError> {
+pub fn build_seed_requests(compiled: &Compiled) -> Result<Vec<Request>, SpiderError> {
     let mut requests = Vec::new();
+    let empty_fields = BTreeMap::new();
+    let empty_bind = BTreeMap::new();
+    let seed_response = Response::default();
+    let context = EvalContext {
+        response: &seed_response,
+        compiled,
+        fields: &empty_fields,
+        bind: &empty_bind,
+        scope: None,
+    };
 
-    for link in links {
-        let values = resolve_values(
-            response,
-            link.source,
-            &link.source_ref,
-            link.selector_type,
-            &link.selector,
-            &link.attribute,
-            link.multiple,
-        )
-        .await?;
-        let urls = filter_urls(values, &link.allow, &link.deny)?;
-
-        if urls.is_empty() {
-            if link.required {
-                return Err(SpiderError::parse(format!(
-                    "required link missing: {}",
-                    link.name
-                )));
-            }
-            continue;
-        }
-
-        for url in urls {
-            let meta = build_request_meta(
-                current_step,
-                parsed_fields,
-                &link.meta,
-                link.next_step.as_deref(),
-            );
-            let request = response.follow_with_meta(url, &meta);
-            requests.push(apply_target_step_fetch(request, all_steps)?);
+    for seed in &compiled.seeds {
+        if let Some(request) = build_seed_request(seed, compiled, &context)? {
+            requests.push(request);
         }
     }
 
     Ok(requests)
 }
 
-async fn build_request_from_next_url_config(
-    response: &Response,
-    parse: &ParsePlan,
-    current_step: &CompiledStep,
-    all_steps: &[CompiledStep],
-    parsed_fields: &BTreeMap<String, Value>,
-) -> Result<Vec<Request>, SpiderError> {
-    if parse.next_url_config.is_empty() {
-        return Ok(vec![]);
+#[derive(Debug, Clone)]
+struct SelectorScope {
+    input: String,
+}
+
+#[derive(Clone, Copy)]
+struct EvalContext<'a> {
+    response: &'a Response,
+    compiled: &'a Compiled,
+    fields: &'a BTreeMap<String, Value>,
+    bind: &'a BTreeMap<String, Value>,
+    scope: Option<&'a SelectorScope>,
+}
+
+struct BindResolver<'a> {
+    response: &'a Response,
+    compiled: &'a Compiled,
+    fields: &'a BTreeMap<String, Value>,
+    definitions: &'a BTreeMap<String, ValueExpr>,
+    values: BTreeMap<String, Value>,
+    resolving: HashSet<String>,
+}
+
+impl<'a> BindResolver<'a> {
+    fn new(
+        response: &'a Response,
+        compiled: &'a Compiled,
+        fields: &'a BTreeMap<String, Value>,
+        definitions: &'a BTreeMap<String, ValueExpr>,
+    ) -> Self {
+        Self {
+            response,
+            compiled,
+            fields,
+            definitions,
+            values: BTreeMap::new(),
+            resolving: HashSet::new(),
+        }
     }
 
-    // 构造 URLs
-    let urls = build_next_urls(response, &parse.next_url_config, parsed_fields)?;
+    fn resolve_all(mut self) -> Result<BTreeMap<String, Value>, SpiderError> {
+        for key in self.definitions.keys() {
+            let _ = self.resolve_key(key)?;
+        }
+        Ok(self.values)
+    }
 
-    // 找到下一个 step
-    let current_idx = all_steps.iter().position(|s| s.id == current_step.id);
-    let next_step_id = current_idx
-        .and_then(|idx| all_steps.get(idx + 1))
-        .map(|s| s.id.clone());
+    fn resolve_key(&mut self, key: &str) -> Result<Value, SpiderError> {
+        if let Some(value) = self.values.get(key) {
+            return Ok(value.clone());
+        }
 
-    let next_step = next_step_id.as_deref();
+        if !self.resolving.insert(key.to_string()) {
+            return Err(SpiderError::rules(format!(
+                "circular bind reference detected: {key}"
+            )));
+        }
 
-    Ok(urls
+        let expr = self
+            .definitions
+            .get(key)
+            .ok_or_else(|| SpiderError::rules(format!("bind reference not found: {key}")))?;
+        let value = self.evaluate(expr)?;
+        self.resolving.remove(key);
+        self.values.insert(key.to_string(), value.clone());
+        Ok(value)
+    }
+
+    fn evaluate(&mut self, expr: &ValueExpr) -> Result<Value, SpiderError> {
+        let base = match &expr.source {
+            ValueSource::Literal(value) => value.clone(),
+            ValueSource::From(path) => self.resolve_reference(path)?,
+            ValueSource::Template { template, vars } => {
+                let vars = evaluate_value_map(
+                    vars,
+                    &EvalContext {
+                        response: self.response,
+                        compiled: self.compiled,
+                        fields: self.fields,
+                        bind: &self.values,
+                        scope: None,
+                    },
+                )?;
+                Value::String(render_template(template, &vars))
+            }
+            ValueSource::Selector { selector, kind } => {
+                let input = &self.response.text;
+                select_value(input, detect_selector_kind(selector), selector, kind)
+                    .map(Value::String)
+                    .unwrap_or(Value::Null)
+            }
+        };
+
+        let value = apply_transforms(base, &expr.transforms, self.response, self.compiled)?;
+        if should_use_fallback(&value)
+            && let Some(fallback) = &expr.fallback
+        {
+            return self.evaluate(fallback);
+        }
+
+        Ok(value)
+    }
+
+    fn resolve_reference(&mut self, path: &str) -> Result<Value, SpiderError> {
+        if path == "$now" {
+            return Ok(Value::String(current_now(self.compiled)?));
+        }
+
+        if let Some(name) = path.strip_prefix("$bind.") {
+            return self.resolve_key(name);
+        }
+
+        if let Some(name) = path.strip_prefix("$fields.") {
+            return Ok(lookup_map_value(self.fields, name).unwrap_or(Value::Null));
+        }
+
+        if let Some(name) = path.strip_prefix("$meta.") {
+            return Ok(lookup_map_value(&self.response.meta, name).unwrap_or(Value::Null));
+        }
+
+        if let Some(name) = path.strip_prefix("$env.") {
+            return Ok(std::env::var(name)
+                .map(Value::String)
+                .unwrap_or(Value::Null));
+        }
+
+        resolve_request_or_response_reference(self.response, path)
+    }
+}
+
+fn resolve_fields(
+    response: &Response,
+    fields: &BTreeMap<String, FieldPlan>,
+) -> Result<BTreeMap<String, Value>, SpiderError> {
+    let mut resolved = BTreeMap::new();
+    for (name, field) in fields {
+        resolved.insert(name.clone(), resolve_field(response, field));
+    }
+    Ok(resolved)
+}
+
+fn resolve_field(response: &Response, field: &FieldPlan) -> Value {
+    let value = match &field.kind {
+        ExtractKind::Text => select_value(
+            &response.text,
+            field.selector_kind,
+            &field.selector,
+            &SelectorValueKind::Text,
+        ),
+        ExtractKind::Html => select_value(
+            &response.text,
+            field.selector_kind,
+            &field.selector,
+            &SelectorValueKind::Html,
+        ),
+        ExtractKind::Attribute(attr) => select_value(
+            &response.text,
+            field.selector_kind,
+            &field.selector,
+            &SelectorValueKind::Attribute(attr.clone()),
+        ),
+    };
+
+    value.map(Value::String).unwrap_or(Value::Null)
+}
+
+fn build_follow_requests(
+    response: &Response,
+    step: &CompiledStep,
+    compiled: &Compiled,
+    fields: &BTreeMap<String, Value>,
+    bind: &BTreeMap<String, Value>,
+) -> Result<Vec<Request>, SpiderError> {
+    let mut requests = Vec::new();
+
+    for follow in &step.follow {
+        for scope in build_follow_scopes(response, follow) {
+            let context = EvalContext {
+                response,
+                compiled,
+                fields,
+                bind,
+                scope: Some(&scope),
+            };
+
+            let Some(raw_url) =
+                value_as_non_empty_string(evaluate_value_expr(&follow.request.url, &context)?)
+            else {
+                continue;
+            };
+
+            let absolute_url = resolve_url(&response.url, &raw_url)?;
+            if !url_allowed(&absolute_url, &follow.allow_url_pattern)? {
+                continue;
+            }
+
+            let mut request = build_request_from_plan(&absolute_url, &follow.request, &context)?;
+            request = request.with_meta_map(evaluate_value_map(&follow.meta, &context)?);
+            request = request.with_meta("next_step", Value::String(follow.next_step.clone()));
+            request = apply_request_middleware_plan(request, &follow.middleware);
+            if !follow.request.skip.is_empty() {
+                request = request.skip(follow.request.skip.iter().map(String::as_str));
+            }
+            request = apply_target_step_fetch(request, compiled, &follow.next_step)?;
+            requests.push(request);
+        }
+    }
+
+    Ok(requests)
+}
+
+fn build_follow_scopes(response: &Response, follow: &FollowPlan) -> Vec<SelectorScope> {
+    let Some(selector) = &follow.item else {
+        return vec![SelectorScope {
+            input: response.text.clone(),
+        }];
+    };
+
+    let selector_kind = follow
+        .item_selector_kind
+        .unwrap_or_else(|| detect_selector_kind(selector));
+    select_markup_all(&response.text, selector_kind, selector)
         .into_iter()
-        .map(|url| {
-            let meta = build_request_meta(current_step, parsed_fields, &BTreeMap::new(), next_step);
-            let request = response.follow_with_meta(url, &meta);
-            apply_target_step_fetch(request, all_steps)
-        })
-        .collect::<Result<Vec<_>, _>>()?)
+        .map(|input| SelectorScope { input })
+        .collect()
+}
+
+fn build_output_items(
+    response: &Response,
+    output: Option<&OutputPlan>,
+    compiled: &Compiled,
+    fields: &BTreeMap<String, Value>,
+    bind: &BTreeMap<String, Value>,
+) -> Result<Vec<Item>, SpiderError> {
+    let Some(output) = output else {
+        return Ok(Vec::new());
+    };
+
+    let context = EvalContext {
+        response,
+        compiled,
+        fields,
+        bind,
+        scope: None,
+    };
+
+    let item = Item::from_fields(evaluate_value_map(&output.item, &context)?);
+    Ok(vec![item])
+}
+
+fn build_seed_request(
+    seed: &CompiledSeed,
+    compiled: &Compiled,
+    context: &EvalContext<'_>,
+) -> Result<Option<Request>, SpiderError> {
+    let Some(raw_url) = value_as_non_empty_string(evaluate_value_expr(&seed.request.url, context)?)
+    else {
+        return Ok(None);
+    };
+
+    if !url_allowed(&raw_url, &seed.allow_url_pattern)? {
+        return Ok(None);
+    }
+
+    let mut request = build_request_from_plan(&raw_url, &seed.request, context)?;
+    request = request.with_meta_map(evaluate_value_map(&seed.meta, context)?);
+    request = request.with_meta("next_step", Value::String(seed.next_step.clone()));
+    request = apply_request_middleware_plan(request, &seed.middleware);
+    if !seed.request.skip.is_empty() {
+        request = request.skip(seed.request.skip.iter().map(String::as_str));
+    }
+    request = apply_target_step_fetch(request, compiled, &seed.next_step)?;
+
+    Ok(Some(request))
+}
+
+fn evaluate_value_map(
+    values: &BTreeMap<String, ValueExpr>,
+    context: &EvalContext<'_>,
+) -> Result<BTreeMap<String, Value>, SpiderError> {
+    let mut evaluated = BTreeMap::new();
+    for (key, expr) in values {
+        evaluated.insert(key.clone(), evaluate_value_expr(expr, context)?);
+    }
+    Ok(evaluated)
+}
+
+fn evaluate_value_expr(expr: &ValueExpr, context: &EvalContext<'_>) -> Result<Value, SpiderError> {
+    let base = match &expr.source {
+        ValueSource::Literal(value) => value.clone(),
+        ValueSource::From(path) => resolve_reference(path, context)?,
+        ValueSource::Template { template, vars } => {
+            let vars = evaluate_value_map(vars, context)?;
+            Value::String(render_template(template, &vars))
+        }
+        ValueSource::Selector { selector, kind } => {
+            let input = context
+                .scope
+                .map(|scope| scope.input.as_str())
+                .unwrap_or(context.response.text.as_str());
+            select_value(input, detect_selector_kind(selector), selector, kind)
+                .map(Value::String)
+                .unwrap_or(Value::Null)
+        }
+    };
+
+    let value = apply_transforms(base, &expr.transforms, context.response, context.compiled)?;
+    if should_use_fallback(&value)
+        && let Some(fallback) = &expr.fallback
+    {
+        return evaluate_value_expr(fallback, context);
+    }
+
+    Ok(value)
+}
+
+fn resolve_reference(path: &str, context: &EvalContext<'_>) -> Result<Value, SpiderError> {
+    if path == "$now" {
+        return Ok(Value::String(current_now(context.compiled)?));
+    }
+
+    if let Some(name) = path.strip_prefix("$env.") {
+        return Ok(std::env::var(name)
+            .map(Value::String)
+            .unwrap_or(Value::Null));
+    }
+
+    if let Some(name) = path.strip_prefix("$fields.") {
+        return Ok(lookup_map_value(context.fields, name).unwrap_or(Value::Null));
+    }
+
+    if let Some(name) = path.strip_prefix("$bind.") {
+        return Ok(lookup_map_value(context.bind, name).unwrap_or(Value::Null));
+    }
+
+    if let Some(name) = path.strip_prefix("$meta.") {
+        return Ok(lookup_map_value(&context.response.meta, name).unwrap_or(Value::Null));
+    }
+
+    resolve_request_or_response_reference(context.response, path)
+}
+
+fn resolve_request_or_response_reference(
+    response: &Response,
+    path: &str,
+) -> Result<Value, SpiderError> {
+    if path == "$response.url" {
+        return Ok(Value::String(response.url.clone()));
+    }
+
+    if path == "$response.status" {
+        return Ok(Value::Number(response.status as f64));
+    }
+
+    if path == "$request.url" {
+        return Ok(response
+            .request
+            .as_deref()
+            .map(|request| Value::String(request.url.clone()))
+            .unwrap_or(Value::Null));
+    }
+
+    if path == "$request.method" {
+        return Ok(response
+            .request
+            .as_deref()
+            .map(|request| Value::String(request.method.clone()))
+            .unwrap_or(Value::Null));
+    }
+
+    Ok(Value::Null)
+}
+
+fn lookup_map_value(map: &BTreeMap<String, Value>, path: &str) -> Option<Value> {
+    let mut segments = path.split('.');
+    let first = segments.next()?;
+    let mut current = map.get(first)?;
+
+    for segment in segments {
+        current = navigate_value(current, segment)?;
+    }
+
+    Some(current.clone())
+}
+
+fn navigate_value<'a>(value: &'a Value, segment: &str) -> Option<&'a Value> {
+    if let Some((name, index)) = parse_indexed_segment(segment) {
+        let value = if name.is_empty() {
+            value
+        } else {
+            value.as_object()?.get(name)?
+        };
+        return value.as_array()?.get(index);
+    }
+
+    value.as_object()?.get(segment)
+}
+
+fn parse_indexed_segment(segment: &str) -> Option<(&str, usize)> {
+    let (name, rest) = segment.split_once('[')?;
+    let index = rest.strip_suffix(']')?.parse::<usize>().ok()?;
+    Some((name, index))
+}
+
+fn build_request_from_plan(
+    url: &str,
+    plan: &RequestPlan,
+    context: &EvalContext<'_>,
+) -> Result<Request, SpiderError> {
+    let mut request = match plan.mode.unwrap_or(RequestMode::Http) {
+        RequestMode::Http => Request::new(url.to_string()),
+        RequestMode::Browser => Request::browser(url.to_string()),
+    };
+
+    if let Some(method) = &plan.method {
+        request = request.with_method(method.clone());
+    }
+
+    if let Some(encoding) = plan.encoding.as_ref() {
+        if let Some(value) = value_as_non_empty_string(evaluate_value_expr(encoding, context)?) {
+            request = request.with_encoding(value);
+        }
+    }
+
+    if let Some(priority) = plan.priority.as_ref() {
+        if let Some(value) = evaluate_value_expr(priority, context)?.as_f64() {
+            request = request.with_priority(value as i32);
+        }
+    }
+
+    if let Some(timeout) = plan.timeout.as_ref() {
+        if let Some(value) = evaluate_value_expr(timeout, context)?.as_f64() {
+            request = request.with_timeout(jiff::SignedDuration::from_millis(value as i64));
+        }
+    }
+
+    if let Some(proxy) = plan.proxy.as_ref()
+        && let Some(value) = value_as_non_empty_string(evaluate_value_expr(proxy, context)?)
+    {
+        request = request.with_proxy(value);
+    }
+
+    if let Some(session) = plan.session.as_ref()
+        && let Some(value) = value_as_non_empty_string(evaluate_value_expr(session, context)?)
+    {
+        request = request.with_session_config(SessionConfig::new(value));
+    }
+
+    let query = evaluate_string_map(&plan.query, context)?;
+    if !query.is_empty() {
+        request.url = append_query(&request.url, &query)?;
+    }
+
+    if let Some(allow_redirects) = plan.allow_redirects {
+        let mut http = request.http.take().unwrap_or_default();
+        http.allow_redirects = allow_redirects;
+        request.http = Some(http);
+    }
+
+    let headers = evaluate_multi_header_map(&plan.headers, context)?;
+    if !headers.is_empty() {
+        request.headers.extend(headers);
+    }
+
+    let cookies = evaluate_string_map(&plan.cookies, context)?;
+    if !cookies.is_empty() {
+        request.cookies.extend(cookies);
+    }
+
+    let cb_kwargs = evaluate_value_map(&plan.cb_kwargs, context)?;
+    if !cb_kwargs.is_empty() {
+        request = request.with_cb_kwargs(cb_kwargs);
+    }
+
+    for flag in &plan.flags {
+        if let Some(value) = value_as_non_empty_string(evaluate_value_expr(flag, context)?) {
+            request = request.with_flag(value);
+        }
+    }
+
+    if let Some(errback) = &plan.errback {
+        request = request.with_errback(errback.clone());
+    }
+
+    if let Some(body) = &plan.body {
+        request = apply_body(request, body, context)?;
+    }
+
+    Ok(request)
+}
+
+fn apply_body(
+    mut request: Request,
+    body: &BodyConfig,
+    context: &EvalContext<'_>,
+) -> Result<Request, SpiderError> {
+    match body {
+        BodyConfig::Json(values) => {
+            let value = Value::Object(evaluate_value_map(values, context)?);
+            let encoded = serde_json::to_vec(&value.to_json()).map_err(|error| {
+                SpiderError::rules(format!("failed to encode request json body: {error}"))
+            })?;
+            if !request.headers.contains_key("Content-Type") {
+                request = request.with_header("Content-Type", "application/json");
+            }
+            request = request.with_body(encoded);
+        }
+        BodyConfig::Form(values) => {
+            let values = evaluate_string_map(values, context)?;
+            let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+            for (key, value) in values {
+                serializer.append_pair(&key, &value);
+            }
+            if !request.headers.contains_key("Content-Type") {
+                request = request.with_header("Content-Type", "application/x-www-form-urlencoded");
+            }
+            request = request.with_body(serializer.finish());
+        }
+        BodyConfig::Raw(value) => {
+            let value = evaluate_value_expr(value, context)?;
+            if let Some(text) = value_as_string(value) {
+                request = request.with_body(text);
+            }
+        }
+    }
+
+    Ok(request)
+}
+
+fn apply_request_middleware_plan(mut request: Request, middleware: &MiddlewareMap) -> Request {
+    for (name, config) in middleware {
+        if !config.enabled {
+            request = request.skip([name.as_str()]);
+            continue;
+        }
+
+        request = if config.order == 0 {
+            request.with_middleware_options(name.clone(), config.options.clone())
+        } else {
+            request.with_middleware_options_ordered(
+                name.clone(),
+                config.options.clone(),
+                config.order,
+            )
+        };
+    }
+
+    request
 }
 
 fn apply_target_step_fetch(
     request: Request,
-    all_steps: &[CompiledStep],
+    compiled: &Compiled,
+    next_step: &str,
 ) -> Result<Request, SpiderError> {
-    let step_id = request
-        .meta
-        .get("next_step")
-        .and_then(Value::as_str)
-        .unwrap_or("parse");
-    let step = all_steps
+    let step = compiled
+        .steps
         .iter()
-        .find(|step| step.id == step_id)
-        .ok_or_else(|| SpiderError::engine(format!("step not found: {step_id}")))?;
+        .find(|step| step.id == next_step)
+        .ok_or_else(|| SpiderError::engine(format!("step not found: {next_step}")))?;
     Ok(step.fetch.apply_to_request(request))
 }
 
-fn build_request_meta(
-    current_step: &CompiledStep,
-    parsed_fields: &BTreeMap<String, Value>,
-    extra_meta: &BTreeMap<String, Value>,
-    next_step: Option<&str>,
-) -> BTreeMap<String, Value> {
-    let mut meta = BTreeMap::new();
-
-    if let Some(step_meta) = &current_step.meta {
-        meta.extend(step_meta.clone());
-    }
-
-    meta.extend(parsed_fields.clone());
-    meta.extend(extra_meta.clone());
-
-    if let Some(next_step) = next_step {
-        meta.insert(
-            "next_step".to_string(),
-            Value::String(next_step.to_string()),
-        );
-    }
-
-    meta
-}
-
-async fn resolve_field(response: &Response, field: &FieldPlan) -> Result<Value, SpiderError> {
-    let values = resolve_values(
-        response,
-        field.source,
-        &field.source_ref,
-        field.selector_type,
-        &field.selector,
-        &field.attribute,
-        field.multiple,
-    )
-    .await?;
-
-    if field.multiple {
-        if values.is_empty() {
-            return fallback(&field.default, field.required, &field.name, true);
-        }
-        return Ok(Value::Array(
-            values.into_iter().map(Value::String).collect(),
-        ));
-    }
-
-    if let Some(value) = values.into_iter().next() {
-        return Ok(Value::String(value));
-    }
-
-    fallback(&field.default, field.required, &field.name, false)
-}
-
-fn fallback(
-    default: &Value,
-    required: bool,
-    name: &str,
-    multiple: bool,
-) -> Result<Value, SpiderError> {
-    if !matches!(default, Value::Null) {
-        return Ok(default.clone());
-    }
-
-    if required {
-        return Err(SpiderError::parse(format!(
-            "required field missing: {name}"
-        )));
-    }
-
-    if multiple {
-        Ok(Value::Array(Vec::new()))
-    } else {
-        Ok(Value::Null)
-    }
-}
-
-async fn resolve_values(
-    response: &Response,
-    source: SourceKind,
-    source_ref: &str,
-    selector_type: SelectorKind,
-    selectors: &[String],
-    attribute: &str,
-    multiple: bool,
-) -> Result<Vec<String>, SpiderError> {
-    let mut values = Vec::new();
-
-    for selector in selectors {
-        let current = match (source, selector_type) {
-            (SourceKind::Html, SelectorKind::Css) => select_css(response, selector, attribute),
-            (SourceKind::Html, SelectorKind::XPath) => select_xpath(response, selector, attribute),
-            (SourceKind::Html, SelectorKind::Regex) | (SourceKind::Text, SelectorKind::Regex) => {
-                select_regex(response, selector, attribute)
-            }
-            (SourceKind::Html, SelectorKind::Ai) => select_ai(response, selector).await?,
-            (SourceKind::Json, SelectorKind::Json) => select_json(response, selector, multiple),
-            (SourceKind::Xml, SelectorKind::Xml) => select_xml(response, selector, attribute),
-            (SourceKind::Xml, SelectorKind::XPath) => select_xpath(response, selector, attribute),
-            (SourceKind::Headers, _) => select_headers(response, selector),
-            (SourceKind::Url, _) => vec![response.url.clone()],
-            (SourceKind::Meta, _) => select_meta(response, source_ref),
-            _ => {
-                return Err(SpiderError::parse(format!(
-                    "unsupported source/selector_type combination: {:?}/{:?}",
-                    source, selector_type
-                )));
-            }
-        };
-
-        if multiple {
-            values.extend(current);
-        } else if let Some(value) = current.into_iter().next() {
-            return Ok(vec![value]);
+fn evaluate_string_map(
+    values: &BTreeMap<String, ValueExpr>,
+    context: &EvalContext<'_>,
+) -> Result<BTreeMap<String, String>, SpiderError> {
+    let mut evaluated = BTreeMap::new();
+    for (key, expr) in values {
+        if let Some(value) = value_as_non_empty_string(evaluate_value_expr(expr, context)?) {
+            evaluated.insert(key.clone(), value);
         }
     }
-
-    Ok(values)
+    Ok(evaluated)
 }
 
-fn select_css(response: &Response, selector: &str, attribute: &str) -> Vec<String> {
-    match attribute {
-        "text" => response.css(selector).text().all(),
-        "html" => response.css(selector).html().all(),
-        value if value.starts_with("attr:") => response.css(selector).attr(&value[5..]).all(),
-        _ => response.css(selector).all(),
-    }
-}
+fn evaluate_multi_header_map(
+    values: &BTreeMap<String, ValueExpr>,
+    context: &EvalContext<'_>,
+) -> Result<Headers, SpiderError> {
+    let mut headers = Headers::new();
 
-fn select_xpath(response: &Response, selector: &str, attribute: &str) -> Vec<String> {
-    match attribute {
-        "text" => response.xpath(selector).text().all(),
-        "html" => response.xpath(selector).html().all(),
-        value if value.starts_with("attr:") => response.xpath(selector).attr(&value[5..]).all(),
-        _ => response.xpath(selector).all(),
-    }
-}
-
-fn select_xml(response: &Response, selector: &str, attribute: &str) -> Vec<String> {
-    match attribute {
-        "text" => response.xml(selector).text().all(),
-        "html" => response.xml(selector).html().all(),
-        value if value.starts_with("attr:") => response.xml(selector).attr(&value[5..]).all(),
-        _ => response.xml(selector).all(),
-    }
-}
-
-fn select_json(response: &Response, selector: &str, multiple: bool) -> Vec<String> {
-    let query = response.json(Some(selector));
-    if multiple {
-        query.all()
-    } else {
-        query.one().into_iter().collect()
-    }
-}
-
-fn select_regex(response: &Response, selector: &str, attribute: &str) -> Vec<String> {
-    let query = response.regex(selector);
-    if attribute == "text" {
-        return query.all();
-    }
-    if let Some(index) = attribute.strip_prefix("group:")
-        && let Ok(index) = index.parse::<usize>()
-    {
-        return query.group(index).into_iter().collect();
-    }
-    query.all()
-}
-
-async fn select_ai(response: &Response, prompt: &str) -> Result<Vec<String>, SpiderError> {
-    let mut query = response.ai(prompt);
-    query.execute().await.map_err(SpiderError::parse)?;
-    Ok(query.all())
-}
-
-fn select_headers(response: &Response, selector: &str) -> Vec<String> {
-    response.headers.get(selector).cloned().unwrap_or_default()
-}
-
-fn select_meta(response: &Response, source_ref: &str) -> Vec<String> {
-    let Some(key) = source_ref.strip_prefix("meta.") else {
-        return Vec::new();
-    };
-    response
-        .meta
-        .get(key)
-        .and_then(|value| value.as_str().map(str::to_string))
-        .into_iter()
-        .collect()
-}
-
-fn filter_urls(
-    values: Vec<String>,
-    allow: &[String],
-    deny: &[String],
-) -> Result<Vec<String>, SpiderError> {
-    let allow = compile_patterns(allow)?;
-    let deny = compile_patterns(deny)?;
-
-    Ok(values
-        .into_iter()
-        .filter(|value| allow.is_empty() || allow.iter().any(|pattern| pattern.is_match(value)))
-        .filter(|value| !deny.iter().any(|pattern| pattern.is_match(value)))
-        .collect())
-}
-
-fn compile_patterns(patterns: &[String]) -> Result<Vec<Regex>, SpiderError> {
-    patterns
-        .iter()
-        .map(|pattern| {
-            Regex::new(pattern).map_err(|error| {
-                SpiderError::parse(format!("invalid regex pattern {pattern}: {error}"))
-            })
-        })
-        .collect()
-}
-
-fn build_next_urls(
-    response: &Response,
-    config: &BTreeMap<String, Value>,
-    parsed_fields: &BTreeMap<String, Value>,
-) -> Result<Vec<String>, SpiderError> {
-    let mode = config
-        .get("mode")
-        .and_then(Value::as_str)
-        .ok_or_else(|| SpiderError::parse("next_url_config.mode is required"))?;
-
-    let urls = match mode {
-        "FIELD" => build_from_field(config, parsed_fields)?,
-        "TEMPLATE" => build_from_template(config, parsed_fields, response)?,
-        "JOIN" => build_from_join(config, parsed_fields)?,
-        "FUNCTION" => build_from_function(config, parsed_fields, response)?,
-        other => return Err(SpiderError::parse(format!("unsupported mode: {}", other))),
-    };
-
-    normalize_urls(response, urls)
-}
-
-fn build_from_field(
-    config: &BTreeMap<String, Value>,
-    parsed_fields: &BTreeMap<String, Value>,
-) -> Result<Vec<String>, SpiderError> {
-    let from = config
-        .get("from")
-        .and_then(Value::as_array)
-        .ok_or_else(|| SpiderError::parse("FIELD mode requires 'from'"))?;
-
-    if from.len() != 1 {
-        return Err(SpiderError::parse("FIELD mode requires exactly one field"));
-    }
-
-    let field_name = from[0]
-        .as_str()
-        .ok_or_else(|| SpiderError::parse("from[0] must be string"))?;
-
-    let value = parsed_fields
-        .get(field_name)
-        .ok_or_else(|| SpiderError::parse(format!("Field '{}' not found", field_name)))?;
-
-    match value {
-        Value::String(s) => Ok(vec![s.clone()]),
-        Value::Array(arr) => Ok(arr
-            .iter()
-            .filter_map(|v| v.as_str().map(|s| s.to_string()))
-            .collect()),
-        _ => Err(SpiderError::parse("Field value must be string or array")),
-    }
-}
-
-fn build_from_template(
-    config: &BTreeMap<String, Value>,
-    parsed_fields: &BTreeMap<String, Value>,
-    response: &Response,
-) -> Result<Vec<String>, SpiderError> {
-    let template = config
-        .get("template")
-        .and_then(Value::as_str)
-        .ok_or_else(|| SpiderError::parse("TEMPLATE mode requires 'template'"))?;
-
-    let mut url = template.to_string();
-
-    // 替换 {field}
-    for (key, value) in parsed_fields {
-        let placeholder = format!("{{{}}}", key);
-        if url.contains(&placeholder) {
-            let value_str = match value {
-                Value::String(s) => s.clone(),
-                Value::Number(n) => n.to_string(),
-                Value::Bool(b) => b.to_string(),
-                _ => continue,
-            };
-            url = url.replace(&placeholder, &value_str);
-        }
-    }
-
-    // 替换 {meta.xxx}
-    for (key, value) in &response.meta {
-        let placeholder = format!("{{meta.{}}}", key);
-        if url.contains(&placeholder)
-            && let Some(s) = value.as_str()
-        {
-            url = url.replace(&placeholder, s);
-        }
-    }
-
-    Ok(vec![url])
-}
-
-fn build_from_join(
-    config: &BTreeMap<String, Value>,
-    parsed_fields: &BTreeMap<String, Value>,
-) -> Result<Vec<String>, SpiderError> {
-    let from = config
-        .get("from")
-        .and_then(Value::as_array)
-        .ok_or_else(|| SpiderError::parse("JOIN mode requires 'from'"))?;
-
-    if from.len() < 2 {
-        return Err(SpiderError::parse("JOIN mode requires at least 2 fields"));
-    }
-
-    let delimiter = config
-        .get("join_delimiter")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-
-    let parts: Vec<String> = from
-        .iter()
-        .filter_map(|v| v.as_str())
-        .filter_map(|field_name| {
-            parsed_fields
-                .get(field_name)
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string())
-        })
-        .collect();
-
-    if parts.len() != from.len() {
-        return Err(SpiderError::parse("Some fields not found for JOIN"));
-    }
-
-    Ok(vec![parts.join(delimiter)])
-}
-
-fn build_from_function(
-    config: &BTreeMap<String, Value>,
-    parsed_fields: &BTreeMap<String, Value>,
-    response: &Response,
-) -> Result<Vec<String>, SpiderError> {
-    let function_name = config
-        .get("fn")
-        .and_then(Value::as_str)
-        .ok_or_else(|| SpiderError::parse("FUNCTION mode requires 'fn'"))?;
-    let args = config
-        .get("args")
-        .and_then(Value::as_array)
-        .ok_or_else(|| SpiderError::parse("FUNCTION mode requires 'args'"))?;
-
-    Ok(vec![evaluate_function_call(
-        function_name,
-        args,
-        parsed_fields,
-        response,
-    )?])
-}
-
-fn evaluate_function_call(
-    function_name: &str,
-    args: &[Value],
-    parsed_fields: &BTreeMap<String, Value>,
-    response: &Response,
-) -> Result<String, SpiderError> {
-    match function_name {
-        "concat" => {
-            let parts = args
-                .iter()
-                .enumerate()
-                .map(|(index, arg)| {
-                    resolve_function_arg_required(
-                        arg,
-                        &format!("concat.args[{index}]"),
-                        parsed_fields,
-                        response,
-                    )
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-
-            Ok(parts.concat())
-        }
-        "replace" => {
-            if args.len() != 3 {
-                return Err(SpiderError::parse(
-                    "FUNCTION replace requires exactly 3 args",
-                ));
-            }
-
-            let input = resolve_function_arg_required(
-                &args[0],
-                "replace.args[0]",
-                parsed_fields,
-                response,
-            )?;
-            let from = resolve_function_arg_required(
-                &args[1],
-                "replace.args[1]",
-                parsed_fields,
-                response,
-            )?;
-            let to = resolve_function_arg_required(
-                &args[2],
-                "replace.args[2]",
-                parsed_fields,
-                response,
-            )?;
-
-            if from.is_empty() {
-                return Err(SpiderError::parse(
-                    "FUNCTION replace.args[1] must not be empty",
-                ));
-            }
-
-            Ok(input.replace(&from, &to))
-        }
-        "coalesce" => {
-            for (index, arg) in args.iter().enumerate() {
-                if let Some(value) = resolve_function_arg(
-                    arg,
-                    parsed_fields,
-                    response,
-                    &format!("coalesce.args[{index}]"),
-                )? && !value.trim().is_empty()
-                {
-                    return Ok(value);
+    for (key, expr) in values {
+        match evaluate_value_expr(expr, context)? {
+            Value::Array(values) => {
+                let collected = values
+                    .into_iter()
+                    .filter_map(value_as_string)
+                    .filter(|value| !value.is_empty())
+                    .collect::<Vec<_>>();
+                if !collected.is_empty() {
+                    headers.insert(key.clone(), collected);
                 }
             }
-
-            Err(SpiderError::parse(
-                "FUNCTION coalesce could not resolve a non-empty value",
-            ))
+            value => {
+                if let Some(value) = value_as_non_empty_string(value) {
+                    headers.insert(key.clone(), vec![value]);
+                }
+            }
         }
-        other => Err(SpiderError::parse(format!(
-            "unsupported FUNCTION fn: {other}"
+    }
+
+    Ok(headers)
+}
+
+fn select_value(
+    input: &str,
+    selector_kind: SelectorKind,
+    selector: &str,
+    value_kind: &SelectorValueKind,
+) -> Option<String> {
+    match selector_kind {
+        SelectorKind::Css => {
+            let query = CssQuery::new(input, selector);
+            match value_kind {
+                SelectorValueKind::Text => query.text().one(),
+                SelectorValueKind::Html => query.html().one(),
+                SelectorValueKind::Attribute(attr) => query.attr(attr).one(),
+            }
+        }
+        SelectorKind::XPath => {
+            let query = XPathQuery::new(input, selector);
+            match value_kind {
+                SelectorValueKind::Text => query.text().one(),
+                SelectorValueKind::Html => query.html().one(),
+                SelectorValueKind::Attribute(attr) => query.attr(attr).one(),
+            }
+        }
+    }
+}
+
+fn select_markup_all(input: &str, selector_kind: SelectorKind, selector: &str) -> Vec<String> {
+    match selector_kind {
+        SelectorKind::Css => CssQuery::new(input, selector).html().all(),
+        SelectorKind::XPath => XPathQuery::new(input, selector).html().all(),
+    }
+}
+
+fn should_use_fallback(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::String(value) => value.trim().is_empty(),
+        Value::Array(values) => values.is_empty(),
+        Value::Object(values) => values.is_empty(),
+        Value::Bool(_) | Value::Number(_) => false,
+    }
+}
+
+fn render_template(template: &str, vars: &BTreeMap<String, Value>) -> String {
+    let mut rendered = template.to_string();
+    for (key, value) in vars {
+        rendered = rendered.replace(
+            &format!("{{{key}}}"),
+            &value_as_string(value.clone()).unwrap_or_default(),
+        );
+    }
+    rendered
+}
+
+fn value_as_non_empty_string(value: Value) -> Option<String> {
+    value_as_string(value).filter(|value| !value.trim().is_empty())
+}
+
+fn value_as_string(value: Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::Bool(value) => Some(value.to_string()),
+        Value::Number(value) => Some(format_number(value)),
+        Value::String(value) => Some(value),
+        Value::Array(_) | Value::Object(_) => serde_json::to_string(&value.to_json()).ok(),
+    }
+}
+
+fn format_number(value: f64) -> String {
+    if value.fract() == 0.0 {
+        format!("{}", value as i64)
+    } else {
+        value.to_string()
+    }
+}
+
+fn apply_transforms(
+    mut value: Value,
+    transforms: &[crate::rules::schema::TransformConfig],
+    response: &Response,
+    compiled: &Compiled,
+) -> Result<Value, SpiderError> {
+    for transform in transforms {
+        value = apply_transform(value, transform, response, compiled)?;
+    }
+    Ok(value)
+}
+
+fn apply_transform(
+    value: Value,
+    transform: &crate::rules::schema::TransformConfig,
+    response: &Response,
+    compiled: &Compiled,
+) -> Result<Value, SpiderError> {
+    match transform.kind.as_str() {
+        "trim" => Ok(map_string_values(value, |text| text.trim().to_string())),
+        "replace" => {
+            let from = required_option_string(&transform.options, "from", "replace")?;
+            let to = transform
+                .options
+                .get("to")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            Ok(map_string_values(value, |text| text.replace(&from, &to)))
+        }
+        "regex" => apply_regex_transform(value, &transform.options),
+        "split" => {
+            let delimiter = option_string_any(&transform.options, &["delimiter", "sep"], "split")?;
+            match value {
+                Value::String(text) => Ok(Value::Array(
+                    text.split(&delimiter)
+                        .map(|part| Value::String(part.to_string()))
+                        .collect(),
+                )),
+                other => Ok(other),
+            }
+        }
+        "join" => {
+            let delimiter = option_string_any(&transform.options, &["delimiter", "sep"], "join")?;
+            match value {
+                Value::Array(values) => Ok(Value::String(
+                    values
+                        .into_iter()
+                        .filter_map(value_as_string)
+                        .collect::<Vec<_>>()
+                        .join(&delimiter),
+                )),
+                other => Ok(other),
+            }
+        }
+        "pick" => {
+            let index = transform
+                .options
+                .get("index")
+                .and_then(Value::as_f64)
+                .unwrap_or(0.0) as usize;
+            match value {
+                Value::Array(values) => Ok(values.get(index).cloned().unwrap_or(Value::Null)),
+                other => Ok(other),
+            }
+        }
+        "date_format" => {
+            let format = required_option_string(&transform.options, "format", "date_format")?;
+            let input_format = transform
+                .options
+                .get("input_format")
+                .and_then(Value::as_str);
+            match value {
+                Value::String(text) => Ok(Value::String(format_datetime(
+                    &text,
+                    input_format,
+                    &format,
+                    compiled,
+                )?)),
+                other => Ok(other),
+            }
+        }
+        "resolve_url" => match value {
+            Value::String(text) => Ok(Value::String(resolve_url(&response.url, &text)?)),
+            other => Ok(other),
+        },
+        other => Err(SpiderError::rules(format!(
+            "unsupported value transform: {other}"
         ))),
     }
 }
 
-fn resolve_function_arg_required(
-    arg: &Value,
-    label: &str,
-    parsed_fields: &BTreeMap<String, Value>,
-    response: &Response,
+fn apply_regex_transform(
+    value: Value,
+    options: &BTreeMap<String, Value>,
+) -> Result<Value, SpiderError> {
+    let pattern = option_string_any(options, &["pattern", "expr"], "regex")?;
+    let compiled = Regex::new(&pattern)
+        .map_err(|error| SpiderError::rules(format!("invalid regex transform pattern: {error}")))?;
+    let group = options.get("group").and_then(Value::as_f64).unwrap_or(1.0) as usize;
+
+    if let Some(replace) = options.get("replace").and_then(Value::as_str) {
+        return Ok(map_string_values(value, |text| {
+            compiled.replace_all(&text, replace).to_string()
+        }));
+    }
+
+    match value {
+        Value::String(text) => Ok(compiled
+            .captures(&text)
+            .and_then(|captures| captures.get(group))
+            .map(|value| Value::String(value.as_str().to_string()))
+            .unwrap_or(Value::Null)),
+        other => Ok(other),
+    }
+}
+
+fn map_string_values(value: Value, transform: impl Fn(String) -> String + Copy) -> Value {
+    match value {
+        Value::String(text) => Value::String(transform(text)),
+        Value::Array(values) => Value::Array(
+            values
+                .into_iter()
+                .map(|value| map_string_values(value, transform))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+fn required_option_string(
+    options: &BTreeMap<String, Value>,
+    key: &str,
+    transform: &str,
 ) -> Result<String, SpiderError> {
-    resolve_function_arg(arg, parsed_fields, response, label)?
-        .ok_or_else(|| SpiderError::parse(format!("FUNCTION {label} resolved to no value")))
+    options
+        .get(key)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            SpiderError::rules(format!(
+                "transform {transform} requires a non-empty `{key}` option"
+            ))
+        })
 }
 
-fn resolve_function_arg(
-    arg: &Value,
-    parsed_fields: &BTreeMap<String, Value>,
-    response: &Response,
-    label: &str,
-) -> Result<Option<String>, SpiderError> {
-    match arg {
-        Value::Null => Ok(None),
-        Value::String(_) | Value::Number(_) | Value::Bool(_) => stringify_scalar_value(arg, label),
-        Value::Object(object) => {
-            resolve_function_object_arg(object, parsed_fields, response, label)
-        }
-        Value::Array(_) => Err(SpiderError::parse(format!(
-            "FUNCTION {label} must be a scalar, reference, or nested function"
-        ))),
+fn option_string_any(
+    options: &BTreeMap<String, Value>,
+    keys: &[&str],
+    transform: &str,
+) -> Result<String, SpiderError> {
+    keys.iter()
+        .find_map(|key| {
+            options
+                .get(*key)
+                .and_then(Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .map(str::to_string)
+        })
+        .ok_or_else(|| {
+            SpiderError::rules(format!(
+                "transform {transform} requires one of: {}",
+                keys.join(", ")
+            ))
+        })
+}
+
+fn current_now(compiled: &Compiled) -> Result<String, SpiderError> {
+    let now = Timestamp::now();
+    if let Some(timezone) = compiled.spider.clock.timezone.as_deref() {
+        let timezone = TimeZone::get(timezone).map_err(|error| {
+            SpiderError::rules(format!(
+                "invalid spider.clock.timezone {timezone:?}: {error}"
+            ))
+        })?;
+        Ok(now.to_zoned(timezone).to_string())
+    } else {
+        Ok(now.to_string())
     }
 }
 
-fn resolve_function_object_arg(
-    object: &BTreeMap<String, Value>,
-    parsed_fields: &BTreeMap<String, Value>,
-    response: &Response,
-    label: &str,
-) -> Result<Option<String>, SpiderError> {
-    let mut branch_count = 0;
-    branch_count += usize::from(object.contains_key("value"));
-    branch_count += usize::from(object.contains_key("field"));
-    branch_count += usize::from(object.contains_key("meta"));
-    branch_count += usize::from(object.contains_key("fn"));
+fn format_datetime(
+    text: &str,
+    input_format: Option<&str>,
+    format: &str,
+    compiled: &Compiled,
+) -> Result<String, SpiderError> {
+    if let Some(input_format) = input_format {
+        if let Ok(value) = Zoned::strptime(input_format, text) {
+            return Ok(value.strftime(format).to_string());
+        }
+        if let Ok(value) = DateTime::strptime(input_format, text) {
+            return Ok(value.strftime(format).to_string());
+        }
+        if let Ok(value) = Date::strptime(input_format, text) {
+            return Ok(value.strftime(format).to_string());
+        }
 
-    if branch_count != 1 {
-        return Err(SpiderError::parse(format!(
-            "FUNCTION {label} object must contain exactly one of: value, field, meta, fn"
+        return Err(SpiderError::rules(format!(
+            "date_format input did not match format {input_format:?}"
         )));
     }
 
-    if let Some(value) = object.get("value") {
-        return stringify_scalar_value(value, &format!("{label}.value"));
+    if let Ok(value) = text.parse::<Timestamp>() {
+        let timezone = compiled
+            .spider
+            .clock
+            .timezone
+            .as_deref()
+            .map(TimeZone::get)
+            .transpose()
+            .map_err(|error| {
+                SpiderError::rules(format!("invalid spider.clock.timezone: {error}"))
+            })?;
+        if let Some(timezone) = timezone {
+            return Ok(value.to_zoned(timezone).strftime(format).to_string());
+        }
+        return Ok(value.strftime(format).to_string());
     }
 
-    if let Some(field_name) = object.get("field").and_then(Value::as_str) {
-        return stringify_scalar_value(
-            parsed_fields.get(field_name).unwrap_or(&Value::Null),
-            &format!("{label}.field({field_name})"),
-        );
+    if let Ok(value) = text.parse::<Zoned>() {
+        return Ok(value.strftime(format).to_string());
+    }
+    if let Ok(value) = text.parse::<DateTime>() {
+        return Ok(value.strftime(format).to_string());
+    }
+    if let Ok(value) = text.parse::<Date>() {
+        return Ok(value.strftime(format).to_string());
     }
 
-    if let Some(meta_key) = object.get("meta").and_then(Value::as_str) {
-        return stringify_scalar_value(
-            response.meta.get(meta_key).unwrap_or(&Value::Null),
-            &format!("{label}.meta({meta_key})"),
-        );
-    }
-
-    let function_name = object
-        .get("fn")
-        .and_then(Value::as_str)
-        .ok_or_else(|| SpiderError::parse(format!("FUNCTION {label}.fn is required")))?;
-    let args = object
-        .get("args")
-        .and_then(Value::as_array)
-        .ok_or_else(|| SpiderError::parse(format!("FUNCTION {label}.args is required")))?;
-
-    Ok(Some(evaluate_function_call(
-        function_name,
-        args,
-        parsed_fields,
-        response,
-    )?))
+    Err(SpiderError::rules(format!(
+        "date_format could not parse datetime value {text:?}"
+    )))
 }
 
-fn stringify_scalar_value(value: &Value, label: &str) -> Result<Option<String>, SpiderError> {
-    match value {
-        Value::Null => Ok(None),
-        Value::String(value) => Ok(Some(value.clone())),
-        Value::Number(value) => Ok(Some(value.to_string())),
-        Value::Bool(value) => Ok(Some(value.to_string())),
-        Value::Array(_) | Value::Object(_) => Err(SpiderError::parse(format!(
-            "FUNCTION {label} must resolve to a scalar value"
-        ))),
+fn url_allowed(url: &str, patterns: &[String]) -> Result<bool, SpiderError> {
+    if patterns.is_empty() {
+        return Ok(true);
     }
-}
 
-fn normalize_urls(response: &Response, urls: Vec<String>) -> Result<Vec<String>, SpiderError> {
-    let mut normalized = Vec::new();
-    let mut seen = HashSet::new();
-
-    for url in urls {
-        let url = url.trim();
-        if url.is_empty() {
-            continue;
-        }
-
-        // 相对路径补全
-        let resolved = resolve_url(&response.url, url);
-
-        // 只保留 http/https
-        if !resolved.starts_with("http://") && !resolved.starts_with("https://") {
-            continue;
-        }
-
-        // 去重
-        if seen.insert(resolved.clone()) {
-            normalized.push(resolved);
+    for pattern in patterns {
+        let regex = Regex::new(pattern).map_err(|error| {
+            SpiderError::rules(format!("invalid allow_url_pattern {pattern:?}: {error}"))
+        })?;
+        if regex.is_match(url) {
+            return Ok(true);
         }
     }
 
-    Ok(normalized)
+    Ok(false)
 }
 
-fn resolve_url(base: &str, url: &str) -> String {
+fn resolve_url(base: &str, url: &str) -> Result<String, SpiderError> {
     if url.starts_with("http://") || url.starts_with("https://") {
-        return url.to_string();
+        return Ok(url.to_string());
     }
 
-    if let Ok(base_url) = url::Url::parse(base)
-        && let Ok(resolved) = base_url.join(url)
+    let base = Url::parse(base)
+        .map_err(|error| SpiderError::rules(format!("invalid base url {base:?}: {error}")))?;
+    base.join(url)
+        .map(|url| url.to_string())
+        .map_err(|error| SpiderError::rules(format!("invalid relative url {url:?}: {error}")))
+}
+
+fn append_query(url: &str, query: &BTreeMap<String, String>) -> Result<String, SpiderError> {
+    let mut parsed = Url::parse(url)
+        .map_err(|error| SpiderError::rules(format!("invalid request url {url:?}: {error}")))?;
     {
-        return resolved.to_string();
+        let mut pairs = parsed.query_pairs_mut();
+        for (key, value) in query {
+            pairs.append_pair(key, value);
+        }
     }
-
-    url.to_string()
+    Ok(parsed.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::request::{Request, RequestMode};
-    use jiff::SignedDuration;
+    use crate::middleware::{DEDUP, RATE_LIMIT};
+    use crate::request::Request;
+    use crate::rules::compile::compile_rules;
     use serde_json::json;
 
-    fn compile_test_rules() -> Compiled {
-        crate::rules::compile::compile_rules(Value::from(json!({
-            "steps": [
-                {
-                    "id": "parse",
-                    "fetch": {
-                        "mode": "browser",
-                        "request": {
-                            "headers": { "x-parent": "parent" },
-                            "cookies": { "sid": "cookie-1" },
-                            "timeout": 1000,
-                            "proxy": "http://proxy.parent:8080",
-                            "session": "parent-session"
-                        },
-                        "browser": {
-                            "wait_for_selector": "#list"
-                        }
-                    },
-                    "parse": {
-                        "links": [
-                            {
-                                "name": "detail",
-                                "source": "html",
-                                "selector_type": "css",
-                                "selector": [".detail-link"],
-                                "attribute": "attr:href",
-                                "next_step": "detail"
-                            }
-                        ]
-                    }
-                },
-                {
-                    "id": "detail",
-                    "fetch": {
-                        "mode": "http",
-                        "request": {
-                            "method": "POST",
-                            "headers": { "x-step": "detail" },
-                            "body": "payload",
-                            "cookies": { "token": "cookie-2" },
-                            "timeout": 5000,
-                            "proxy": "http://proxy.detail:8080",
-                            "session": "detail-session",
-                            "dont_filter": true,
-                            "query": { "page": "2" },
-                            "allow_redirects": false
-                        }
-                    },
-                    "parse": {}
-                }
-            ]
-        })))
-        .expect("rules should compile")
+    fn html_response(url: &str, html: &str) -> Response {
+        Response::from_request(
+            Request::new(url),
+            200,
+            Headers::new(),
+            html.as_bytes().to_vec(),
+        )
     }
 
     #[tokio::test]
-    async fn dsl_follow_requests_apply_target_step_fetch_overrides() {
-        let compiled = compile_test_rules();
-        let parse_step = compiled
-            .steps
-            .iter()
-            .find(|step| step.id == "parse")
-            .expect("parse step should exist");
-        let request = Request::browser("https://example.com/list")
-            .with_header("x-parent", "parent")
-            .with_cookie("sid", "cookie-1")
-            .with_timeout(SignedDuration::from_secs(1))
-            .with_proxy("http://proxy.parent:8080")
-            .with_session("parent-session");
-        let response = Response::from_request(
-            request,
-            200,
-            Default::default(),
-            br#"<html><body><a class="detail-link" href="/detail/1">detail</a></body></html>"#
-                .to_vec(),
-        );
-
-        let output = apply(&response, parse_step, &compiled)
-            .await
-            .expect("dsl step should succeed");
-        let request = output
-            .requests
-            .first()
-            .expect("follow request should exist");
-
-        assert_eq!(request.url, "https://example.com/detail/1");
-        assert_eq!(request.mode, RequestMode::Http);
-        assert_eq!(request.method, "POST");
-        assert_eq!(request.body.as_deref(), Some(&b"payload"[..]));
-        assert_eq!(
-            request.meta.get("next_step").and_then(Value::as_str),
-            Some("detail")
-        );
-        assert_eq!(
-            request.headers.get("x-parent"),
-            Some(&vec!["parent".to_string()])
-        );
-        assert_eq!(
-            request.headers.get("x-step"),
-            Some(&vec!["detail".to_string()])
-        );
-        assert_eq!(
-            request.cookies.get("sid").map(String::as_str),
-            Some("cookie-1")
-        );
-        assert_eq!(
-            request.cookies.get("token").map(String::as_str),
-            Some("cookie-2")
-        );
-        assert_eq!(request.timeout, Some(SignedDuration::from_secs(5)));
-        assert_eq!(
-            request.proxy.as_ref().map(|proxy| proxy.url.as_str()),
-            Some("http://proxy.detail:8080")
-        );
-        assert_eq!(
-            request.session.as_ref().map(|session| session.id.as_str()),
-            Some("detail-session")
-        );
-        assert!(request.dont_filter);
-        assert!(request.http.as_ref().is_some_and(
-            |http| !http.allow_redirects && http.query.get("page") == Some(&"2".to_string())
-        ));
-        assert!(request.browser.is_none());
-    }
-
-    #[test]
-    fn dsl_browser_config_can_compile_mobile_fingerprint_profile() {
-        let compiled = crate::rules::compile::compile_rules(Value::from(json!({
-            "steps": [
-                {
-                    "id": "mobile",
-                    "fetch": {
-                        "mode": "browser",
-                        "browser": {
-                            "stealth": true,
-                            "device_profile": {
-                                "fingerprint": {
-                                    "mobile": true,
-                                    "locale": "en-US"
-                                }
-                            }
+    async fn apply_runs_fields_bind_follow_with_single_chain_meta_binding() {
+        let compiled = compile_rules(Value::from(json!({
+            "spider": { "name": "demo" },
+            "sinks": {
+                "default": { "type": "memory" }
+            },
+            "engine": {
+                "dedup": {
+                    "request_url": {
+                        "backend": "memory",
+                        "key": ["url", "meta.channel"]
+                    }
+                },
+                "rate_limit": {
+                    "origin_budget": {
+                        "bucket": "origin",
+                        "rate_per_minute": 120
+                    }
+                }
+            },
+            "seeds": [{
+                "id": "seed-a",
+                "request": { "url": "https://example.com/start" },
+                "next_step": "parse_list"
+            }],
+            "steps": [{
+                "id": "parse_list",
+                "fields": {
+                    "channel": { "selector": "body", "attr": "data-channel" }
+                },
+                "bind": {
+                    "channel_upper": {
+                        "template": "{name}",
+                        "vars": {
+                            "name": { "from": "$fields.channel" }
+                        },
+                        "transforms": [{
+                            "type": "replace",
+                            "from": "news",
+                            "to": "NEWS"
+                        }]
+                    }
+                },
+                "follow": [{
+                    "item": ".news li",
+                    "next_step": "parse_detail",
+                    "request": {
+                        "url": { "selector": "a", "attr": "href" },
+                        "headers": {
+                            "Referer": { "from": "$response.url" }
                         }
                     },
-                    "parse": {}
+                    "meta": {
+                        "title": { "selector": "a", "text": true },
+                        "channel": { "from": "$bind.channel_upper" }
+                    },
+                    "allow_url_pattern": ["^https://example\\.com/detail/"],
+                    "engine": {
+                        "dedup": "request_url",
+                        "rate_limit": "origin_budget"
+                    }
+                }]
+            }, {
+                "id": "parse_detail",
+                "output": {
+                    "item": { "title": { "from": "$meta.title" } },
+                    "sinks": ["default"]
                 }
-            ]
+            }]
         })))
         .expect("rules should compile");
 
-        let browser = compiled
-            .steps
-            .first()
-            .and_then(|step| step.fetch.browser.as_ref())
-            .expect("browser config should exist");
-        let fingerprint = browser
-            .device_profile
-            .as_ref()
-            .and_then(|profile| profile.fingerprint.as_ref())
-            .expect("fingerprint profile should exist");
+        let response = html_response(
+            "https://example.com/list",
+            r#"
+            <body data-channel="news">
+              <ul class="news">
+                <li><a href="/detail/1">First</a></li>
+                <li><a href="mailto:test@example.com">Skip</a></li>
+              </ul>
+            </body>
+            "#,
+        );
+        let step = &compiled.steps[0];
 
-        assert!(browser.stealth);
-        assert_eq!(fingerprint.mobile, Some(true));
-        assert_eq!(fingerprint.locale.as_deref(), Some("en-US"));
+        let output = apply(&response, step, &compiled)
+            .await
+            .expect("run should work");
+
+        assert!(output.items.is_empty());
+        assert_eq!(output.requests.len(), 1);
+
+        let request = &output.requests[0];
+        assert_eq!(request.url, "https://example.com/detail/1");
+        assert_eq!(
+            request.meta.get("title"),
+            Some(&Value::String("First".to_string()))
+        );
+        assert_eq!(
+            request.meta.get("channel"),
+            Some(&Value::String("NEWS".to_string()))
+        );
+        assert_eq!(
+            request.meta.get("next_step"),
+            Some(&Value::String("parse_detail".to_string()))
+        );
+        assert!(request.middleware_options(DEDUP).is_some());
+        assert!(request.middleware_options(RATE_LIMIT).is_some());
+    }
+
+    #[test]
+    fn build_seed_requests_uses_seed_plan_semantics() {
+        let home = std::env::var("HOME").expect("HOME should exist for test");
+        let compiled = compile_rules(Value::from(json!({
+            "spider": {
+                "name": "demo",
+                "clock": {
+                    "timezone": "Asia/Shanghai"
+                }
+            },
+            "engine": {
+                "dedup": {
+                    "request_url": {
+                        "backend": "memory",
+                        "key": ["url"]
+                    }
+                },
+                "rate_limit": {
+                    "origin_budget": {
+                        "bucket": "origin",
+                        "rate_per_minute": 120
+                    }
+                }
+            },
+            "sinks": {
+                "default": { "type": "memory" }
+            },
+            "seeds": [{
+                "id": "seed-a",
+                "request": {
+                    "url": {
+                        "template": "https://example.com/{year}/start",
+                        "vars": {
+                            "year": {
+                                "from": "$now",
+                                "transforms": [{
+                                    "type": "date_format",
+                                    "format": "%Y"
+                                }]
+                            }
+                        }
+                    },
+                    "method": "POST",
+                    "headers": {
+                        "X-Env": { "from": "$env.HOME" }
+                    },
+                    "cb_kwargs": {
+                        "channel": "news"
+                    },
+                    "flags": ["seeded"],
+                    "skip": ["dedup"]
+                },
+                "meta": {
+                    "source": "rules",
+                    "env_value": { "from": "$env.HOME" }
+                },
+                "allow_url_pattern": ["^https://example\\.com/\\d{4}/start$"],
+                "engine": {
+                    "dedup": "request_url",
+                    "rate_limit": "origin_budget"
+                },
+                "next_step": "parse"
+            }],
+            "steps": [{
+                "id": "parse",
+                "output": {
+                    "item": { "url": { "from": "$response.url" } },
+                    "sinks": ["default"]
+                }
+            }]
+        })))
+        .expect("rules should compile");
+
+        let requests = build_seed_requests(&compiled).expect("seed requests should build");
+
+        assert_eq!(requests.len(), 1);
+
+        let request = &requests[0];
+        assert_eq!(request.method, "POST");
+        assert!(request.url.starts_with("https://example.com/"));
+        assert!(request.url.ends_with("/start"));
+        assert_eq!(
+            request.meta.get("source"),
+            Some(&Value::String("rules".to_string()))
+        );
+        assert_eq!(
+            request.meta.get("env_value"),
+            Some(&Value::String(home.clone()))
+        );
+        assert_eq!(
+            request.meta.get("next_step"),
+            Some(&Value::String("parse".to_string()))
+        );
+        assert_eq!(request.headers.get("X-Env"), Some(&vec![home]));
+        assert_eq!(
+            request.cb_kwargs.get("channel"),
+            Some(&Value::String("news".to_string()))
+        );
+        assert_eq!(request.flags, vec!["seeded".to_string()]);
+        assert!(request.middleware_skips(DEDUP));
+        assert!(request.middleware_options(RATE_LIMIT).is_some());
+    }
+
+    #[tokio::test]
+    async fn apply_builds_output_item_from_fields_bind_and_meta() {
+        let compiled = compile_rules(Value::from(json!({
+            "spider": { "name": "demo" },
+            "sinks": {
+                "default": { "type": "memory" }
+            },
+            "seeds": [{
+                "id": "seed-a",
+                "request": { "url": "https://example.com/start" },
+                "next_step": "parse_detail"
+            }],
+            "steps": [{
+                "id": "parse_detail",
+                "fields": {
+                    "title": { "selector": "h1", "text": true },
+                    "content": { "selector": ".content", "text": true }
+                },
+                "bind": {
+                    "clean_title": {
+                        "from": "$fields.title",
+                        "transforms": [{ "type": "trim" }]
+                    }
+                },
+                "output": {
+                    "item": {
+                        "title": {
+                            "from": "$meta.title",
+                            "fallback": { "from": "$bind.clean_title" }
+                        },
+                        "content": { "from": "$fields.content" },
+                        "source_url": { "from": "$response.url" }
+                    },
+                    "validate": {
+                        "required": ["title", "content", "source_url"],
+                        "fields": {
+                            "title": { "type": "string", "min_length": 1 },
+                            "content": { "type": "string", "min_length": 5 },
+                            "source_url": { "type": "string", "format": "url" }
+                        }
+                    },
+                    "sinks": ["default"]
+                }
+            }]
+        })))
+        .expect("rules should compile");
+
+        let response = Response::from_request(
+            Request::new("https://example.com/detail/1")
+                .with_meta("title", Value::String(String::new())),
+            200,
+            Headers::new(),
+            br#"<html><body><h1>  Detail Title  </h1><div class="content">hello world</div></body></html>"#
+                .to_vec(),
+        );
+
+        let output = apply(&response, &compiled.steps[0], &compiled)
+            .await
+            .expect("run should succeed");
+
+        assert_eq!(output.requests.len(), 0);
+        assert_eq!(output.items.len(), 1);
+
+        let item = &output.items[0];
+        assert_eq!(
+            item.get("title"),
+            Some(&Value::String("Detail Title".to_string()))
+        );
+        assert_eq!(
+            item.get("source_url"),
+            Some(&Value::String("https://example.com/detail/1".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_marks_request_skip_as_dedup_skip() {
+        let compiled = compile_rules(Value::from(json!({
+            "spider": { "name": "demo" },
+            "sinks": {
+                "default": { "type": "memory" }
+            },
+            "engine": {
+                "dedup": {
+                    "request_url": {
+                        "backend": "memory",
+                        "key": ["url"]
+                    }
+                }
+            },
+            "seeds": [{
+                "id": "seed-a",
+                "request": { "url": "https://example.com/start" },
+                "next_step": "parse_list"
+            }],
+            "steps": [{
+                "id": "parse_list",
+                "follow": [{
+                    "next_step": "parse_detail",
+                    "request": {
+                        "url": "https://example.com/detail/1",
+                        "skip": ["dedup"]
+                    },
+                    "engine": {
+                        "dedup": "request_url"
+                    }
+                }]
+            }, {
+                "id": "parse_detail",
+                "output": {
+                    "item": { "url": { "from": "$response.url" } },
+                    "sinks": ["default"]
+                }
+            }]
+        })))
+        .expect("rules should compile");
+
+        let response = html_response("https://example.com/list", "<html></html>");
+        let output = apply(&response, &compiled.steps[0], &compiled)
+            .await
+            .expect("run should succeed");
+
+        assert_eq!(output.requests.len(), 1);
+        assert!(output.requests[0].middleware_skips(DEDUP));
     }
 }

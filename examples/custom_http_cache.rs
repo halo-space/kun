@@ -14,11 +14,11 @@ use halo_spider::error::SpiderError;
 use halo_spider::future::BoxFuture;
 use halo_spider::item::Item;
 use halo_spider::middleware::http_cache::{Cache, Entry, HttpCache, Strategy};
-use halo_spider::middleware::{Config, Stage};
+use halo_spider::middleware::{DEDUP, Stage};
 use halo_spider::pipeline::Pipeline;
 use halo_spider::request::{Headers, Request};
 use halo_spider::response::Response;
-use halo_spider::settings::Settings;
+use halo_spider::settings::Config;
 use halo_spider::spider::{Output, Spider};
 use halo_spider::store::Memory as MemoryStore;
 use halo_spider::value::Value;
@@ -136,7 +136,7 @@ impl Spider for CacheSpider {
             vec![
                 response
                     .follow(response.url.clone())
-                    .with_dont_filter(true)
+                    .skip([DEDUP])
                     .with_meta("round", Value::Number(2.0)),
             ]
         } else {
@@ -178,7 +178,7 @@ impl Pipeline for StopAfter {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     halo_spider::trace::init_console();
 
-    let settings = Settings::default().with_idle_timeout(SignedDuration::from_millis(200));
+    let settings = Config::default().with_idle_timeout(SignedDuration::from_millis(200));
     let custom_http_cache = HttpCache::default()
         .with_cache(DemoCache::default())
         .with_strategy(Strategy::Response)
@@ -187,10 +187,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let engine = Engine::new()
         .with_http(ConditionalCacheHttp::default())
         .with_browser(Browser)
-        .with_settings(settings)
+        .with_config(settings)
         .add_middleware(
             "http_cache",
-            Config {
+            halo_spider::middleware::Config {
                 enabled: true,
                 stage: Stage::Download,
                 order: 110,

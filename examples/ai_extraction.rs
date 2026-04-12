@@ -3,7 +3,7 @@ use halo_spider::engine::Engine;
 use halo_spider::error::SpiderError;
 use halo_spider::response::Response;
 use halo_spider::scheduler::Memory;
-use halo_spider::settings::Settings;
+use halo_spider::settings::Config;
 use halo_spider::spider::{Output, Spider};
 use jiff::SignedDuration;
 
@@ -38,7 +38,7 @@ impl Spider for AiSpider {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     halo_spider::trace::init_console();
 
-    let settings = Settings::default()
+    let settings = Config::default()
         .with_openai_api_key(std::env::var("OPENAI_API_KEY").ok().unwrap())
         .with_openai_model("gpt-4o-mini");
 
@@ -46,7 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let http = Http::new();
     let browser = Browser;
 
-    let mut engine = Engine::from_parts(scheduler, http, browser).with_settings(settings);
+    let mut engine = Engine::from_parts(scheduler, http, browser).with_config(settings);
 
     engine.run(&AiSpider).await?;
 

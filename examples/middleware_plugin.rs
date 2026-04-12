@@ -3,7 +3,7 @@
 //! 这个示例只演示 plugin 当前已经落地的那部分能力：
 //! - 用 `PluginManifest` 声明一个 middleware 插件
 //! - 用 `PluginRegistry` 注册 manifest
-//! - 用 `Settings::with_middleware(...)` 启用对应 key
+//! - 用 `Config::with_request_middleware(...)` 启用对应 key
 //! - 用 `register_middleware(...)` 提供中间件 factory
 //! - 用 `load_plugins(...)` 完成 engine 装配
 //!
@@ -11,16 +11,14 @@
 //! cargo run --example middleware_plugin
 
 use halo_spider::engine::Engine;
-use halo_spider::engine::context::EngineContext;
-use halo_spider::engine::flow::Flow;
+use halo_spider::engine::{context, flow};
 use halo_spider::error::SpiderError;
-use halo_spider::future::BoxFuture;
 use halo_spider::item::Item;
+use halo_spider::middleware::Stage;
 use halo_spider::middleware::traits::Middleware;
-use halo_spider::middleware::{Config, Stage};
 use halo_spider::plugins::{PluginManifest, PluginRegistry};
 use halo_spider::response::Response;
-use halo_spider::settings::Settings;
+use halo_spider::settings::Config;
 use halo_spider::spider::{Output, Spider};
 use halo_spider::value::Value;
 use jiff::SignedDuration;
@@ -42,27 +40,25 @@ impl RequestStampMiddleware {
 }
 
 impl Middleware for RequestStampMiddleware {
-    fn process_request<'a>(
-        &'a self,
-        context: &'a mut EngineContext,
-    ) -> BoxFuture<'a, Result<Flow, SpiderError>> {
-        Box::pin(async move {
-            context
-                .request
-                .headers
-                .insert("X-Plugin-Label".to_string(), vec![self.label.clone()]);
+    async fn before_download(
+        &self,
+        context: &mut context::Download,
+    ) -> Result<flow::Download, SpiderError> {
+        context
+            .request
+            .headers
+            .insert("X-Plugin-Label".to_string(), vec![self.label.clone()]);
 
-            halo_spider::trace::info(
-                "middleware_plugin.request",
-                vec![
-                    halo_spider::trace::prop("plugin", "request_stamp"),
-                    halo_spider::trace::prop("label", self.label.as_str()),
-                    halo_spider::trace::prop("url", context.request.url.as_str()),
-                ],
-            );
+        halo_spider::trace::info(
+            "middleware_plugin.request",
+            vec![
+                halo_spider::trace::prop("plugin", "request_stamp"),
+                halo_spider::trace::prop("label", self.label.as_str()),
+                halo_spider::trace::prop("url", context.request.url.as_str()),
+            ],
+        );
 
-            Ok(Flow::Continue)
-        })
+        Ok(flow::Download::Continue)
     }
 }
 
@@ -125,12 +121,12 @@ async fn main() -> Result<(), SpiderError> {
         r#override: false,
     })?;
 
-    let settings = Settings::default()
+    let settings = Config::default()
         .with_download_delay(SignedDuration::from_millis(300))
         .with_idle_timeout(SignedDuration::from_secs(3))
-        .with_middleware(
+        .with_request_middleware(
             "request_stamp",
-            Config {
+            halo_spider::middleware::Config {
                 enabled: true,
                 stage: Stage::Download,
                 order: 20,
@@ -142,7 +138,7 @@ async fn main() -> Result<(), SpiderError> {
         );
 
     let mut engine = Engine::new()
-        .with_settings(settings)
+        .with_config(settings)
         .register_middleware("request_stamp", |options| {
             Ok(Box::new(RequestStampMiddleware::new(options)))
         })

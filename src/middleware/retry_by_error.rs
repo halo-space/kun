@@ -1,7 +1,6 @@
-use crate::engine::context::EngineContext;
-use crate::engine::flow::Flow;
+use crate::engine::{context, flow};
 use crate::error::SpiderError;
-use crate::future::BoxFuture;
+use crate::middleware::RETRY_BY_ERROR;
 use crate::middleware::traits::Middleware;
 use crate::value::Value;
 use std::collections::BTreeMap;
@@ -20,39 +19,62 @@ impl RetryByError {
         }
     }
 
-    fn should_retry(&self, context: &EngineContext) -> bool {
-        retry_times(context) < self.count
+    fn override_options<'a>(
+        &self,
+        context: &'a context::Download,
+    ) -> Option<&'a BTreeMap<String, Value>> {
+        context.request.middleware_options(RETRY_BY_ERROR)
     }
 
-    fn backoff(&self, context: &EngineContext) -> Option<u64> {
+    fn effective_count(&self, context: &context::Download) -> u64 {
+        self.override_options(context)
+            .and_then(parse_count)
+            .unwrap_or(self.count)
+    }
+
+    fn effective_backoff(&self, context: &context::Download) -> Vec<u64> {
+        self.override_options(context)
+            .map(parse_backoff)
+            .unwrap_or_else(|| self.backoff.clone())
+    }
+
+    fn should_retry(&self, context: &context::Download) -> bool {
+        retry_times(context) < self.effective_count(context)
+    }
+
+    fn backoff(&self, context: &context::Download) -> Option<u64> {
         let index = retry_times(context) as usize;
-        self.backoff
+        let backoff = self.effective_backoff(context);
+        backoff
             .get(index)
             .copied()
-            .or_else(|| self.backoff.last().copied())
+            .or_else(|| backoff.last().copied())
     }
 }
 
 impl Middleware for RetryByError {
-    fn process_exception<'a>(
-        &'a self,
-        context: &'a mut EngineContext,
-        error: &'a SpiderError,
-    ) -> BoxFuture<'a, Result<Flow, SpiderError>> {
-        Box::pin(async move {
-            if !self.should_retry(context) {
-                return Ok(Flow::Continue);
-            }
+    async fn download_error(
+        &self,
+        context: &mut context::Download,
+        error: &SpiderError,
+    ) -> Result<flow::Download, SpiderError> {
+        if context.request.middleware_skips(RETRY_BY_ERROR) {
+            return Ok(flow::Download::Continue);
+        }
 
-            Ok(Flow::Retry {
-                reason: format!("retry by error: {error}"),
-                backoff: self.backoff(context),
-            })
+        if !self.should_retry(context) {
+            return Ok(flow::Download::Continue);
+        }
+
+        let _ = error;
+        Ok(flow::Download::Retry {
+            reason: RETRY_BY_ERROR.to_string(),
+            backoff: self.backoff(context),
         })
     }
 }
 
-fn retry_times(context: &EngineContext) -> u64 {
+fn retry_times(context: &context::Download) -> u64 {
     context
         .request
         .meta
@@ -64,8 +86,7 @@ fn retry_times(context: &EngineContext) -> u64 {
 fn parse_count(options: &BTreeMap<String, Value>) -> Option<u64> {
     options
         .get("count")
-        .and_then(Value::as_array)
-        .and_then(|values| values.first())
+        .and_then(|value| first_numeric(value))
         .and_then(Value::as_f64)
         .map(|value| value as u64)
 }
@@ -73,13 +94,24 @@ fn parse_count(options: &BTreeMap<String, Value>) -> Option<u64> {
 fn parse_backoff(options: &BTreeMap<String, Value>) -> Vec<u64> {
     options
         .get("backoff")
-        .and_then(Value::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(Value::as_f64)
-                .map(|value| value as u64)
-                .collect()
-        })
+        .map(values_to_numbers)
         .unwrap_or_default()
+        .into_iter()
+        .map(|value| value as u64)
+        .collect()
+}
+
+fn first_numeric(value: &Value) -> Option<&Value> {
+    value
+        .as_array()
+        .and_then(|values| values.first())
+        .or(Some(value))
+}
+
+fn values_to_numbers(value: &Value) -> Vec<f64> {
+    if let Some(values) = value.as_array() {
+        values.iter().filter_map(Value::as_f64).collect()
+    } else {
+        value.as_f64().into_iter().collect()
+    }
 }

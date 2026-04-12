@@ -124,9 +124,9 @@ impl Task {
     pub fn with_id(request: Request, id: TaskId) -> Self {
         Self {
             id,
+            priority: request.priority,
             request,
             ready_at: None,
-            priority: 0,
             depth: 0,
         }
     }
@@ -140,9 +140,9 @@ impl Task {
     pub fn with_id_and_delay(request: Request, id: TaskId, delay: u64) -> Self {
         Self {
             id,
+            priority: request.priority,
             request,
             ready_at: Some(now().saturating_add(delay)),
-            priority: 0,
             depth: 0,
         }
     }
@@ -152,6 +152,7 @@ impl Task {
     /// Higher values are taken before lower values.
     pub fn with_priority(mut self, priority: i32) -> Self {
         self.priority = priority;
+        self.request.priority = priority;
         self
     }
 

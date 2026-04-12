@@ -15,7 +15,7 @@ README 负责总览，这里负责把每个模块现在到底能做什么、还�
 
 如果只看“代码爬虫底层能力”这一层，而不看 DSL，当前和 Scrapy 更完整运行时相比，最主要的剩余缺口是：
 
-- DSL 配置化入口与底层 runtime 能力对齐仍明显落后；plugin 当前则有意只收口在 `middleware` 装配，不承担通用组件扩展
+- plugin 当前继续有意只收口在 `middleware` 装配，不承担通用组件扩展；代码爬虫的 callback / item 主模型则已经稳定为 `Output { items, requests }`，不再是继续漂移的边界
 
 ## Request
 
@@ -23,11 +23,11 @@ README 负责总览，这里负责把每个模块现在到底能做什么、还�
 
 - 代码爬虫里手写的请求，和后续 DSL 生成的请求，本质上都应该落成同一个 `Request`
 - 如果 spider 需要从入口就带上 cookies、proxy、session、browser mode 这类能力，可以直接覆写 `build_start_requests()` 返回完整 `Request`；默认实现仍然只是把 `build_start_urls()` 包成 `Request::new(...)`
-- rules / DSL 这条线现在也不会再单独发明请求结构：start request 与 step follow request 都会先走共享 `Request` / `response.follow()` 语义，再把目标 step 的 `fetch.request` / `fetch.browser` 覆盖应用上去
+- rules / DSL 这条线现在也不会再单独发明请求结构：seed request 与 follow request 都直接落到共享 `Request` 模型上
 - 当前已经接线的共享请求语义包括：`method`、`headers`、`body`、`timeout`、`proxy`、`session`、request cookies
 - `meta` 是请求级上下文参数，用来挂当前请求和后续链路要透传的数据；它更接近 Scrapy 的函数参数/上下文，而不是框架私自塞内部控制字段的地方
-- `kwargs` 是显式给 callback / errback 使用的回调上下文参数；它和 `meta` 分开建模，不拿来承载框架内部控制字段
-- 普通 callback 可以通过 `response.kwarg("name")` 读取 `kwargs`；errback 可以通过 `failure.kwarg("name")` 读取同一份显式上下文
+- `cb_kwargs` 是显式给 callback / errback 使用的回调上下文参数；它和 `meta` 分开建模，不拿来承载框架内部控制字段
+- 代码里通常通过 `Request::with_cb_kwargs(...)` / `with_kwarg(...)` 写入；普通 callback 可以通过 `response.cb_kwargs().get("name")` 读取，errback 可以通过 `failure.cb_kwargs().get("name")` 读取同一份显式上下文
 - `errback` 现在也已经是 `Request` 的一等能力；下载失败或 spider callback 失败时，引擎会把失败上下文分发到对应 errback
 - `follow()` 会继承请求级共享语义，再按子请求显式覆盖
 
@@ -41,7 +41,7 @@ README 负责总览，这里负责把每个模块现在到底能做什么、还�
 
 - 基于 `reqwest`
 - 已接线真实的 timeout、proxy、redirect、cookie jar、session cookies
-- 已支持最小 `HTTP cache / conditional request`：开启 `Settings::with_http_cache(true)` 后，会基于缓存的 `ETag / Last-Modified` 自动补条件请求头，并在 `304 Not Modified` 时回填缓存 body
+- 已支持最小 `HTTP cache / conditional request`：开启 `Config::with_http_cache(true)` 后，会基于缓存的 `ETag / Last-Modified` 自动补条件请求头，并在 `304 Not Modified` 时回填缓存 body
 - `Response.body` 保存原始字节
 - `Response.text` 从 `body` 按统一解码规则派生
 
@@ -96,31 +96,151 @@ browser 在这里的角色是“渲染型下载器”，不是另起一套通用
 
 当前已经有两类下载调速能力：
 
-- 固定调速：`download_delay` 会继续编译成固定 `interval_gate`
-- 自适应调速：`Settings::with_auto_throttle(true)` 会改成 `auto_throttle` 中间件，按 origin 维护动态 delay
+- 固定调速：`download_delay` 会继续编译成固定 `interval`
+- 自适应调速：`Config::with_auto_throttle(true)` 会改成 `auto_throttle` 中间件，按 origin 维护动态 delay
 
 最小 `AutoThrottle` 的当前语义：
 
 - `download_delay` 在开启 `auto_throttle` 后表示初始/最小 delay
-- `with_auto_throttle_target_concurrency(...)` 表示每个 origin 的目标并发
+- `with_auto_throttle_target_concurrency(...)` 表示动态 delay 计算时的目标负载，不是硬并发闸门
 - `with_auto_throttle_max_delay(...)` 表示 delay 上限
 - 成功响应会按最近延迟逐步调整后续 delay
 - 下载异常以及 `429 / 5xx` 响应会把后续 delay 抬高
-- 如果同一个 origin 的 inflight 请求已经达到 `target_concurrency`，后续请求会主动退避
+- 如果需要硬并发上限，应单独配置 `concurrency`
 
 这层仍然只是现有下载链路上的 middleware 组合，不是单独再造一套 runtime。
+
+## Request Middleware
+
+当前 request 级运行策略已经统一收口为 `middleware` 模型。
+
+- 底层真正生效的都是具体 middleware 名称
+- 下载前控制直接使用 `concurrency`、`interval`、`rate_limit`、`auto_throttle`
+- 重试直接使用 `retry_by_status`、`retry_by_error`
+- 所以代码里不再推荐组级入口；直接写具体 middleware 更清楚
+
+### 中间件默认配置 `Config`
+
+引擎全局 `Config.request.middleware`、step 默认配置里挂的都是 `middleware::Config`：
+
+```rust
+middleware::Config {
+    enabled: true,
+    stage: Stage::Download,
+    order: 115,
+    options: BTreeMap::new(),
+}
+```
+
+这四个字段的含义可以直接理解成：
+
+- `enabled`
+  - 默认是否启用这条 middleware
+  - `true` 表示这条配置会进入链路
+  - `false` 表示这条配置只是挂着，但默认不执行
+- `stage`
+  - 这条 middleware 属于哪个生命周期阶段
+  - 当前主要是 `Stage::Download` 和 `Stage::Spider`
+- `order`
+  - 默认执行顺序
+  - 数字越小越早执行
+  - 例如 `115` 会比 `120` 更早进入链路
+- `options`
+  - 这条 middleware 的默认参数
+  - 具体字段由对应 middleware 自己解释
+  - 例如 `interval` 读 `interval`，`retry_by_status` 读 `count / status / backoff`
+
+### 排序覆盖规则
+
+当前 middleware 排序是三层解析：
+
+- 如果当前 `Request` 自己显式写了 `order`，优先使用 request 的顺序
+- 否则使用 step 默认配置里的 `Config.order`
+- 如果 step 没配，再回退到 engine / settings 默认配置里的 `Config.order`
+
+可以把它理解成：
+
+- `Config.order` 是“默认顺序”
+- `Request::with_xxx(..., order)` 是“这一跳临时改顺序”
+
+### 内置 middleware 的 request 级写法
+
+当前更推荐直接写具体 middleware：
+
+```rust
+Request::new(url)
+    .with_retry_by_status(retry_cfg, 200)
+    .with_retry_by_error(retry_cfg, 210)
+    .with_interval(interval_cfg, 120)
+    .with_rate_limit(rate_cfg, 130)
+```
+
+对应约定：
+
+- 没有“下载前控制”或“重试”这种组级 builder
+- 没有对应的组级常量
+- `skip(...)` 也按具体 middleware 名称跳过，例如 `.skip([INTERVAL, RATE_LIMIT])`
+
+### 自定义 middleware 的挂载与排序
+
+自定义 middleware 和内置 middleware 用的是同一套机制。
+
+如果你想让它成为“可配置、可复用、后面 DSL 也能引用”的一类 middleware，推荐：
+
+1. 先注册工厂
+2. 再在 `Config` 或 step 默认配置里给它一条 `middleware::Config`
+3. 需要时再在某条 `Request` 上单独覆盖参数或顺序
+
+```rust
+pub const CUSTOM_HEADER: &str = "custom_header";
+
+let engine = Engine::new()
+    .register_middleware(CUSTOM_HEADER, |options| {
+        Ok(Box::new(CustomHeaderMiddleware::new(options)))
+    })
+    .with_config(
+        Config::default().with_request_middleware(
+            CUSTOM_HEADER,
+            halo_spider::middleware::Config {
+                enabled: true,
+                stage: Stage::Download,
+                order: 115,
+                options: BTreeMap::new(),
+            },
+        ),
+    );
+
+let request = Request::new(url)
+    .with_middleware_options_ordered(CUSTOM_HEADER, header_cfg, 118);
+```
+
+这个例子里的含义是：
+
+- engine 默认把 `custom_header` 挂到下载阶段
+- 默认顺序是 `115`
+- 某一条 request 可以临时把它改成 `118`
+- 如果这条 request 不想用它，也可以直接 `.skip([CUSTOM_HEADER])`
+
+### `register_middleware(...)` 和 `add_middleware(...)` 的区别
+
+- `register_middleware(...)`
+  - 注册的是“名字 -> 工厂”
+  - 适合要配 `Config`、要做声明式装配、要和 DSL/step 默认配置对齐的场景
+- `add_middleware(...)`
+  - 直接往 engine 全局链里塞一个 middleware 实例
+  - 适合非常直接的全局挂载，不一定需要额外名字化配置的场景
 
 ## HTTP Cache
 
 当前已经有一版最小 `HTTP cache / conditional request` 能力。
 
-- 通过 `Settings::with_http_cache(true)` 开启
+- 通过 `Config::with_http_cache(true)` 开启
 - 当前实现形态是 `http_cache` download middleware
 - 只作用于 HTTP `GET` 请求
 - 当前 key 语义是规范化后的完整 URL，包含 `request.http.query`
 - 默认 backend 是 `middleware::http_cache::Memory`
 - 当前也已提供内置 `middleware::http_cache::File`，用于把缓存条目持久化到磁盘 JSON 文件；`File::default()` 的路径是 `output/http-cache.json`
-- 当前支持 `ttl`；默认按 `24h` 复用缓存条目，可以通过 `Settings::with_http_cache_ttl(...)` 覆盖，或通过 `without_http_cache_ttl()` 关闭自动过期
+- 当前支持 `ttl`；默认按 `24h` 复用缓存条目，可以通过 `Config::with_http_cache_ttl(...)` 覆盖，或通过 `without_http_cache_ttl()` 关闭自动过期
 - 当前支持两种策略：
   `Strategy::Validators` 只缓存 `ETag / Last-Modified`
   `Strategy::Response` 会连同响应 body 一起缓存，并在服务端返回 `304 Not Modified` 时回填成正常 `Response`
@@ -138,6 +258,8 @@ browser 在这里的角色是“渲染型下载器”，不是另起一套通用
 - `body` 是原始响应字节
 - `text` 是从 `body` 解码出来的字符串视图
 - 当前文本解码优先顺序是：BOM -> `Content-Type charset` -> 文档内编码声明 -> apparent encoding 猜测 -> UTF-8 lossy
+- `meta` 继续表示当前响应关联请求透传下来的上下文；`cb_kwargs()` 则是 callback 参数的快捷读取入口
+- `urljoin()`、`follow()`、`follow_all()` 只负责基于当前响应构造子请求，并继承父请求的共享请求语义；`dedup`、下载前控制与重试这些运行策略不挂在 `Response` 上
 - HTTP 和 browser 最终都要回到统一的 `Response` 语义上，方便 parser、callback、pipeline、store 复用
 
 ## Scheduler
@@ -191,21 +313,21 @@ browser 在这里的角色是“渲染型下载器”，不是另起一套通用
 如果默认组件足够，直接用 `Engine::new()`。
 如果想保留默认 scheduler、只替换下载器，优先用 `.with_http(...)` / `.with_browser(...)`。
 如果要连 `scheduler` 一起换掉，再用 `Engine::from_parts(scheduler, http, browser)`。
-如果要替换默认去重实现，再继续链 `.with_dedup(...)`。
+如果要替换默认 enqueue admission 去重实现，再继续链 `.with_dedup(...)`。
 如果要替换默认 robots policy，再继续链 `.with_robots(...)`。
 
-- `Engine::new()` 默认就是 `scheduler::Memory + download::Http + download::Browser + dedup::Memory + robots::Memory`
+- `Engine::new()` 默认就是 `scheduler::Memory + download::Http + download::Browser + enqueue admission dedup::Memory + robots::Memory`
 - `Engine::default()` 与 `Engine::new()` 等价
 - 如果想只替换 HTTP 下载器，可以用 `.with_http(...)`
 - 如果想只替换 browser 下载器，可以用 `.with_browser(...)`
 - 如果想同时替换两个下载器，可以链 `.with_http(...).with_browser(...)`
 - `Engine::with_downloaders(http, browser)` 继续保留，作为默认 memory scheduler 下的一次性快捷写法
 - 当前不再单独抽一个 `queue` 组件；任务排队与状态流转统一就是 `scheduler::Scheduler` 这条边界
-- 如果想关闭默认去重，可以显式用 `.with_dedup(dedup::Noop)`
-- 如果想用有界内存的近似去重，可以显式用 `.with_dedup(dedup::Bloom::default())`
+- 如果想关闭默认 enqueue admission 去重，可以显式用 `.with_dedup(dedup::Noop)`
+- 如果想用有界内存的近似去重后端，可以显式用 `.with_dedup(dedup::Bloom::default())`
 - 如果想自定义请求指纹规则或底层存储，也可以实现 `dedup::Dedup` 再挂到 `.with_dedup(...)`
-- 如果是手动往引擎里塞 request，优先用 `engine.enqueue(request).await?`；直接调 `engine.scheduler.enqueue(...)` 属于低层入口，会绕过 dedup 组件
-- `robots` 是否启用和使用哪个 user-agent 仍由 `Settings::with_robots_obey(...)` / `Settings::with_robots_user_agent(...)` 控制；如果要替换默认 robots policy 实现，用 `.with_robots(...)`
+- 如果是手动往引擎里塞 request，优先用 `engine.enqueue(request).await?`；直接调 `engine.scheduler.enqueue(...)` 属于低层入口，会绕过 enqueue admission 边界，至少包括 dedup 这类 `before_enqueue` 逻辑
+- `robots` 是否启用和使用哪个 user-agent 仍由 `Config::with_robots_obey(...)` / `Config::with_robots_user_agent(...)` 控制；如果要替换默认 robots policy 实现，用 `.with_robots(...)`
 - `checkpoint` 只有显式启用时才参与；当前默认内置后端是 `scheduler::checkpoint::File::default()`
 - 默认 checkpoint 文件路径是 `output/scheduler-checkpoint.json`
 - `scheduler::checkpoint::Memory::default()` 只是“memory scheduler + file checkpoint”的便捷组合
@@ -246,7 +368,7 @@ use halo_spider::download::{Browser, Http};
 use halo_spider::engine::Engine;
 use halo_spider::robots;
 use halo_spider::scheduler;
-use halo_spider::settings::Settings;
+use halo_spider::settings::Config;
 
 let memory_engine = Engine::new();
 
@@ -270,7 +392,7 @@ let bloom_dedup_engine = Engine::new().with_dedup(
 
 let custom_robots_engine = Engine::new()
     .with_robots(robots::Noop)
-    .with_settings(Settings::default().with_robots_obey(true));
+    .with_config(Config::default().with_robots_obey(true));
 
 let checkpoint_engine = Engine::new()
     .with_checkpoint(scheduler::checkpoint::File::default());
@@ -288,8 +410,8 @@ let redis_engine = Engine::new()
 ### `dedup::{Dedup, Memory, Bloom, Noop}` 是什么
 
 - `dedup::Dedup`
-  - request 去重的统一组件边界
-  - 引擎会在 request 进入 scheduler 前调用它
+  - request 去重的统一后端边界
+  - 引擎会在 enqueue admission 阶段、request 进入 scheduler 前调用它
   - 如果用户要自定义去重算法或存储后端，实现这个 trait 即可
 - `dedup::Memory`
   - 内置的精确内存去重实现
@@ -305,7 +427,7 @@ let redis_engine = Engine::new()
 
 当前关于默认策略的明确决策是：
 
-- `Engine::new()` 继续默认使用精确 `dedup::Memory`
+- `Engine::new()` 继续默认在 enqueue admission 阶段使用精确 `dedup::Memory`
 - `dedup::Bloom` 作为显式可选组件提供，不默认替换
 - 原因是默认行为优先保 correctness，不默认引入布隆误判导致的潜在漏抓
 
@@ -752,12 +874,12 @@ LeaseLost
 
 当前已经有一版更完整的 `robots.txt` 抓取策略。
 
-- 默认关闭；需要显式调用 `Settings::with_robots_obey(true)` 才会启用
+- 默认关闭；需要显式调用 `Config::with_robots_obey(true)` 才会启用
 - 开启后，引擎会在真正下载前检查当前请求是否被目标站点的 `robots.txt` 允许
 - 如果命中 `Crawl-delay` 或 `Request-rate`，引擎不会把请求当成永久拒绝，而是按 delay 退避后再重试
 - `Request-rate` 当前按 `window / requests` 的均匀间隔最小 delay 解释；如果同时声明 `Crawl-delay` 和 `Request-rate`，当前取更严格的那个 delay
 - 当前按 `scheme://host[:port]` 做 origin 级缓存；默认会在 `24h` 的 `cache_ttl` 内直接复用，超出后尝试刷新
-- `robots` 使用的 user-agent 优先取 `Settings::with_robots_user_agent(...)`；如果没有显式设置，就回退到当前 `spider.name()`
+- `robots` 使用的 user-agent 优先取 `Config::with_robots_user_agent(...)`；如果没有显式设置，就回退到当前 `spider.name()`
 - 默认 robots 组件是 `robots::Memory`
 - 默认 cache backend 是 `robots::cache::Memory`
 - 默认 `robots::Memory` 会按 `24h` 的 `cache_ttl` 判断缓存是否过期；调用方也可以通过 `with_cache_ttl(...)` 覆盖，或通过 `without_cache_ttl()` 关闭这层自动过期
@@ -771,7 +893,7 @@ LeaseLost
 - 如果调用方想保留 `robots::Memory` 这套抓取与判定逻辑、但替换 cache backend，可以继续用 `robots::Memory::with_cache(...)`
 - 如果调用方要替换这层策略，可以通过 `Engine::with_robots(...)` 挂自己的实现
 - `robots::Robot` 现在除了 `is_allowed(...)`，也可以通过 `check(...)` 返回 `Allow / Disallow / Delay(...)`，并通过 `sitemaps(...)` 读取当前 origin 声明的 sitemap URL
-- 如果调用方再显式打开 `Settings::with_robots_sitemap_seeds(true)`，引擎启动时会按 start URL 的 origin 读取 robots 里声明的 sitemap URL，抓取 sitemap / sitemapindex，并把里面的页面 URL 自动转成新的种子请求；当前也支持常见的 `.xml.gz` 压缩 sitemap
+- 如果调用方再显式打开 `Config::with_robots_sitemap_seeds(true)`，引擎启动时会按 start URL 的 origin 读取 robots 里声明的 sitemap URL，抓取 sitemap / sitemapindex，并把里面的页面 URL 自动转成新的种子请求；当前也支持常见的 `.xml.gz` 压缩 sitemap
 - 如果 spider 覆写了 `build_start_requests()`，这些自动种子请求会继续继承对应 start request 的共享请求语义，例如 mode、headers、cookies、timeout、proxy、session
 - 这些自动发现出来的种子请求会继续走 `enqueue_request(...)`，所以仍然受 `dedup` 和 `allowed_domains` 过滤；当前默认 `priority / depth` 都保持为 `0 / 0`，也可以通过 `with_robots_sitemap_seed_priority(...)` 和 `with_robots_sitemap_seed_depth(...)` 显式覆盖
 
@@ -803,13 +925,13 @@ LeaseLost
 ```rust
 use halo_spider::engine::Engine;
 use halo_spider::robots;
-use halo_spider::settings::Settings;
+use halo_spider::settings::Config;
 
 let robots = robots::Memory::new().with_cache(robots::cache::File::default());
 
 let engine = Engine::new()
     .with_robots(robots)
-    .with_settings(Settings::default().with_robots_obey(true));
+    .with_config(Config::default().with_robots_obey(true));
 ```
 
 如果希望显式调整 robots cache 的 TTL，可以这样写：
@@ -817,7 +939,7 @@ let engine = Engine::new()
 ```rust
 use halo_spider::engine::Engine;
 use halo_spider::robots;
-use halo_spider::settings::Settings;
+use halo_spider::settings::Config;
 use jiff::SignedDuration;
 
 let robots = robots::Memory::new()
@@ -826,7 +948,7 @@ let robots = robots::Memory::new()
 
 let engine = Engine::new()
     .with_robots(robots)
-    .with_settings(Settings::default().with_robots_obey(true));
+    .with_config(Config::default().with_robots_obey(true));
 ```
 
 如果希望把“robots 临时不可用”的重试窗口调短、调长，或者改成更保守的 fail-closed，可以这样写：
@@ -834,7 +956,7 @@ let engine = Engine::new()
 ```rust
 use halo_spider::engine::Engine;
 use halo_spider::robots;
-use halo_spider::settings::Settings;
+use halo_spider::settings::Config;
 use jiff::SignedDuration;
 
 let robots = robots::Memory::new()
@@ -843,7 +965,7 @@ let robots = robots::Memory::new()
 
 let engine = Engine::new()
     .with_robots(robots)
-    .with_settings(Settings::default().with_robots_obey(true));
+    .with_config(Config::default().with_robots_obey(true));
 ```
 
 如果你希望对某个站点 matcher 叠加显式站点策略，而不是重写整套 `Robot`，可以这样写：
@@ -851,7 +973,7 @@ let engine = Engine::new()
 ```rust
 use halo_spider::engine::Engine;
 use halo_spider::robots;
-use halo_spider::settings::Settings;
+use halo_spider::settings::Config;
 use jiff::SignedDuration;
 
 let robots = robots::Memory::new()
@@ -870,7 +992,7 @@ let robots = robots::Memory::new()
 
 let engine = Engine::new()
     .with_robots(robots)
-    .with_settings(Settings::default().with_robots_obey(true));
+    .with_config(Config::default().with_robots_obey(true));
 ```
 
 如果同时希望把 robots 里的 sitemap 自动变成新的种子请求，可以再打开：
@@ -878,12 +1000,12 @@ let engine = Engine::new()
 ```rust
 use halo_spider::engine::Engine;
 use halo_spider::robots;
-use halo_spider::settings::Settings;
+use halo_spider::settings::Config;
 
 let robots = robots::Memory::new().with_cache(robots::cache::File::default());
 
-let engine = Engine::new().with_robots(robots).with_settings(
-    Settings::default()
+let engine = Engine::new().with_robots(robots).with_config(
+    Config::default()
         .with_robots_obey(true)
         .with_robots_sitemap_seeds(true)
         .with_robots_sitemap_seed_priority(10)
@@ -927,7 +1049,7 @@ use halo_spider::error::SpiderError;
 use halo_spider::future::BoxFuture;
 use halo_spider::request::Request;
 use halo_spider::robots::Robot;
-use halo_spider::settings::Settings;
+use halo_spider::settings::Config;
 
 struct AllowOnlyExampleDotCom;
 
@@ -943,7 +1065,7 @@ impl Robot for AllowOnlyExampleDotCom {
 
 let engine = Engine::new()
     .with_robots(AllowOnlyExampleDotCom)
-    .with_settings(Settings::default().with_robots_obey(true));
+    .with_config(Config::default().with_robots_obey(true));
 ```
 
 ## Parser
@@ -1005,40 +1127,38 @@ let section_html = response.xpath("//section[@id='content']").html().one();
 
 `validate` 是底层共享能力，不应该只存在于 DSL 配置里。
 
-- 当前已经有共享 `validator::Config`、`validator::rule(...)`、`validator::Type` / `validator::Transform` 这套入口，底层仍然复用同一份 validation 模型
-- 代码 Spider 现在可以通过 `Spider::validator() -> Option<validator::Config>` 显式启用这套校验
+- 当前底层共享的是 `validator::StepValidator` / `validator::FieldValidator` / `validator::Type` / `validator::Transform` 这套模型
+- 代码 Spider 现在可以通过 `Spider::validator() -> Option<validator::StepValidator>` 显式启用这套校验
 - 如果配置了 `validator()`，engine 会在 `pipeline -> validator -> store` 这条链路里执行校验；没有配置就直接跳过
 - validator 失败时当前统一记 `stage=validator` 日志，并丢弃当前 item；不会进入 `store`，也不会触发重试或把整个 task 判失败
-- 代码爬虫现在已经可以直接调用 `validator::validate_fields()` / `validator::validate_item()`，也可以用 `validator::validate_fields_report()` / `validator::validate_item_report()` 收集多条错误
-- validation 是显式启用的：只有传入的 `Validation` 会执行；没有配置规则的字段不会被默认校验，字段缺失时也只有 `required` 才报错，其它规则会直接跳过
-- `Validation.field` 现在已经支持最小字段路径：`meta.title`、`authors[0].name`、`tags[]`、`articles[].title`
+- 代码爬虫现在已经可以直接调用 `validator::validate_fields()` / `validator::validate_item()`，也可以直接调用 `StepValidator::validate(&item).await`
+- validation 是显式启用的：只有传入的 `FieldValidator` / `StepValidator` 会执行；没有配置规则的字段不会被默认校验，字段缺失时也只有 `required` 或 relation 规则才报错
+- `FieldValidator.field` 现在已经支持最小字段路径：`meta.title`、`authors[0].name`、`tags[]`、`articles[].title`
 - 如果使用数组展开路径，当前语义是“对展开后的每个值逐个校验”；报错时会尽量返回具体路径，例如 `articles[1].title`
-- 当前还补了更直白的类型化约束入口：
-  - 文本：`with_min_length(...)`、`with_max_length(...)`
-  - 列表：`with_min_items(...)`、`with_max_items(...)`
-  - 对象：`with_min_fields(...)`、`with_max_fields(...)`、`with_required_fields([...])`
-- 当前也支持 `ValidationTransform` 链式转换后再校验：
+- 当前已经收成更直白的链式约束入口：
+  - 文本：`min_length(...)`、`max_length(...)`、`regex(...)`
+  - 数值：`min(...)`、`max(...)`
+  - 列表：`min_items(...)`、`max_items(...)`
+  - 对象：`min_fields(...)`、`max_fields(...)`、`required_fields([...])`
+  - 枚举：`enum_values([...])`
+- 当前也支持 `Transform` 链式转换后再校验：
   - 文本规范化：`Trim`、`NormalizeWhitespace`
   - 标量转换：`ParseNumber`、`ParseBool`、`ParseDatetime`
 - 典型用法是先把抓取出来的字符串值收口，再按最终 `validator::Type` 与规则继续校验
 - 当前也支持嵌套子规则：
-  - `with_object_validations([...])`：对对象值内部字段继续做相对路径校验
-  - `with_each_validations([...])`：对列表中的每个成员继续做相对路径或根值校验
+  - `object_fields([...])`：对对象值内部字段继续做相对路径校验
+  - `each_fields([...])`：对列表中的每个成员继续做相对路径或根值校验
   - 子规则报错时会保留完整前缀路径，例如 `articles[1].title`
-- 当前也支持组合约束：
-  - `with_all_of([...])`：当前作用域下的多条验证都必须通过
-  - `with_any_of([...])`：当前作用域下至少一条验证通过
-  - `with_one_of([...])`：当前作用域下恰好一条验证通过
-  - `with_mutually_exclusive([...])`：当前作用域下至多一条验证通过
-  - 顶层作用域可以用 `Validation::root()` 显式声明
-  - 可选字段在组合约束里会被当成“skipped”而不是“passed”，这样 `any_of / one_of` 不会因为字段没出现而误判通过
+- 当前也支持 step 级关系约束：
+  - `StepValidator::and([...])`：这些字段都要存在
+  - `StepValidator::or([...])`：这些字段至少一个存在
+  - `StepValidator::one([...])`：这些字段只能有一个存在
 - 当前也支持条件约束：
-  - `with_when_exists(...)`、`with_when_missing(...)`
-  - `with_when_equals(...)`、`with_when_not_equals(...)`
-  - `with_required_when_exists(...)`、`with_required_when_missing(...)`
-  - `with_required_when_equals(...)`、`with_required_when_not_equals(...)`
+  - `apply_when_exists(...)`、`apply_when_missing(...)`
+  - `apply_when_equals(...)`、`apply_when_not_equals(...)`
+  - 典型写法是 `required().apply_when_equals(...)`
   - 多个条件当前按 `AND` 语义组合；条件路径也走同一套字段路径解析，并且在嵌套对象/列表作用域里按相对路径解析
-  - 典型场景是 “`type == video` 时 `duration` 必填” 或 “某个伴随字段缺失时才要求另一字段出现”
+- 典型场景是 “`type == video` 时 `duration` 必填” 或 “某个伴随字段缺失时才要求另一字段出现”
 
 这部分的设计目标是：先把 validation 的底层模型和代码 Spider runtime 契约收口，再在 DSL 配置面上做映射。
 
@@ -1053,17 +1173,18 @@ let section_html = response.xpath("//section[@id='content']").html().one();
 
 ## DSL 当前定位
 
-当前阶段，DSL 先后置，不继续扩配置面。
+当前阶段，DSL 已经明确为共享底层能力的配置化入口。
 
 它的定位已经明确：
 
 - 不是另一套运行时
 - 不是重新发明一套调度、重试、去重、输出机制
 - 而是把代码爬虫已有的底层能力配置化
-- 在 DSL v1 里，这类共享能力会统一映射到 `engine.schedule / engine.limits / engine.retry / engine.dedup`
+- 在 DSL v1 里，请求相关能力会映射到 `engine.dedup / engine.concurrency / engine.interval / engine.rate_limit / engine.auto_throttle / engine.retry_by_status / engine.retry_by_error`
 - `validate` 继续走共享 validation 模型
-- `fetch.request` / `fetch.browser` 走共享 `Request`
+- `seeds[].request` / `follow[].request` 继续走共享 `Request`
 - 代码 Spider 的 item 输出当前走统一 `pipeline -> validator -> store`
+- `output.sinks` 继续走统一 store 路由
 
 也就是说，正确方向应该是：
 

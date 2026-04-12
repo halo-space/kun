@@ -441,8 +441,9 @@ impl<C: Cache> Memory<C> {
                 Ok(policy)
             }
             FetchResult::Unavailable => {
+                let retry_started_at = now();
                 if let Some(entry) = cached_entry {
-                    self.remember_unavailable_retry(origin.as_str(), current_time)
+                    self.remember_unavailable_retry(origin.as_str(), retry_started_at)
                         .await;
                     crate::trace::warn(
                         "robots.cache_stale_reuse",
@@ -454,7 +455,7 @@ impl<C: Cache> Memory<C> {
                     return Ok(policy);
                 }
 
-                self.remember_unavailable_retry(origin.as_str(), current_time)
+                self.remember_unavailable_retry(origin.as_str(), retry_started_at)
                     .await;
                 let unavailable_policy = site_policy
                     .unavailable_policy

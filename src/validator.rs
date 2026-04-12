@@ -18,7 +18,7 @@ const KNOWN_CIVIL_DATETIME_FORMATS: &[&str] = &[
 const KNOWN_CIVIL_DATE_FORMATS: &[&str] = &["%Y/%m/%d", "%Y.%m.%d"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ValidationType {
+pub enum Type {
     Text,
     Number,
     Bool,
@@ -26,7 +26,7 @@ pub enum ValidationType {
     Object,
 }
 
-impl ValidationType {
+impl Type {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Text => "text",
@@ -48,7 +48,7 @@ impl ValidationType {
     }
 }
 
-impl TryFrom<&str> for ValidationType {
+impl TryFrom<&str> for Type {
     type Error = String;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
@@ -63,10 +63,8 @@ impl TryFrom<&str> for ValidationType {
     }
 }
 
-pub use ValidationType as Type;
-
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct ValidationRule {
+pub struct Rule {
     pub required: bool,
     pub regex: Option<String>,
     pub min: Option<f64>,
@@ -82,7 +80,7 @@ pub struct ValidationRule {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ValidationTransform {
+pub enum Transform {
     Trim,
     NormalizeWhitespace,
     ParseNumber,
@@ -90,7 +88,7 @@ pub enum ValidationTransform {
     ParseDatetime,
 }
 
-impl ValidationTransform {
+impl Transform {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Trim => "trim",
@@ -102,17 +100,15 @@ impl ValidationTransform {
     }
 }
 
-pub use ValidationTransform as Transform;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ValidationConditionKind {
+pub enum ConditionEnum {
     Exists,
     Missing,
     Equals,
     NotEquals,
 }
 
-impl ValidationConditionKind {
+impl ConditionEnum {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Exists => "exists",
@@ -124,17 +120,17 @@ impl ValidationConditionKind {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct ValidationCondition {
+pub struct Condition {
     pub field: String,
-    pub kind: ValidationConditionKind,
+    pub kind: ConditionEnum,
     pub value: Option<Value>,
 }
 
-impl ValidationCondition {
+impl Condition {
     pub fn exists(field: impl Into<String>) -> Self {
         Self {
             field: field.into(),
-            kind: ValidationConditionKind::Exists,
+            kind: ConditionEnum::Exists,
             value: None,
         }
     }
@@ -142,7 +138,7 @@ impl ValidationCondition {
     pub fn missing(field: impl Into<String>) -> Self {
         Self {
             field: field.into(),
-            kind: ValidationConditionKind::Missing,
+            kind: ConditionEnum::Missing,
             value: None,
         }
     }
@@ -150,7 +146,7 @@ impl ValidationCondition {
     pub fn equals(field: impl Into<String>, value: Value) -> Self {
         Self {
             field: field.into(),
-            kind: ValidationConditionKind::Equals,
+            kind: ConditionEnum::Equals,
             value: Some(value),
         }
     }
@@ -158,291 +154,284 @@ impl ValidationCondition {
     pub fn not_equals(field: impl Into<String>, value: Value) -> Self {
         Self {
             field: field.into(),
-            kind: ValidationConditionKind::NotEquals,
+            kind: ConditionEnum::NotEquals,
             value: Some(value),
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ValidationGroupKind {
-    AllOf,
-    AnyOf,
-    OneOf,
-    MutuallyExclusive,
+pub enum RelationEnum {
+    And,
+    Or,
+    One,
 }
 
-impl ValidationGroupKind {
+impl RelationEnum {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::AllOf => "all_of",
-            Self::AnyOf => "any_of",
-            Self::OneOf => "one_of",
-            Self::MutuallyExclusive => "mutually_exclusive",
+            Self::And => "and",
+            Self::Or => "or",
+            Self::One => "one",
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct ValidationGroup {
-    pub kind: ValidationGroupKind,
-    pub validations: Vec<Validation>,
+pub struct Relation {
+    pub fields: Vec<String>,
+    pub kind: RelationEnum,
 }
 
-impl ValidationGroup {
-    fn new(kind: ValidationGroupKind, validations: impl IntoIterator<Item = Validation>) -> Self {
+impl Relation {
+    pub fn new<I, S>(fields: I, kind: RelationEnum) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
         Self {
             kind,
-            validations: validations.into_iter().collect(),
+            fields: fields.into_iter().map(Into::into).collect(),
         }
+    }
+
+    pub fn and<I, S>(fields: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self::new(fields, RelationEnum::And)
+    }
+
+    pub fn or<I, S>(fields: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self::new(fields, RelationEnum::Or)
+    }
+
+    pub fn one<I, S>(fields: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self::new(fields, RelationEnum::One)
     }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct Validation {
+pub struct FieldValidator {
     pub field: String,
-    pub value_type: ValidationType,
-    pub transforms: Vec<ValidationTransform>,
-    pub conditions: Vec<ValidationCondition>,
-    pub object_validations: Vec<Validation>,
-    pub each_validations: Vec<Validation>,
-    pub groups: Vec<ValidationGroup>,
-    pub rule: ValidationRule,
+    pub value_type: Type,
+    pub transforms: Vec<Transform>,
+    pub conditions: Vec<Condition>,
+    pub object_fields: Vec<FieldValidator>,
+    pub each_fields: Vec<FieldValidator>,
+    pub rule: Rule,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct Config {
-    pub validations: Vec<Validation>,
+pub struct StepValidator {
+    pub fields: Vec<FieldValidator>,
+    pub relations: Vec<Relation>,
 }
 
-impl Config {
-    pub fn new(validations: impl IntoIterator<Item = Validation>) -> Self {
-        Self {
-            validations: validations.into_iter().collect(),
-        }
+impl StepValidator {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn from_fields(fields: Vec<FieldValidator>) -> Self {
+        fields.into_iter().fold(Self::new(), |step, field| {
+            let name = field.field.clone();
+            let value_type = field.value_type;
+            step.field(name, value_type, |_| field)
+        })
     }
 
     pub fn is_empty(&self) -> bool {
-        self.validations.is_empty()
+        self.fields.is_empty() && self.relations.is_empty()
+    }
+
+    pub fn field<F>(mut self, name: impl Into<String>, value_type: Type, build: F) -> Self
+    where
+        F: FnOnce(FieldValidator) -> FieldValidator,
+    {
+        self.fields
+            .push(build(FieldValidator::new(name, value_type)));
+        self
+    }
+
+    pub fn and<I, S>(mut self, fields: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.relations
+            .push(Relation::new(fields, RelationEnum::And));
+        self
+    }
+
+    pub fn or<I, S>(mut self, fields: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.relations.push(Relation::new(fields, RelationEnum::Or));
+        self
+    }
+
+    pub fn one<I, S>(mut self, fields: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.relations
+            .push(Relation::new(fields, RelationEnum::One));
+        self
+    }
+
+    pub async fn validate(&self, item: &Item) -> Result<(), SpiderError> {
+        if !self.fields.is_empty() {
+            validate_item(item, &self.fields)?;
+        }
+
+        if !self.relations.is_empty() {
+            validate_item_relations(item, &self.relations)?;
+        }
+
+        Ok(())
     }
 }
 
-pub fn rule(field: impl Into<String>, value_type: Type) -> Validation {
-    Validation::new(field, value_type)
+pub fn field(field: impl Into<String>, value_type: Type) -> FieldValidator {
+    FieldValidator::new(field, value_type)
 }
 
-impl Validation {
+impl FieldValidator {
     pub fn root() -> Self {
-        Self::new("", ValidationType::Object)
+        Self::new("", Type::Object)
     }
 
-    pub fn new(field: impl Into<String>, value_type: ValidationType) -> Self {
+    pub fn new(field: impl Into<String>, value_type: Type) -> Self {
         Self {
             field: field.into(),
             value_type,
             transforms: Vec::new(),
             conditions: Vec::new(),
-            object_validations: Vec::new(),
-            each_validations: Vec::new(),
-            groups: Vec::new(),
-            rule: ValidationRule::default(),
+            object_fields: Vec::new(),
+            each_fields: Vec::new(),
+            rule: Rule::default(),
         }
     }
 
-    pub fn with_transform(mut self, transform: ValidationTransform) -> Self {
+    pub fn transform(mut self, transform: Transform) -> Self {
         self.transforms.push(transform);
         self
     }
 
-    pub fn transform(self, transform: Transform) -> Self {
-        self.with_transform(transform)
-    }
-
-    pub fn with_transforms(
-        mut self,
-        transforms: impl IntoIterator<Item = ValidationTransform>,
-    ) -> Self {
+    pub fn transforms(mut self, transforms: impl IntoIterator<Item = Transform>) -> Self {
         self.transforms.extend(transforms);
         self
     }
 
-    pub fn with_condition(mut self, condition: ValidationCondition) -> Self {
+    pub fn condition(mut self, condition: Condition) -> Self {
         self.conditions.push(condition);
         self
     }
 
-    pub fn with_conditions(
-        mut self,
-        conditions: impl IntoIterator<Item = ValidationCondition>,
-    ) -> Self {
+    pub fn conditions(mut self, conditions: impl IntoIterator<Item = Condition>) -> Self {
         self.conditions.extend(conditions);
         self
     }
 
-    pub fn with_when_exists(mut self, field: impl Into<String>) -> Self {
-        self.conditions.push(ValidationCondition::exists(field));
+    pub fn apply_when_exists(mut self, field: impl Into<String>) -> Self {
+        self.conditions.push(Condition::exists(field));
         self
     }
 
-    pub fn with_when_missing(mut self, field: impl Into<String>) -> Self {
-        self.conditions.push(ValidationCondition::missing(field));
+    pub fn apply_when_missing(mut self, field: impl Into<String>) -> Self {
+        self.conditions.push(Condition::missing(field));
         self
     }
 
-    pub fn with_when_equals(mut self, field: impl Into<String>, value: Value) -> Self {
-        self.conditions
-            .push(ValidationCondition::equals(field, value));
+    pub fn apply_when_equals(mut self, field: impl Into<String>, value: Value) -> Self {
+        self.conditions.push(Condition::equals(field, value));
         self
     }
 
-    pub fn with_when_not_equals(mut self, field: impl Into<String>, value: Value) -> Self {
-        self.conditions
-            .push(ValidationCondition::not_equals(field, value));
+    pub fn apply_when_not_equals(mut self, field: impl Into<String>, value: Value) -> Self {
+        self.conditions.push(Condition::not_equals(field, value));
         self
     }
 
-    pub fn with_required_when_exists(self, field: impl Into<String>) -> Self {
-        self.with_required(true).with_when_exists(field)
-    }
-
-    pub fn with_required_when_missing(self, field: impl Into<String>) -> Self {
-        self.with_required(true).with_when_missing(field)
-    }
-
-    pub fn with_required_when_equals(self, field: impl Into<String>, value: Value) -> Self {
-        self.with_required(true).with_when_equals(field, value)
-    }
-
-    pub fn with_required_when_not_equals(self, field: impl Into<String>, value: Value) -> Self {
-        self.with_required(true).with_when_not_equals(field, value)
-    }
-
-    pub fn with_optional_when_exists(self, field: impl Into<String>) -> Self {
-        self.with_when_exists(field)
-    }
-
-    pub fn with_optional_when_missing(self, field: impl Into<String>) -> Self {
-        self.with_when_missing(field)
-    }
-
-    pub fn with_optional_when_equals(self, field: impl Into<String>, value: Value) -> Self {
-        self.with_when_equals(field, value)
-    }
-
-    pub fn with_optional_when_not_equals(self, field: impl Into<String>, value: Value) -> Self {
-        self.with_when_not_equals(field, value)
-    }
-
-    pub fn with_object_validations(
-        mut self,
-        validations: impl IntoIterator<Item = Validation>,
-    ) -> Self {
-        self.object_validations.extend(validations);
+    pub fn object_fields(mut self, fields: impl IntoIterator<Item = FieldValidator>) -> Self {
+        self.object_fields.extend(fields);
         self
     }
 
-    pub fn with_each_validations(
-        mut self,
-        validations: impl IntoIterator<Item = Validation>,
-    ) -> Self {
-        self.each_validations.extend(validations);
+    pub fn each_fields(mut self, fields: impl IntoIterator<Item = FieldValidator>) -> Self {
+        self.each_fields.extend(fields);
         self
     }
 
-    pub fn with_all_of(mut self, validations: impl IntoIterator<Item = Validation>) -> Self {
-        self.groups.push(ValidationGroup::new(
-            ValidationGroupKind::AllOf,
-            validations,
-        ));
+    pub fn required(mut self) -> Self {
+        self.rule.required = true;
         self
     }
 
-    pub fn with_any_of(mut self, validations: impl IntoIterator<Item = Validation>) -> Self {
-        self.groups.push(ValidationGroup::new(
-            ValidationGroupKind::AnyOf,
-            validations,
-        ));
+    pub fn optional(mut self) -> Self {
+        self.rule.required = false;
         self
     }
 
-    pub fn with_one_of(mut self, validations: impl IntoIterator<Item = Validation>) -> Self {
-        self.groups.push(ValidationGroup::new(
-            ValidationGroupKind::OneOf,
-            validations,
-        ));
-        self
-    }
-
-    pub fn with_mutually_exclusive(
-        mut self,
-        validations: impl IntoIterator<Item = Validation>,
-    ) -> Self {
-        self.groups.push(ValidationGroup::new(
-            ValidationGroupKind::MutuallyExclusive,
-            validations,
-        ));
-        self
-    }
-
-    pub fn with_required(mut self, required: bool) -> Self {
-        self.rule.required = required;
-        self
-    }
-
-    pub fn required(self) -> Self {
-        self.with_required(true)
-    }
-
-    pub fn optional(self) -> Self {
-        self.with_required(false)
-    }
-
-    pub fn with_regex(mut self, pattern: impl Into<String>) -> Self {
+    pub fn regex(mut self, pattern: impl Into<String>) -> Self {
         self.rule.regex = Some(pattern.into());
         self
     }
 
-    pub fn with_min(mut self, min: f64) -> Self {
+    pub fn min(mut self, min: f64) -> Self {
         self.rule.min = Some(min);
         self
     }
 
-    pub fn with_max(mut self, max: f64) -> Self {
+    pub fn max(mut self, max: f64) -> Self {
         self.rule.max = Some(max);
         self
     }
 
-    pub fn with_min_length(mut self, min_length: usize) -> Self {
+    pub fn min_length(mut self, min_length: usize) -> Self {
         self.rule.min_length = Some(min_length);
         self
     }
 
-    pub fn with_max_length(mut self, max_length: usize) -> Self {
+    pub fn max_length(mut self, max_length: usize) -> Self {
         self.rule.max_length = Some(max_length);
         self
     }
 
-    pub fn with_min_items(mut self, min_items: usize) -> Self {
+    pub fn min_items(mut self, min_items: usize) -> Self {
         self.rule.min_items = Some(min_items);
         self
     }
 
-    pub fn with_max_items(mut self, max_items: usize) -> Self {
+    pub fn max_items(mut self, max_items: usize) -> Self {
         self.rule.max_items = Some(max_items);
         self
     }
 
-    pub fn with_min_fields(mut self, min_fields: usize) -> Self {
+    pub fn min_fields(mut self, min_fields: usize) -> Self {
         self.rule.min_fields = Some(min_fields);
         self
     }
 
-    pub fn with_max_fields(mut self, max_fields: usize) -> Self {
+    pub fn max_fields(mut self, max_fields: usize) -> Self {
         self.rule.max_fields = Some(max_fields);
         self
     }
 
-    pub fn with_required_fields<I, S>(mut self, fields: I) -> Self
+    pub fn required_fields<I, S>(mut self, fields: I) -> Self
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
@@ -451,165 +440,54 @@ impl Validation {
         self
     }
 
-    pub fn with_enum(mut self, values: impl IntoIterator<Item = Value>) -> Self {
+    pub fn enum_values(mut self, values: impl IntoIterator<Item = Value>) -> Self {
         self.rule.enum_values = values.into_iter().collect();
         self
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ValidationIssue {
-    pub field: String,
-    pub message: String,
-}
-
-impl ValidationIssue {
-    fn from_error(error: SpiderError) -> Self {
-        let text = match error {
-            SpiderError::Parse(message) => message,
-            other => other.to_string(),
-        };
-
-        let prefix = "validation failed for field ";
-        if let Some(rest) = text.strip_prefix(prefix)
-            && let Some((field, message)) = rest.split_once(": ")
-        {
-            return Self {
-                field: field.to_string(),
-                message: message.to_string(),
-            };
-        }
-
-        Self {
-            field: String::new(),
-            message: text,
-        }
-    }
-
-    fn to_error(&self) -> SpiderError {
-        if self.field.is_empty() {
-            return SpiderError::parse(self.message.clone());
-        }
-
-        SpiderError::parse(format!(
-            "validation failed for field {}: {}",
-            self.field, self.message
-        ))
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ValidationReport {
-    pub issues: Vec<ValidationIssue>,
-}
-
-impl ValidationReport {
-    pub fn is_ok(&self) -> bool {
-        self.issues.is_empty()
-    }
-
-    pub fn is_err(&self) -> bool {
-        !self.is_ok()
-    }
-
-    pub fn first_error(&self) -> Option<SpiderError> {
-        self.issues.first().map(ValidationIssue::to_error)
-    }
-
-    pub fn into_result(self) -> Result<(), SpiderError> {
-        if let Some(issue) = self.issues.first() {
-            return Err(issue.to_error());
-        }
-
-        Ok(())
-    }
-
-    pub fn summary(&self) -> String {
-        self.issues
-            .iter()
-            .map(|issue| {
-                if issue.field.is_empty() {
-                    issue.message.clone()
-                } else {
-                    format!("{}: {}", issue.field, issue.message)
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("; ")
-    }
-}
-
 pub fn validate_fields(
     fields: &BTreeMap<String, Value>,
-    validations: &[Validation],
+    validators: &[FieldValidator],
 ) -> Result<(), SpiderError> {
-    let mut collector = ValidationCollector::fail_fast();
-    validate_fields_internal(fields, validations, &mut collector)
+    let mut collector = ValidatorCollector::fail_fast();
+    validate_fields_internal(fields, validators, &mut collector)
 }
 
-pub fn validate_item(item: &Item, validations: &[Validation]) -> Result<(), SpiderError> {
-    validate_fields(&item.fields, validations)
+pub fn validate_item(item: &Item, validators: &[FieldValidator]) -> Result<(), SpiderError> {
+    validate_fields(&item.fields, validators)
 }
 
-pub fn validate_fields_report(
+pub fn validate_field_relations(
     fields: &BTreeMap<String, Value>,
-    validations: &[Validation],
-) -> ValidationReport {
-    let mut collector = ValidationCollector::collect_all();
-    let _ = validate_fields_internal(fields, validations, &mut collector);
-    collector.into_report()
+    relations: &[Relation],
+) -> Result<(), SpiderError> {
+    for relation in relations {
+        validate_relation(fields, relation)?;
+    }
+
+    Ok(())
 }
 
-pub fn validate_item_report(item: &Item, validations: &[Validation]) -> ValidationReport {
-    validate_fields_report(&item.fields, validations)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ValidationRunMode {
-    FailFast,
-    CollectAll,
+pub fn validate_item_relations(item: &Item, relations: &[Relation]) -> Result<(), SpiderError> {
+    validate_field_relations(&item.fields, relations)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ValidationStatus {
+enum ValidatorStatus {
     Skipped,
     Applied,
 }
 
-struct ValidationCollector {
-    mode: ValidationRunMode,
-    issues: Vec<ValidationIssue>,
-}
+struct ValidatorCollector;
 
-impl ValidationCollector {
+impl ValidatorCollector {
     fn fail_fast() -> Self {
-        Self {
-            mode: ValidationRunMode::FailFast,
-            issues: Vec::new(),
-        }
-    }
-
-    fn collect_all() -> Self {
-        Self {
-            mode: ValidationRunMode::CollectAll,
-            issues: Vec::new(),
-        }
+        Self
     }
 
     fn record_error(&mut self, error: SpiderError) -> Result<(), SpiderError> {
-        match self.mode {
-            ValidationRunMode::FailFast => Err(error),
-            ValidationRunMode::CollectAll => {
-                self.issues.push(ValidationIssue::from_error(error));
-                Ok(())
-            }
-        }
-    }
-
-    fn into_report(self) -> ValidationReport {
-        ValidationReport {
-            issues: self.issues,
-        }
+        Err(error)
     }
 }
 
@@ -633,11 +511,6 @@ struct ResolvedFieldValue<'a> {
     value: Option<&'a Value>,
 }
 
-struct ScopedValidationCheck {
-    status: ValidationStatus,
-    report: ValidationReport,
-}
-
 struct FieldPathCursor<'a> {
     field: String,
     node: FieldPathNode<'a>,
@@ -645,15 +518,15 @@ struct FieldPathCursor<'a> {
 
 fn validate_fields_internal(
     fields: &BTreeMap<String, Value>,
-    validations: &[Validation],
-    collector: &mut ValidationCollector,
+    validators: &[FieldValidator],
+    collector: &mut ValidatorCollector,
 ) -> Result<(), SpiderError> {
     let root_value = Value::Object(fields.clone());
 
-    for validation in validations {
+    for validation in validators {
         if validation.field.is_empty() {
             let resolved_values = vec![ResolvedFieldValue {
-                field: display_validation_field("").to_string(),
+                field: display_validator_field("").to_string(),
                 value: Some(&root_value),
             }];
             validate_field(validation, "", &root_value, &resolved_values, collector)?;
@@ -674,30 +547,30 @@ fn validate_fields_internal(
 }
 
 fn validate_field(
-    validation: &Validation,
+    validation: &FieldValidator,
     scope_field: &str,
     scope_value: &Value,
     resolved_values: &[ResolvedFieldValue<'_>],
-    collector: &mut ValidationCollector,
-) -> Result<ValidationStatus, SpiderError> {
-    match validation_conditions_match(scope_field, scope_value, &validation.conditions) {
-        Ok(false) => return Ok(ValidationStatus::Skipped),
+    collector: &mut ValidatorCollector,
+) -> Result<ValidatorStatus, SpiderError> {
+    match validator_conditions_match(scope_field, scope_value, &validation.conditions) {
+        Ok(false) => return Ok(ValidatorStatus::Skipped),
         Ok(true) => {}
         Err(error) => {
             collector.record_error(error)?;
-            return Ok(ValidationStatus::Applied);
+            return Ok(ValidatorStatus::Applied);
         }
     }
 
     if resolved_values.is_empty() {
         if validation.rule.required {
             collector.record_error(missing_value_error(validation.field.as_str()))?;
-            return Ok(ValidationStatus::Applied);
+            return Ok(ValidatorStatus::Applied);
         }
-        return Ok(ValidationStatus::Skipped);
+        return Ok(ValidatorStatus::Skipped);
     }
 
-    let mut status = ValidationStatus::Skipped;
+    let mut status = ValidatorStatus::Skipped;
     for resolved in resolved_values {
         let resolved_status = validate_resolved_value(
             validation,
@@ -705,8 +578,8 @@ fn validate_field(
             resolved.value,
             collector,
         )?;
-        if resolved_status == ValidationStatus::Applied {
-            status = ValidationStatus::Applied;
+        if resolved_status == ValidatorStatus::Applied {
+            status = ValidatorStatus::Applied;
         }
     }
 
@@ -714,27 +587,27 @@ fn validate_field(
 }
 
 fn validate_resolved_value(
-    validation: &Validation,
+    validation: &FieldValidator,
     resolved_field: &str,
     resolved_value: Option<&Value>,
-    collector: &mut ValidationCollector,
-) -> Result<ValidationStatus, SpiderError> {
+    collector: &mut ValidatorCollector,
+) -> Result<ValidatorStatus, SpiderError> {
     let Some(value) = resolved_value.filter(|value| !matches!(value, Value::Null)) else {
         if validation.rule.required {
             collector.record_error(missing_value_error(resolved_field))?;
-            return Ok(ValidationStatus::Applied);
+            return Ok(ValidatorStatus::Applied);
         }
-        return Ok(ValidationStatus::Skipped);
+        return Ok(ValidatorStatus::Skipped);
     };
 
     let transformed_value = if validation.transforms.is_empty() {
         None
     } else {
-        match apply_validation_transforms(resolved_field, value.clone(), &validation.transforms) {
+        match apply_validator_transforms(resolved_field, value.clone(), &validation.transforms) {
             Ok(value) => Some(value),
             Err(error) => {
                 collector.record_error(error)?;
-                return Ok(ValidationStatus::Applied);
+                return Ok(ValidatorStatus::Applied);
             }
         }
     };
@@ -743,66 +616,62 @@ fn validate_resolved_value(
     if !validation.value_type.matches(value) {
         collector.record_error(SpiderError::parse(format!(
             "validation failed for field {}: expected {}",
-            display_validation_field(resolved_field),
+            display_validator_field(resolved_field),
             validation.value_type.as_str()
         )))?;
-        return Ok(ValidationStatus::Applied);
+        return Ok(ValidatorStatus::Applied);
     }
 
     if let Err(error) = validate_rule(validation, resolved_field, value) {
         collector.record_error(error)?;
-        return Ok(ValidationStatus::Applied);
+        return Ok(ValidatorStatus::Applied);
     }
 
-    validate_nested_validations(validation, resolved_field, value, collector)?;
-    Ok(ValidationStatus::Applied)
+    validate_nested_validators(validation, resolved_field, value, collector)?;
+    Ok(ValidatorStatus::Applied)
 }
 
-fn validate_nested_validations(
-    validation: &Validation,
+fn validate_nested_validators(
+    validation: &FieldValidator,
     field: &str,
     value: &Value,
-    collector: &mut ValidationCollector,
+    collector: &mut ValidatorCollector,
 ) -> Result<(), SpiderError> {
-    if !validation.object_validations.is_empty() {
-        validate_object_validations(field, value, &validation.object_validations, collector)?;
+    if !validation.object_fields.is_empty() {
+        validate_object_fields(field, value, &validation.object_fields, collector)?;
     }
 
-    if !validation.each_validations.is_empty() {
-        validate_each_validations(field, value, &validation.each_validations, collector)?;
-    }
-
-    if !validation.groups.is_empty() {
-        validate_validation_groups(field, value, &validation.groups, collector)?;
+    if !validation.each_fields.is_empty() {
+        validate_each_fields(field, value, &validation.each_fields, collector)?;
     }
 
     Ok(())
 }
 
-fn validate_object_validations(
+fn validate_object_fields(
     field: &str,
     value: &Value,
-    validations: &[Validation],
-    collector: &mut ValidationCollector,
+    fields: &[FieldValidator],
+    collector: &mut ValidatorCollector,
 ) -> Result<(), SpiderError> {
-    validate_scoped_validations(
+    validate_scoped_validators(
         field,
         value,
-        validations,
+        fields,
         collector,
-        "object validations only support object values",
+        "object fields only support object values",
     )
 }
 
-fn validate_each_validations(
+fn validate_each_fields(
     field: &str,
     value: &Value,
-    validations: &[Validation],
-    collector: &mut ValidationCollector,
+    fields: &[FieldValidator],
+    collector: &mut ValidatorCollector,
 ) -> Result<(), SpiderError> {
     let Value::Array(items) = value else {
         collector.record_error(SpiderError::parse(format!(
-            "validation failed for field {}: each validations only support list values",
+            "validation failed for field {}: each fields only support list values",
             field
         )))?;
         return Ok(());
@@ -810,7 +679,7 @@ fn validate_each_validations(
 
     for (index, item) in items.iter().enumerate() {
         let item_field = append_index_path(field, index);
-        for validation in validations {
+        for validation in fields {
             let resolved_values = match resolve_nested_field_values(
                 item_field.as_str(),
                 item,
@@ -835,23 +704,23 @@ fn validate_each_validations(
     Ok(())
 }
 
-fn validate_scoped_validations(
+fn validate_scoped_validators(
     scope_field: &str,
     scope_value: &Value,
-    validations: &[Validation],
-    collector: &mut ValidationCollector,
+    validators: &[FieldValidator],
+    collector: &mut ValidatorCollector,
     non_object_message: &str,
 ) -> Result<(), SpiderError> {
     let Value::Object(_) = scope_value else {
         collector.record_error(SpiderError::parse(format!(
             "validation failed for field {}: {}",
-            display_validation_field(scope_field),
+            display_validator_field(scope_field),
             non_object_message
         )))?;
         return Ok(());
     };
 
-    for validation in validations {
+    for validation in validators {
         let resolved_values = match resolve_scoped_field_values(
             scope_field,
             scope_value,
@@ -875,159 +744,76 @@ fn validate_scoped_validations(
     Ok(())
 }
 
-fn validate_validation_groups(
-    scope_field: &str,
-    scope_value: &Value,
-    groups: &[ValidationGroup],
-    collector: &mut ValidationCollector,
+fn validate_relation(
+    fields: &BTreeMap<String, Value>,
+    relation: &Relation,
 ) -> Result<(), SpiderError> {
-    let Value::Object(_) = scope_value else {
-        collector.record_error(SpiderError::parse(format!(
-            "validation failed for field {}: validation groups only support object values",
-            display_validation_field(scope_field)
-        )))?;
-        return Ok(());
-    };
-
-    for group in groups {
-        validate_validation_group(scope_field, scope_value, group, collector)?;
-    }
-
-    Ok(())
-}
-
-fn validate_validation_group(
-    scope_field: &str,
-    scope_value: &Value,
-    group: &ValidationGroup,
-    collector: &mut ValidationCollector,
-) -> Result<(), SpiderError> {
-    if group.validations.is_empty() {
+    if relation.fields.is_empty() {
         return Ok(());
     }
 
-    match group.kind {
-        ValidationGroupKind::AllOf => validate_scoped_validations(
-            scope_field,
-            scope_value,
-            &group.validations,
-            collector,
-            "validation groups only support object values",
-        ),
-        ValidationGroupKind::AnyOf
-        | ValidationGroupKind::OneOf
-        | ValidationGroupKind::MutuallyExclusive => {
-            let checks = group
-                .validations
-                .iter()
-                .map(|validation| {
-                    validate_scoped_validation_check(scope_field, scope_value, validation)
-                })
-                .collect::<Vec<_>>();
-            let passed = checks
-                .iter()
-                .filter(|check| check.status == ValidationStatus::Applied && check.report.is_ok())
-                .count();
-            let message = match group.kind {
-                ValidationGroupKind::AnyOf if passed >= 1 => return Ok(()),
-                ValidationGroupKind::OneOf if passed == 1 => return Ok(()),
-                ValidationGroupKind::MutuallyExclusive if passed <= 1 => return Ok(()),
-                ValidationGroupKind::AnyOf => format!(
-                    "group {} expected at least one validation to pass, but got 0 ({})",
-                    group.kind.as_str(),
-                    summarize_validation_checks(&checks)
-                ),
-                ValidationGroupKind::OneOf => format!(
-                    "group {} expected exactly one validation to pass, but got {}",
-                    group.kind.as_str(),
-                    passed
-                ),
-                ValidationGroupKind::MutuallyExclusive => format!(
-                    "group {} expected at most one validation to pass, but got {}",
-                    group.kind.as_str(),
-                    passed
-                ),
-                ValidationGroupKind::AllOf => unreachable!(),
-            };
+    let mut present = Vec::new();
+    let mut missing = Vec::new();
 
-            collector.record_error(SpiderError::parse(format!(
-                "validation failed for field {}: {}",
-                display_validation_field(scope_field),
-                message
-            )))?;
-            Ok(())
+    for field in &relation.fields {
+        let resolved_values = resolve_field_values(fields, field)?;
+        let has_value = resolved_values.iter().any(|resolved| {
+            resolved
+                .value
+                .is_some_and(|value| !matches!(value, Value::Null))
+        });
+
+        if has_value {
+            present.push(field.as_str());
+        } else {
+            missing.push(field.as_str());
         }
     }
-}
 
-fn validate_scoped_validation_check(
-    scope_field: &str,
-    scope_value: &Value,
-    validation: &Validation,
-) -> ScopedValidationCheck {
-    let mut collector = ValidationCollector::collect_all();
-    let status =
-        match resolve_scoped_field_values(scope_field, scope_value, validation.field.as_str()) {
-            Ok(resolved_values) => match validate_field(
-                validation,
-                scope_field,
-                scope_value,
-                &resolved_values,
-                &mut collector,
-            ) {
-                Ok(status) => status,
-                Err(error) => {
-                    let _ = collector.record_error(error);
-                    ValidationStatus::Applied
-                }
-            },
-            Err(error) => {
-                let _ = collector.record_error(error);
-                ValidationStatus::Applied
-            }
-        };
-
-    ScopedValidationCheck {
-        status,
-        report: collector.into_report(),
+    let count = present.len();
+    let total = relation.fields.len();
+    match relation.kind {
+        RelationEnum::And if count == total => Ok(()),
+        RelationEnum::Or if count >= 1 => Ok(()),
+        RelationEnum::One if count == 1 => Ok(()),
+        RelationEnum::And => Err(relation_error(
+            relation,
+            format!(
+                "expected all fields to be present, missing: {}",
+                missing.join(", ")
+            ),
+        )),
+        RelationEnum::Or => Err(relation_error(
+            relation,
+            "expected at least one field to be present".to_string(),
+        )),
+        RelationEnum::One => Err(relation_error(
+            relation,
+            format!("expected exactly one field to be present, but got {count}"),
+        )),
     }
 }
 
-fn summarize_validation_checks(checks: &[ScopedValidationCheck]) -> String {
-    let parts = checks
-        .iter()
-        .flat_map(|check| check.report.issues.iter().take(1))
-        .map(|issue| {
-            if issue.field.is_empty() {
-                issue.message.clone()
-            } else {
-                format!(
-                    "{}: {}",
-                    summarize_issue_field(issue.field.as_str()),
-                    issue.message
-                )
-            }
-        })
-        .collect::<Vec<_>>();
-
-    if parts.is_empty() {
-        return "all validation branches were skipped".to_string();
-    }
-
-    parts.join("; ")
+fn relation_error(relation: &Relation, message: String) -> SpiderError {
+    SpiderError::parse(format!(
+        "validation failed for field {}: relation {} {}",
+        relation_label(relation),
+        relation.kind.as_str(),
+        message
+    ))
 }
 
-fn summarize_issue_field(field: &str) -> &str {
-    field.strip_prefix("$.").unwrap_or(field)
+fn relation_label(relation: &Relation) -> String {
+    format!("[{}]", relation.fields.join(", "))
 }
 
-fn validation_conditions_match(
+fn validator_conditions_match(
     scope_field: &str,
     scope_value: &Value,
-    conditions: &[ValidationCondition],
+    conditions: &[Condition],
 ) -> Result<bool, SpiderError> {
     for condition in conditions {
-        if !validation_condition_matches(scope_field, scope_value, condition)? {
+        if !validator_condition_matches(scope_field, scope_value, condition)? {
             return Ok(false);
         }
     }
@@ -1035,10 +821,10 @@ fn validation_conditions_match(
     Ok(true)
 }
 
-fn validation_condition_matches(
+fn validator_condition_matches(
     scope_field: &str,
     scope_value: &Value,
-    condition: &ValidationCondition,
+    condition: &Condition,
 ) -> Result<bool, SpiderError> {
     let resolved_values =
         resolve_scoped_field_values(scope_field, scope_value, condition.field.as_str())?;
@@ -1049,60 +835,60 @@ fn validation_condition_matches(
         .collect::<Vec<_>>();
 
     match condition.kind {
-        ValidationConditionKind::Exists => Ok(!present_values.is_empty()),
-        ValidationConditionKind::Missing => Ok(present_values.is_empty()),
-        ValidationConditionKind::Equals => {
-            let expected = validation_condition_expected_value(condition)?;
+        ConditionEnum::Exists => Ok(!present_values.is_empty()),
+        ConditionEnum::Missing => Ok(present_values.is_empty()),
+        ConditionEnum::Equals => {
+            let expected = validator_condition_expected_value(condition)?;
             Ok(present_values.iter().any(|value| *value == expected))
         }
-        ValidationConditionKind::NotEquals => {
-            let expected = validation_condition_expected_value(condition)?;
+        ConditionEnum::NotEquals => {
+            let expected = validator_condition_expected_value(condition)?;
             Ok(!present_values.is_empty() && present_values.iter().all(|value| *value != expected))
         }
     }
 }
 
-fn validation_condition_expected_value(
-    condition: &ValidationCondition,
-) -> Result<&Value, SpiderError> {
+fn validator_condition_expected_value(condition: &Condition) -> Result<&Value, SpiderError> {
     condition.value.as_ref().ok_or_else(|| {
         SpiderError::parse(format!(
             "validation condition {} on field {} requires a comparison value",
             condition.kind.as_str(),
-            display_validation_field(condition.field.as_str())
+            display_validator_field(condition.field.as_str())
         ))
     })
 }
 
-fn apply_validation_transforms(
+fn apply_validator_transforms(
     field: &str,
     mut value: Value,
-    transforms: &[ValidationTransform],
+    transforms: &[Transform],
 ) -> Result<Value, SpiderError> {
     for transform in transforms {
-        value = apply_validation_transform(field, value, *transform)?;
+        value = apply_validator_transform(field, value, *transform)?;
     }
 
     Ok(value)
 }
 
-fn apply_validation_transform(
+fn apply_validator_transform(
     field: &str,
     value: Value,
-    transform: ValidationTransform,
+    transform: Transform,
 ) -> Result<Value, SpiderError> {
     match transform {
-        ValidationTransform::Trim => trim_validation_value(field, value),
-        ValidationTransform::NormalizeWhitespace => {
-            normalize_whitespace_validation_value(field, value)
-        }
-        ValidationTransform::ParseNumber => parse_number_validation_value(field, value),
-        ValidationTransform::ParseBool => parse_bool_validation_value(field, value),
-        ValidationTransform::ParseDatetime => parse_datetime_validation_value(field, value),
+        Transform::Trim => trim_validator_value(field, value),
+        Transform::NormalizeWhitespace => normalize_whitespace_validator_value(field, value),
+        Transform::ParseNumber => parse_number_validator_value(field, value),
+        Transform::ParseBool => parse_bool_validator_value(field, value),
+        Transform::ParseDatetime => parse_datetime_validator_value(field, value),
     }
 }
 
-fn validate_rule(validation: &Validation, field: &str, value: &Value) -> Result<(), SpiderError> {
+fn validate_rule(
+    validation: &FieldValidator,
+    field: &str,
+    value: &Value,
+) -> Result<(), SpiderError> {
     if let Some(pattern) = validation.rule.regex.as_deref() {
         validate_regex(field, value, pattern)?;
     }
@@ -1349,24 +1135,19 @@ fn validate_required_fields(
     )))
 }
 
-fn trim_validation_value(field: &str, value: Value) -> Result<Value, SpiderError> {
+fn trim_validator_value(field: &str, value: Value) -> Result<Value, SpiderError> {
     let Value::String(text) = value else {
-        return Err(transform_type_error(
-            field,
-            ValidationTransform::Trim,
-            &value,
-            "text",
-        ));
+        return Err(transform_type_error(field, Transform::Trim, &value, "text"));
     };
 
     Ok(Value::String(text.trim().to_string()))
 }
 
-fn normalize_whitespace_validation_value(field: &str, value: Value) -> Result<Value, SpiderError> {
+fn normalize_whitespace_validator_value(field: &str, value: Value) -> Result<Value, SpiderError> {
     let Value::String(text) = value else {
         return Err(transform_type_error(
             field,
-            ValidationTransform::NormalizeWhitespace,
+            Transform::NormalizeWhitespace,
             &value,
             "text",
         ));
@@ -1375,7 +1156,7 @@ fn normalize_whitespace_validation_value(field: &str, value: Value) -> Result<Va
     Ok(Value::String(normalize_whitespace_text(&text)))
 }
 
-fn parse_number_validation_value(field: &str, value: Value) -> Result<Value, SpiderError> {
+fn parse_number_validator_value(field: &str, value: Value) -> Result<Value, SpiderError> {
     match value {
         Value::Number(value) => Ok(Value::Number(value)),
         Value::String(text) => {
@@ -1383,7 +1164,7 @@ fn parse_number_validation_value(field: &str, value: Value) -> Result<Value, Spi
             if normalized.is_empty() {
                 return Err(transform_error(
                     field,
-                    ValidationTransform::ParseNumber,
+                    Transform::ParseNumber,
                     "empty string",
                 ));
             }
@@ -1391,54 +1172,48 @@ fn parse_number_validation_value(field: &str, value: Value) -> Result<Value, Spi
             normalized
                 .parse::<f64>()
                 .map(Value::Number)
-                .map_err(|error| {
-                    transform_error(field, ValidationTransform::ParseNumber, &error.to_string())
-                })
+                .map_err(|error| transform_error(field, Transform::ParseNumber, &error.to_string()))
         }
         other => Err(transform_type_error(
             field,
-            ValidationTransform::ParseNumber,
+            Transform::ParseNumber,
             &other,
             "string or number",
         )),
     }
 }
 
-fn parse_bool_validation_value(field: &str, value: Value) -> Result<Value, SpiderError> {
+fn parse_bool_validator_value(field: &str, value: Value) -> Result<Value, SpiderError> {
     match value {
         Value::Bool(value) => Ok(Value::Bool(value)),
         Value::String(text) => {
             let normalized = text.trim();
             if normalized.is_empty() {
-                return Err(transform_error(
-                    field,
-                    ValidationTransform::ParseBool,
-                    "empty string",
-                ));
+                return Err(transform_error(field, Transform::ParseBool, "empty string"));
             }
 
             parse_bool_text(normalized).map(Value::Bool).ok_or_else(|| {
                 transform_error(
                     field,
-                    ValidationTransform::ParseBool,
+                    Transform::ParseBool,
                     &format!("expected true/false/1/0, got {normalized:?}"),
                 )
             })
         }
         other => Err(transform_type_error(
             field,
-            ValidationTransform::ParseBool,
+            Transform::ParseBool,
             &other,
             "string or bool",
         )),
     }
 }
 
-fn parse_datetime_validation_value(field: &str, value: Value) -> Result<Value, SpiderError> {
+fn parse_datetime_validator_value(field: &str, value: Value) -> Result<Value, SpiderError> {
     let Value::String(text) = value else {
         return Err(transform_type_error(
             field,
-            ValidationTransform::ParseDatetime,
+            Transform::ParseDatetime,
             &value,
             "text",
         ));
@@ -1448,17 +1223,17 @@ fn parse_datetime_validation_value(field: &str, value: Value) -> Result<Value, S
     if normalized.is_empty() {
         return Err(transform_error(
             field,
-            ValidationTransform::ParseDatetime,
+            Transform::ParseDatetime,
             "empty string",
         ));
     }
 
-    parse_validation_datetime_text(normalized)
+    parse_validator_datetime_text(normalized)
         .map(Value::String)
-        .map_err(|message| transform_error(field, ValidationTransform::ParseDatetime, &message))
+        .map_err(|message| transform_error(field, Transform::ParseDatetime, &message))
 }
 
-fn parse_validation_datetime_text(text: &str) -> Result<String, String> {
+fn parse_validator_datetime_text(text: &str) -> Result<String, String> {
     if let Ok(timestamp) = text.parse::<Timestamp>() {
         return Ok(timestamp.to_string());
     }
@@ -1504,7 +1279,7 @@ fn normalize_whitespace_text(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn transform_error(field: &str, transform: ValidationTransform, detail: &str) -> SpiderError {
+fn transform_error(field: &str, transform: Transform, detail: &str) -> SpiderError {
     SpiderError::parse(format!(
         "validation failed for field {}: transform {} failed: {}",
         field,
@@ -1515,7 +1290,7 @@ fn transform_error(field: &str, transform: ValidationTransform, detail: &str) ->
 
 fn transform_type_error(
     field: &str,
-    transform: ValidationTransform,
+    transform: Transform,
     value: &Value,
     expected: &str,
 ) -> SpiderError {
@@ -1623,7 +1398,7 @@ fn resolve_scoped_field_values<'a>(
 ) -> Result<Vec<ResolvedFieldValue<'a>>, SpiderError> {
     if child_field.is_empty() {
         return Ok(vec![ResolvedFieldValue {
-            field: display_validation_field(scope_field).to_string(),
+            field: display_validator_field(scope_field).to_string(),
             value: Some(scope_value),
         }]);
     }
@@ -1848,7 +1623,7 @@ fn prefix_nested_field(parent: &str, child: &str) -> String {
     format!("{parent}.{child}")
 }
 
-fn display_validation_field(field: &str) -> &str {
+fn display_validator_field(field: &str) -> &str {
     if field.is_empty() { "$" } else { field }
 }
 
@@ -1910,20 +1685,20 @@ mod tests {
             ("title".to_string(), Value::String("hello".to_string())),
             ("published".to_string(), Value::Bool(true)),
         ]);
-        let validations = vec![
-            Validation::new("title", ValidationType::Text).with_required(true),
-            Validation::new("published", ValidationType::Bool).with_required(true),
+        let validators = vec![
+            FieldValidator::new("title", Type::Text).required(),
+            FieldValidator::new("published", Type::Bool).required(),
         ];
 
-        assert!(validate_fields(&fields, &validations).is_ok());
+        assert!(validate_fields(&fields, &validators).is_ok());
     }
 
     #[test]
     fn validate_fields_rejects_missing_required_field() {
         let fields = BTreeMap::new();
-        let validations = vec![Validation::new("title", ValidationType::Text).with_required(true)];
+        let validators = vec![FieldValidator::new("title", Type::Text).required()];
 
-        let error = validate_fields(&fields, &validations).unwrap_err();
+        let error = validate_fields(&fields, &validators).unwrap_err();
 
         assert_eq!(
             error,
@@ -1934,9 +1709,9 @@ mod tests {
     #[test]
     fn validate_fields_rejects_type_mismatch() {
         let fields = BTreeMap::from([("title".to_string(), Value::Number(1.0))]);
-        let validations = vec![Validation::new("title", ValidationType::Text).with_required(true)];
+        let validators = vec![FieldValidator::new("title", Type::Text).required()];
 
-        let error = validate_fields(&fields, &validations).unwrap_err();
+        let error = validate_fields(&fields, &validators).unwrap_err();
 
         assert_eq!(
             error,
@@ -1947,20 +1722,21 @@ mod tests {
     #[test]
     fn validate_fields_skips_missing_optional_field() {
         let fields = BTreeMap::new();
-        let validations = vec![Validation::new("title", ValidationType::Text).with_min_length(3)];
+        let validators = vec![FieldValidator::new("title", Type::Text).min_length(3)];
 
-        assert!(validate_fields(&fields, &validations).is_ok());
+        assert!(validate_fields(&fields, &validators).is_ok());
     }
 
     #[test]
     fn validate_fields_requires_field_when_required_when_equals_matches() {
         let fields = BTreeMap::from([("type".to_string(), Value::String("video".to_string()))]);
-        let validations = vec![
-            Validation::new("duration", ValidationType::Number)
-                .with_required_when_equals("type", Value::String("video".to_string())),
+        let validators = vec![
+            FieldValidator::new("duration", Type::Number)
+                .required()
+                .apply_when_equals("type", Value::String("video".to_string())),
         ];
 
-        let error = validate_fields(&fields, &validations).unwrap_err();
+        let error = validate_fields(&fields, &validators).unwrap_err();
 
         assert_eq!(
             error,
@@ -1973,12 +1749,13 @@ mod tests {
     #[test]
     fn validate_fields_skips_required_when_equals_when_condition_does_not_match() {
         let fields = BTreeMap::from([("type".to_string(), Value::String("article".to_string()))]);
-        let validations = vec![
-            Validation::new("duration", ValidationType::Number)
-                .with_required_when_equals("type", Value::String("video".to_string())),
+        let validators = vec![
+            FieldValidator::new("duration", Type::Number)
+                .required()
+                .apply_when_equals("type", Value::String("video".to_string())),
         ];
 
-        assert!(validate_fields(&fields, &validations).is_ok());
+        assert!(validate_fields(&fields, &validators).is_ok());
     }
 
     #[test]
@@ -1987,13 +1764,13 @@ mod tests {
             ("title".to_string(), Value::String("Kun".to_string())),
             ("summary".to_string(), Value::String("bad".to_string())),
         ]);
-        let validations = vec![
-            Validation::new("summary", ValidationType::Text)
-                .with_optional_when_exists("title")
-                .with_min_length(5),
+        let validators = vec![
+            FieldValidator::new("summary", Type::Text)
+                .apply_when_exists("title")
+                .min_length(5),
         ];
 
-        let error = validate_fields(&fields, &validations).unwrap_err();
+        let error = validate_fields(&fields, &validators).unwrap_err();
 
         assert_eq!(
             error,
@@ -2006,13 +1783,13 @@ mod tests {
     #[test]
     fn validate_fields_skips_optional_validation_when_exists_condition_is_missing() {
         let fields = BTreeMap::from([("summary".to_string(), Value::String("bad".to_string()))]);
-        let validations = vec![
-            Validation::new("summary", ValidationType::Text)
-                .with_optional_when_exists("title")
-                .with_min_length(5),
+        let validators = vec![
+            FieldValidator::new("summary", Type::Text)
+                .apply_when_exists("title")
+                .min_length(5),
         ];
 
-        assert!(validate_fields(&fields, &validations).is_ok());
+        assert!(validate_fields(&fields, &validators).is_ok());
     }
 
     #[test]
@@ -2024,13 +1801,16 @@ mod tests {
                 Value::String("https://example.com/video.mp4".to_string()),
             )])),
         )]);
-        let validations = vec![
-            Validation::new("asset", ValidationType::Object)
-                .with_object_validations([Validation::new("checksum", ValidationType::Text)
-                    .with_required_when_missing("signature")]),
+        let validators = vec![
+            FieldValidator::new("asset", Type::Object).object_fields([FieldValidator::new(
+                "checksum",
+                Type::Text,
+            )
+            .required()
+            .apply_when_missing("signature")]),
         ];
 
-        let error = validate_fields(&fields, &validations).unwrap_err();
+        let error = validate_fields(&fields, &validators).unwrap_err();
 
         assert_eq!(
             error,
@@ -2049,24 +1829,28 @@ mod tests {
                 Value::String("sha256:abc".to_string()),
             )])),
         )]);
-        let validations = vec![
-            Validation::new("asset", ValidationType::Object)
-                .with_object_validations([Validation::new("checksum", ValidationType::Text)
-                    .with_required_when_missing("signature")]),
+        let validators = vec![
+            FieldValidator::new("asset", Type::Object).object_fields([FieldValidator::new(
+                "checksum",
+                Type::Text,
+            )
+            .required()
+            .apply_when_missing("signature")]),
         ];
 
-        assert!(validate_fields(&fields, &validations).is_ok());
+        assert!(validate_fields(&fields, &validators).is_ok());
     }
 
     #[test]
     fn validate_fields_requires_field_when_required_when_not_equals_matches() {
         let fields = BTreeMap::from([("kind".to_string(), Value::String("news".to_string()))]);
-        let validations = vec![
-            Validation::new("summary", ValidationType::Text)
-                .with_required_when_not_equals("kind", Value::String("redirect".to_string())),
+        let validators = vec![
+            FieldValidator::new("summary", Type::Text)
+                .required()
+                .apply_when_not_equals("kind", Value::String("redirect".to_string())),
         ];
 
-        let error = validate_fields(&fields, &validations).unwrap_err();
+        let error = validate_fields(&fields, &validators).unwrap_err();
 
         assert_eq!(
             error,
@@ -2079,37 +1863,36 @@ mod tests {
     #[test]
     fn validate_fields_skips_required_when_not_equals_when_condition_field_is_missing() {
         let fields = BTreeMap::new();
-        let validations = vec![
-            Validation::new("summary", ValidationType::Text)
-                .with_required_when_not_equals("kind", Value::String("redirect".to_string())),
+        let validators = vec![
+            FieldValidator::new("summary", Type::Text)
+                .required()
+                .apply_when_not_equals("kind", Value::String("redirect".to_string())),
         ];
 
-        assert!(validate_fields(&fields, &validations).is_ok());
+        assert!(validate_fields(&fields, &validators).is_ok());
     }
 
     #[test]
     fn validate_fields_accepts_number_transform_before_numeric_rules() {
         let fields = BTreeMap::from([("count".to_string(), Value::String(" 42 ".to_string()))]);
-        let validations = vec![
-            Validation::new("count", ValidationType::Number)
-                .with_transform(ValidationTransform::ParseNumber)
-                .with_min(10.0)
-                .with_max(100.0),
+        let validators = vec![
+            FieldValidator::new("count", Type::Number)
+                .transform(Transform::ParseNumber)
+                .min(10.0)
+                .max(100.0),
         ];
 
-        assert!(validate_fields(&fields, &validations).is_ok());
+        assert!(validate_fields(&fields, &validators).is_ok());
     }
 
     #[test]
     fn validate_fields_accepts_bool_transform_before_type_check() {
         let fields =
             BTreeMap::from([("published".to_string(), Value::String(" true ".to_string()))]);
-        let validations = vec![
-            Validation::new("published", ValidationType::Bool)
-                .with_transform(ValidationTransform::ParseBool),
-        ];
+        let validators =
+            vec![FieldValidator::new("published", Type::Bool).transform(Transform::ParseBool)];
 
-        assert!(validate_fields(&fields, &validations).is_ok());
+        assert!(validate_fields(&fields, &validators).is_ok());
     }
 
     #[test]
@@ -2118,13 +1901,13 @@ mod tests {
             "published_at".to_string(),
             Value::String("2026-04-01T08:30:45+08:00".to_string()),
         )]);
-        let validations = vec![
-            Validation::new("published_at", ValidationType::Text)
-                .with_transform(ValidationTransform::ParseDatetime)
-                .with_enum([Value::String("2026-04-01T00:30:45Z".to_string())]),
+        let validators = vec![
+            FieldValidator::new("published_at", Type::Text)
+                .transform(Transform::ParseDatetime)
+                .enum_values([Value::String("2026-04-01T00:30:45Z".to_string())]),
         ];
 
-        assert!(validate_fields(&fields, &validations).is_ok());
+        assert!(validate_fields(&fields, &validators).is_ok());
     }
 
     #[test]
@@ -2133,28 +1916,23 @@ mod tests {
             "title".to_string(),
             Value::String("  Hello   Kun  ".to_string()),
         )]);
-        let validations = vec![
-            Validation::new("title", ValidationType::Text)
-                .with_transforms([
-                    ValidationTransform::Trim,
-                    ValidationTransform::NormalizeWhitespace,
-                ])
-                .with_regex(r"^Hello Kun$"),
+        let validators = vec![
+            FieldValidator::new("title", Type::Text)
+                .transforms([Transform::Trim, Transform::NormalizeWhitespace])
+                .regex(r"^Hello Kun$"),
         ];
 
-        assert!(validate_fields(&fields, &validations).is_ok());
+        assert!(validate_fields(&fields, &validators).is_ok());
     }
 
     #[test]
     fn validate_fields_rejects_failed_number_transform() {
         let fields =
             BTreeMap::from([("count".to_string(), Value::String("forty-two".to_string()))]);
-        let validations = vec![
-            Validation::new("count", ValidationType::Number)
-                .with_transform(ValidationTransform::ParseNumber),
-        ];
+        let validators =
+            vec![FieldValidator::new("count", Type::Number).transform(Transform::ParseNumber)];
 
-        let error = validate_fields(&fields, &validations).unwrap_err();
+        let error = validate_fields(&fields, &validators).unwrap_err();
 
         assert_eq!(
             error,
@@ -2168,12 +1946,10 @@ mod tests {
     #[test]
     fn validate_fields_rejects_transform_type_mismatch() {
         let fields = BTreeMap::from([("count".to_string(), Value::Bool(true))]);
-        let validations = vec![
-            Validation::new("count", ValidationType::Number)
-                .with_transform(ValidationTransform::ParseNumber),
-        ];
+        let validators =
+            vec![FieldValidator::new("count", Type::Number).transform(Transform::ParseNumber)];
 
-        let error = validate_fields(&fields, &validations).unwrap_err();
+        let error = validate_fields(&fields, &validators).unwrap_err();
 
         assert_eq!(
             error,
@@ -2185,7 +1961,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_fields_accepts_object_validations() {
+    fn validate_fields_accepts_object_fields() {
         let fields = BTreeMap::from([(
             "meta".to_string(),
             Value::Object(BTreeMap::from([
@@ -2199,32 +1975,34 @@ mod tests {
                 ),
             ])),
         )]);
-        let validations = vec![
-            Validation::new("meta", ValidationType::Object)
-                .with_required_fields(["title", "published_at"])
-                .with_object_validations([
-                    Validation::new("title", ValidationType::Text)
-                        .with_transform(ValidationTransform::Trim)
-                        .with_min_length(3),
-                    Validation::new("published_at", ValidationType::Text)
-                        .with_transform(ValidationTransform::ParseDatetime)
-                        .with_enum([Value::String("2026-04-01T00:30:45Z".to_string())]),
+        let validators = vec![
+            FieldValidator::new("meta", Type::Object)
+                .required_fields(["title", "published_at"])
+                .object_fields([
+                    FieldValidator::new("title", Type::Text)
+                        .transform(Transform::Trim)
+                        .min_length(3),
+                    FieldValidator::new("published_at", Type::Text)
+                        .transform(Transform::ParseDatetime)
+                        .enum_values([Value::String("2026-04-01T00:30:45Z".to_string())]),
                 ]),
         ];
 
-        assert!(validate_fields(&fields, &validations).is_ok());
+        assert!(validate_fields(&fields, &validators).is_ok());
     }
 
     #[test]
     fn validate_fields_skips_missing_optional_nested_object_field() {
         let fields = BTreeMap::from([("meta".to_string(), Value::Object(BTreeMap::new()))]);
-        let validations = vec![
-            Validation::new("meta", ValidationType::Object).with_object_validations([
-                Validation::new("subtitle", ValidationType::Text).with_min_length(3),
-            ]),
+        let validators = vec![
+            FieldValidator::new("meta", Type::Object).object_fields([FieldValidator::new(
+                "subtitle",
+                Type::Text,
+            )
+            .min_length(3)]),
         ];
 
-        assert!(validate_fields(&fields, &validations).is_ok());
+        assert!(validate_fields(&fields, &validators).is_ok());
     }
 
     #[test]
@@ -2236,13 +2014,16 @@ mod tests {
                 Value::String("video".to_string()),
             )])),
         )]);
-        let validations = vec![
-            Validation::new("meta", ValidationType::Object)
-                .with_object_validations([Validation::new("duration", ValidationType::Number)
-                    .with_required_when_equals("type", Value::String("video".to_string()))]),
+        let validators = vec![
+            FieldValidator::new("meta", Type::Object).object_fields([FieldValidator::new(
+                "duration",
+                Type::Number,
+            )
+            .required()
+            .apply_when_equals("type", Value::String("video".to_string()))]),
         ];
 
-        let error = validate_fields(&fields, &validations).unwrap_err();
+        let error = validate_fields(&fields, &validators).unwrap_err();
 
         assert_eq!(
             error,
@@ -2253,7 +2034,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_fields_accepts_each_validations_for_object_items() {
+    fn validate_fields_accepts_each_fields_for_object_items() {
         let fields = BTreeMap::from([(
             "articles".to_string(),
             Value::Array(vec![
@@ -2273,24 +2054,24 @@ mod tests {
                 ])),
             ]),
         )]);
-        let validations = vec![
-            Validation::new("articles", ValidationType::List)
-                .with_min_items(2)
-                .with_each_validations([
-                    Validation::new("title", ValidationType::Text)
-                        .with_transform(ValidationTransform::Trim)
-                        .with_min_length(5),
-                    Validation::new("score", ValidationType::Number)
-                        .with_transform(ValidationTransform::ParseNumber)
-                        .with_min(10.0),
+        let validators = vec![
+            FieldValidator::new("articles", Type::List)
+                .min_items(2)
+                .each_fields([
+                    FieldValidator::new("title", Type::Text)
+                        .transform(Transform::Trim)
+                        .min_length(5),
+                    FieldValidator::new("score", Type::Number)
+                        .transform(Transform::ParseNumber)
+                        .min(10.0),
                 ]),
         ];
 
-        assert!(validate_fields(&fields, &validations).is_ok());
+        assert!(validate_fields(&fields, &validators).is_ok());
     }
 
     #[test]
-    fn validate_fields_accepts_each_validations_for_scalar_items() {
+    fn validate_fields_accepts_each_fields_for_scalar_items() {
         let fields = BTreeMap::from([(
             "tags".to_string(),
             Value::Array(vec![
@@ -2298,20 +2079,20 @@ mod tests {
                 Value::String("policy".to_string()),
             ]),
         )]);
-        let validations = vec![
-            Validation::new("tags", ValidationType::List).with_each_validations([Validation::new(
+        let validators = vec![
+            FieldValidator::new("tags", Type::List).each_fields([FieldValidator::new(
                 "",
-                ValidationType::Text,
+                Type::Text,
             )
-            .with_transform(ValidationTransform::Trim)
-            .with_min_length(4)]),
+            .transform(Transform::Trim)
+            .min_length(4)]),
         ];
 
-        assert!(validate_fields(&fields, &validations).is_ok());
+        assert!(validate_fields(&fields, &validators).is_ok());
     }
 
     #[test]
-    fn validate_fields_report_collects_multiple_issues() {
+    fn validate_fields_fails_fast_on_first_issue() {
         let fields = BTreeMap::from([
             ("title".to_string(), Value::String(" a ".to_string())),
             ("count".to_string(), Value::String("bad".to_string())),
@@ -2323,261 +2104,153 @@ mod tests {
                 ]),
             ),
         ]);
-        let validations = vec![
-            Validation::new("title", ValidationType::Text)
-                .with_transform(ValidationTransform::Trim)
-                .with_min_length(2),
-            Validation::new("count", ValidationType::Number)
-                .with_transform(ValidationTransform::ParseNumber),
-            Validation::new("articles", ValidationType::List).with_each_validations([
-                Validation::new("title", ValidationType::Text).with_required(true),
-            ]),
+        let validators = vec![
+            FieldValidator::new("title", Type::Text)
+                .transform(Transform::Trim)
+                .min_length(2),
+            FieldValidator::new("count", Type::Number).transform(Transform::ParseNumber),
+            FieldValidator::new("articles", Type::List).each_fields([FieldValidator::new(
+                "title",
+                Type::Text,
+            )
+            .required()]),
         ];
 
-        let report = validate_fields_report(&fields, &validations);
+        let error = validate_fields(&fields, &validators).unwrap_err();
 
-        assert!(report.is_err());
         assert_eq!(
-            report.issues,
-            vec![
-                ValidationIssue {
-                    field: "title".to_string(),
-                    message: "text length must be >= 2".to_string(),
-                },
-                ValidationIssue {
-                    field: "count".to_string(),
-                    message: "transform parse_number failed: invalid float literal".to_string(),
-                },
-                ValidationIssue {
-                    field: "articles[0].title".to_string(),
-                    message: "value is required".to_string(),
-                },
-                ValidationIssue {
-                    field: "articles[1].title".to_string(),
-                    message: "cannot access field `title` from text at articles[1]".to_string(),
-                },
-            ]
-        );
-        assert_eq!(
-            report.first_error(),
-            Some(SpiderError::Parse(
+            error,
+            SpiderError::Parse(
                 "validation failed for field title: text length must be >= 2".to_string()
-            ))
+            )
         );
     }
 
     #[test]
-    fn validate_fields_accepts_root_any_of_group() {
-        let fields = BTreeMap::from([(
-            "headline".to_string(),
-            Value::String("Kun update".to_string()),
-        )]);
-        let validations = vec![Validation::root().with_any_of([
-            Validation::new("title", ValidationType::Text).with_required(true),
-            Validation::new("headline", ValidationType::Text).with_required(true),
-        ])];
+    fn validate_field_relations_accepts_and_relation() {
+        let fields = BTreeMap::from([
+            (
+                "start_time".to_string(),
+                Value::String("2026-04-01".to_string()),
+            ),
+            (
+                "end_time".to_string(),
+                Value::String("2026-04-02".to_string()),
+            ),
+        ]);
 
-        assert!(validate_fields(&fields, &validations).is_ok());
+        assert!(
+            validate_field_relations(&fields, &[Relation::and(["start_time", "end_time"])]).is_ok()
+        );
     }
 
     #[test]
-    fn validate_fields_reject_root_any_of_group_when_none_match() {
+    fn validate_field_relations_rejects_and_relation_when_field_is_missing() {
+        let fields = BTreeMap::from([(
+            "start_time".to_string(),
+            Value::String("2026-04-01".to_string()),
+        )]);
+
+        let error = validate_field_relations(&fields, &[Relation::and(["start_time", "end_time"])])
+            .unwrap_err();
+
+        assert_eq!(
+            error,
+            SpiderError::Parse(
+                "validation failed for field [start_time, end_time]: relation and expected all fields to be present, missing: end_time"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn validate_field_relations_accepts_or_relation() {
+        let fields = BTreeMap::from([("phone".to_string(), Value::String("123456".to_string()))]);
+
+        assert!(validate_field_relations(&fields, &[Relation::or(["phone", "email"])]).is_ok());
+    }
+
+    #[test]
+    fn validate_field_relations_rejects_or_relation_when_none_are_present() {
         let fields = BTreeMap::new();
-        let validations = vec![Validation::root().with_any_of([
-            Validation::new("title", ValidationType::Text).with_required(true),
-            Validation::new("headline", ValidationType::Text).with_required(true),
-        ])];
-
-        let error = validate_fields(&fields, &validations).unwrap_err();
+        let error =
+            validate_field_relations(&fields, &[Relation::or(["phone", "email"])]).unwrap_err();
 
         assert_eq!(
             error,
             SpiderError::Parse(
-                "validation failed for field $: group any_of expected at least one validation to pass, but got 0 (title: value is required; headline: value is required)"
+                "validation failed for field [phone, email]: relation or expected at least one field to be present"
                     .to_string()
             )
         );
     }
 
     #[test]
-    fn validate_fields_reject_root_any_of_group_when_all_optional_branches_are_skipped() {
-        let fields = BTreeMap::new();
-        let validations = vec![Validation::root().with_any_of([
-            Validation::new("title", ValidationType::Text),
-            Validation::new("headline", ValidationType::Text),
-        ])];
+    fn validate_field_relations_accepts_one_relation() {
+        let fields = BTreeMap::from([(
+            "cover_url".to_string(),
+            Value::String("https://example.com/cover.jpg".to_string()),
+        )]);
 
-        let error = validate_fields(&fields, &validations).unwrap_err();
+        assert!(
+            validate_field_relations(&fields, &[Relation::one(["cover_url", "cover_file"])])
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn validate_field_relations_rejects_one_relation_when_multiple_are_present() {
+        let fields = BTreeMap::from([
+            (
+                "cover_url".to_string(),
+                Value::String("https://example.com/cover.jpg".to_string()),
+            ),
+            (
+                "cover_file".to_string(),
+                Value::String("/tmp/cover.jpg".to_string()),
+            ),
+        ]);
+
+        let error =
+            validate_field_relations(&fields, &[Relation::one(["cover_url", "cover_file"])])
+                .unwrap_err();
 
         assert_eq!(
             error,
             SpiderError::Parse(
-                "validation failed for field $: group any_of expected at least one validation to pass, but got 0 (all validation branches were skipped)"
+                "validation failed for field [cover_url, cover_file]: relation one expected exactly one field to be present, but got 2"
                     .to_string()
             )
         );
     }
 
     #[test]
-    fn validate_fields_accepts_root_one_of_group_with_one_optional_present_branch() {
-        let fields = BTreeMap::from([("headline".to_string(), Value::String("Kun".to_string()))]);
-        let validations = vec![Validation::root().with_one_of([
-            Validation::new("title", ValidationType::Text),
-            Validation::new("headline", ValidationType::Text),
-        ])];
-
-        assert!(validate_fields(&fields, &validations).is_ok());
-    }
-
-    #[test]
-    fn validate_fields_accepts_object_one_of_group() {
-        let fields = BTreeMap::from([(
-            "contact".to_string(),
-            Value::Object(BTreeMap::from([(
-                "email".to_string(),
-                Value::String("kun@example.com".to_string()),
-            )])),
-        )]);
-        let validations = vec![
-            Validation::new("contact", ValidationType::Object).with_one_of([
-                Validation::new("email", ValidationType::Text).with_required(true),
-                Validation::new("phone", ValidationType::Text).with_required(true),
-            ]),
-        ];
-
-        assert!(validate_fields(&fields, &validations).is_ok());
-    }
-
-    #[test]
-    fn validate_fields_rejects_object_one_of_group_when_multiple_match() {
-        let fields = BTreeMap::from([(
-            "contact".to_string(),
-            Value::Object(BTreeMap::from([
-                (
-                    "email".to_string(),
-                    Value::String("kun@example.com".to_string()),
-                ),
-                ("phone".to_string(), Value::String("123".to_string())),
-            ])),
-        )]);
-        let validations = vec![
-            Validation::new("contact", ValidationType::Object).with_one_of([
-                Validation::new("email", ValidationType::Text).with_required(true),
-                Validation::new("phone", ValidationType::Text).with_required(true),
-            ]),
-        ];
-
-        let error = validate_fields(&fields, &validations).unwrap_err();
-
-        assert_eq!(
-            error,
-            SpiderError::Parse(
-                "validation failed for field contact: group one_of expected exactly one validation to pass, but got 2"
-                    .to_string()
-            )
-        );
-    }
-
-    #[test]
-    fn validate_fields_accepts_mutually_exclusive_group_when_zero_or_one_match() {
-        let fields = BTreeMap::from([(
-            "asset".to_string(),
-            Value::Object(BTreeMap::from([(
-                "url".to_string(),
-                Value::String("https://example.com".to_string()),
-            )])),
-        )]);
-        let validations = vec![
-            Validation::new("asset", ValidationType::Object).with_mutually_exclusive([
-                Validation::new("url", ValidationType::Text).with_required(true),
-                Validation::new("file_path", ValidationType::Text).with_required(true),
-            ]),
-        ];
-
-        assert!(validate_fields(&fields, &validations).is_ok());
-    }
-
-    #[test]
-    fn validate_fields_rejects_mutually_exclusive_group_when_multiple_match() {
-        let fields = BTreeMap::from([(
-            "asset".to_string(),
-            Value::Object(BTreeMap::from([
-                (
-                    "url".to_string(),
-                    Value::String("https://example.com".to_string()),
-                ),
-                (
-                    "file_path".to_string(),
-                    Value::String("/tmp/file".to_string()),
-                ),
-            ])),
-        )]);
-        let validations = vec![
-            Validation::new("asset", ValidationType::Object).with_mutually_exclusive([
-                Validation::new("url", ValidationType::Text).with_required(true),
-                Validation::new("file_path", ValidationType::Text).with_required(true),
-            ]),
-        ];
-
-        let error = validate_fields(&fields, &validations).unwrap_err();
-
-        assert_eq!(
-            error,
-            SpiderError::Parse(
-                "validation failed for field asset: group mutually_exclusive expected at most one validation to pass, but got 2"
-                    .to_string()
-            )
-        );
-    }
-
-    #[test]
-    fn validate_fields_accepts_all_of_group() {
-        let fields = BTreeMap::from([(
-            "meta".to_string(),
-            Value::Object(BTreeMap::from([
-                ("title".to_string(), Value::String("Kun".to_string())),
-                (
-                    "url".to_string(),
-                    Value::String("https://example.com".to_string()),
-                ),
-            ])),
-        )]);
-        let validations = vec![
-            Validation::new("meta", ValidationType::Object).with_all_of([
-                Validation::new("title", ValidationType::Text).with_required(true),
-                Validation::new("url", ValidationType::Text).with_required(true),
-            ]),
-        ];
-
-        assert!(validate_fields(&fields, &validations).is_ok());
-    }
-
-    #[test]
-    fn validate_item_report_uses_same_collect_all_semantics() {
+    fn validate_item_fails_fast_with_same_semantics() {
         let item = Item::new()
             .with_field("count", Value::String("oops".to_string()))
             .with_field("published", Value::String("maybe".to_string()));
-        let validations = vec![
-            Validation::new("count", ValidationType::Number)
-                .with_transform(ValidationTransform::ParseNumber),
-            Validation::new("published", ValidationType::Bool)
-                .with_transform(ValidationTransform::ParseBool),
+        let validators = vec![
+            FieldValidator::new("count", Type::Number).transform(Transform::ParseNumber),
+            FieldValidator::new("published", Type::Bool).transform(Transform::ParseBool),
         ];
 
-        let report = validate_item_report(&item, &validations);
+        let error = validate_item(&item, &validators).unwrap_err();
 
-        assert_eq!(report.issues.len(), 2);
-        assert_eq!(report.issues[0].field, "count");
-        assert_eq!(report.issues[1].field, "published");
+        assert_eq!(
+            error,
+            SpiderError::Parse(
+                "validation failed for field count: transform parse_number failed: invalid float literal"
+                    .to_string()
+            )
+        );
     }
 
     #[test]
     fn validate_item_uses_same_validation_semantics() {
         let item = Item::new().with_field("count", Value::Number(3.0));
-        let validations =
-            vec![Validation::new("count", ValidationType::Number).with_required(true)];
+        let validators = vec![FieldValidator::new("count", Type::Number).required()];
 
-        assert!(validate_item(&item, &validations).is_ok());
+        assert!(validate_item(&item, &validators).is_ok());
     }
 
     #[test]
@@ -2587,30 +2260,29 @@ mod tests {
             ("count".to_string(), Value::Number(5.0)),
             ("kind".to_string(), Value::String("news".to_string())),
         ]);
-        let validations = vec![
-            Validation::new("title", ValidationType::Text)
-                .with_regex(r"^post-\d{4}$")
-                .with_min(4.0)
-                .with_max(16.0),
-            Validation::new("count", ValidationType::Number)
-                .with_min(1.0)
-                .with_max(10.0),
-            Validation::new("kind", ValidationType::Text).with_enum([
+        let validators = vec![
+            FieldValidator::new("title", Type::Text)
+                .regex(r"^post-\d{4}$")
+                .min(4.0)
+                .max(16.0),
+            FieldValidator::new("count", Type::Number)
+                .min(1.0)
+                .max(10.0),
+            FieldValidator::new("kind", Type::Text).enum_values([
                 Value::String("news".to_string()),
                 Value::String("notice".to_string()),
             ]),
         ];
 
-        assert!(validate_fields(&fields, &validations).is_ok());
+        assert!(validate_fields(&fields, &validators).is_ok());
     }
 
     #[test]
     fn validate_fields_rejects_regex_mismatch() {
         let fields = BTreeMap::from([("title".to_string(), Value::String("bad".to_string()))]);
-        let validations =
-            vec![Validation::new("title", ValidationType::Text).with_regex(r"^post-\d+$")];
+        let validators = vec![FieldValidator::new("title", Type::Text).regex(r"^post-\d+$")];
 
-        let error = validate_fields(&fields, &validations).unwrap_err();
+        let error = validate_fields(&fields, &validators).unwrap_err();
 
         assert_eq!(
             error,
@@ -2624,9 +2296,9 @@ mod tests {
     #[test]
     fn validate_fields_rejects_number_below_min() {
         let fields = BTreeMap::from([("count".to_string(), Value::Number(1.0))]);
-        let validations = vec![Validation::new("count", ValidationType::Number).with_min(3.0)];
+        let validators = vec![FieldValidator::new("count", Type::Number).min(3.0)];
 
-        let error = validate_fields(&fields, &validations).unwrap_err();
+        let error = validate_fields(&fields, &validators).unwrap_err();
 
         assert_eq!(
             error,
@@ -2637,9 +2309,9 @@ mod tests {
     #[test]
     fn validate_fields_rejects_text_above_max_length() {
         let fields = BTreeMap::from([("title".to_string(), Value::String("abcdef".to_string()))]);
-        let validations = vec![Validation::new("title", ValidationType::Text).with_max(3.0)];
+        let validators = vec![FieldValidator::new("title", Type::Text).max(3.0)];
 
-        let error = validate_fields(&fields, &validations).unwrap_err();
+        let error = validate_fields(&fields, &validators).unwrap_err();
 
         assert_eq!(
             error,
@@ -2652,12 +2324,12 @@ mod tests {
     #[test]
     fn validate_fields_rejects_value_outside_enum() {
         let fields = BTreeMap::from([("kind".to_string(), Value::String("blog".to_string()))]);
-        let validations = vec![Validation::new("kind", ValidationType::Text).with_enum([
+        let validators = vec![FieldValidator::new("kind", Type::Text).enum_values([
             Value::String("news".to_string()),
             Value::String("notice".to_string()),
         ])];
 
-        let error = validate_fields(&fields, &validations).unwrap_err();
+        let error = validate_fields(&fields, &validators).unwrap_err();
 
         assert_eq!(
             error,
@@ -2670,21 +2342,21 @@ mod tests {
     #[test]
     fn validate_fields_accepts_explicit_text_length_rules() {
         let fields = BTreeMap::from([("title".to_string(), Value::String("news".to_string()))]);
-        let validations = vec![
-            Validation::new("title", ValidationType::Text)
-                .with_min_length(2)
-                .with_max_length(8),
+        let validators = vec![
+            FieldValidator::new("title", Type::Text)
+                .min_length(2)
+                .max_length(8),
         ];
 
-        assert!(validate_fields(&fields, &validations).is_ok());
+        assert!(validate_fields(&fields, &validators).is_ok());
     }
 
     #[test]
     fn validate_fields_rejects_text_below_min_length() {
         let fields = BTreeMap::from([("title".to_string(), Value::String("a".to_string()))]);
-        let validations = vec![Validation::new("title", ValidationType::Text).with_min_length(2)];
+        let validators = vec![FieldValidator::new("title", Type::Text).min_length(2)];
 
-        let error = validate_fields(&fields, &validations).unwrap_err();
+        let error = validate_fields(&fields, &validators).unwrap_err();
 
         assert_eq!(
             error,
@@ -2703,21 +2375,21 @@ mod tests {
                 Value::String("policy".to_string()),
             ]),
         )]);
-        let validations = vec![
-            Validation::new("tags", ValidationType::List)
-                .with_min_items(1)
-                .with_max_items(3),
+        let validators = vec![
+            FieldValidator::new("tags", Type::List)
+                .min_items(1)
+                .max_items(3),
         ];
 
-        assert!(validate_fields(&fields, &validations).is_ok());
+        assert!(validate_fields(&fields, &validators).is_ok());
     }
 
     #[test]
     fn validate_fields_rejects_list_below_min_items() {
         let fields = BTreeMap::from([("tags".to_string(), Value::Array(vec![]))]);
-        let validations = vec![Validation::new("tags", ValidationType::List).with_min_items(1)];
+        let validators = vec![FieldValidator::new("tags", Type::List).min_items(1)];
 
-        let error = validate_fields(&fields, &validations).unwrap_err();
+        let error = validate_fields(&fields, &validators).unwrap_err();
 
         assert_eq!(
             error,
@@ -2739,14 +2411,14 @@ mod tests {
                 ),
             ])),
         )]);
-        let validations = vec![
-            Validation::new("meta", ValidationType::Object)
-                .with_min_fields(2)
-                .with_max_fields(4)
-                .with_required_fields(["title", "url"]),
+        let validators = vec![
+            FieldValidator::new("meta", Type::Object)
+                .min_fields(2)
+                .max_fields(4)
+                .required_fields(["title", "url"]),
         ];
 
-        assert!(validate_fields(&fields, &validations).is_ok());
+        assert!(validate_fields(&fields, &validators).is_ok());
     }
 
     #[test]
@@ -2758,11 +2430,10 @@ mod tests {
                 Value::String("hello".to_string()),
             )])),
         )]);
-        let validations = vec![
-            Validation::new("meta", ValidationType::Object).with_required_fields(["title", "url"]),
-        ];
+        let validators =
+            vec![FieldValidator::new("meta", Type::Object).required_fields(["title", "url"])];
 
-        let error = validate_fields(&fields, &validations).unwrap_err();
+        let error = validate_fields(&fields, &validators).unwrap_err();
 
         assert_eq!(
             error,
@@ -2776,9 +2447,9 @@ mod tests {
     #[test]
     fn validate_fields_rejects_invalid_regex_pattern() {
         let fields = BTreeMap::from([("title".to_string(), Value::String("post-1".to_string()))]);
-        let validations = vec![Validation::new("title", ValidationType::Text).with_regex("(")];
+        let validators = vec![FieldValidator::new("title", Type::Text).regex("(")];
 
-        let error = validate_fields(&fields, &validations).unwrap_err();
+        let error = validate_fields(&fields, &validators).unwrap_err();
 
         assert!(
             error
@@ -2796,10 +2467,9 @@ mod tests {
                 Value::String("hello".to_string()),
             )])),
         )]);
-        let validations =
-            vec![Validation::new("meta.title", ValidationType::Text).with_required(true)];
+        let validators = vec![FieldValidator::new("meta.title", Type::Text).required()];
 
-        assert!(validate_fields(&fields, &validations).is_ok());
+        assert!(validate_fields(&fields, &validators).is_ok());
     }
 
     #[test]
@@ -2817,10 +2487,9 @@ mod tests {
                 )])),
             ]),
         )]);
-        let validations =
-            vec![Validation::new("authors[0].name", ValidationType::Text).with_required(true)];
+        let validators = vec![FieldValidator::new("authors[0].name", Type::Text).required()];
 
-        assert!(validate_fields(&fields, &validations).is_ok());
+        assert!(validate_fields(&fields, &validators).is_ok());
     }
 
     #[test]
@@ -2832,9 +2501,9 @@ mod tests {
                 Value::String("policy".to_string()),
             ]),
         )]);
-        let validations = vec![Validation::new("tags[]", ValidationType::Text).with_required(true)];
+        let validators = vec![FieldValidator::new("tags[]", Type::Text).required()];
 
-        assert!(validate_fields(&fields, &validations).is_ok());
+        assert!(validate_fields(&fields, &validators).is_ok());
     }
 
     #[test]
@@ -2849,10 +2518,9 @@ mod tests {
                 Value::Object(BTreeMap::new()),
             ]),
         )]);
-        let validations =
-            vec![Validation::new("articles[].title", ValidationType::Text).with_required(true)];
+        let validators = vec![FieldValidator::new("articles[].title", Type::Text).required()];
 
-        let error = validate_fields(&fields, &validations).unwrap_err();
+        let error = validate_fields(&fields, &validators).unwrap_err();
 
         assert_eq!(
             error,
@@ -2865,10 +2533,9 @@ mod tests {
     #[test]
     fn validate_fields_rejects_invalid_field_navigation_on_scalar_value() {
         let fields = BTreeMap::from([("title".to_string(), Value::String("hello".to_string()))]);
-        let validations =
-            vec![Validation::new("title.name", ValidationType::Text).with_required(true)];
+        let validators = vec![FieldValidator::new("title.name", Type::Text).required()];
 
-        let error = validate_fields(&fields, &validations).unwrap_err();
+        let error = validate_fields(&fields, &validators).unwrap_err();
 
         assert_eq!(
             error,
@@ -2888,9 +2555,9 @@ mod tests {
                 Value::String("hello".to_string()),
             )])),
         )]);
-        let validations = vec![Validation::new("meta..title", ValidationType::Text)];
+        let validators = vec![FieldValidator::new("meta..title", Type::Text)];
 
-        let error = validate_fields(&fields, &validations).unwrap_err();
+        let error = validate_fields(&fields, &validators).unwrap_err();
 
         assert_eq!(
             error,
@@ -2901,36 +2568,52 @@ mod tests {
     }
 
     #[test]
-    fn config_new_collects_rules() {
-        let config = Config::new([
-            rule("title", Type::Text).required(),
-            rule("published_at", Type::Text).transform(Transform::ParseDatetime),
-        ]);
+    fn step_validator_collects_fields_and_relations() {
+        let validator = StepValidator::new()
+            .field("title", Type::Text, |field| {
+                field.required().min_length(1).transform(Transform::Trim)
+            })
+            .field("start_time", Type::Text, |field| {
+                field.transform(Transform::ParseDatetime)
+            })
+            .field("end_time", Type::Text, |field| {
+                field.transform(Transform::ParseDatetime)
+            })
+            .and(["start_time", "end_time"]);
 
-        assert_eq!(config.validations.len(), 2);
-        assert!(!config.is_empty());
-        assert_eq!(config.validations[0].field, "title");
-        assert_eq!(config.validations[1].field, "published_at");
+        assert_eq!(validator.fields.len(), 3);
+        assert_eq!(validator.relations.len(), 1);
+        assert!(!validator.is_empty());
     }
 
     #[test]
-    fn validation_report_summary_joins_issue_messages() {
-        let report = ValidationReport {
-            issues: vec![
-                ValidationIssue {
-                    field: "title".to_string(),
-                    message: "value is required".to_string(),
-                },
-                ValidationIssue {
-                    field: "published_at".to_string(),
-                    message: "transform parse_datetime failed: invalid format".to_string(),
-                },
-            ],
-        };
+    fn step_validator_rejects_invalid_relation() {
+        let validator = StepValidator::new()
+            .field("title", Type::Text, |field| {
+                field.required().min_length(3).transform(Transform::Trim)
+            })
+            .field("start_time", Type::Text, |field| {
+                field.transform(Transform::ParseDatetime)
+            })
+            .field("end_time", Type::Text, |field| {
+                field.transform(Transform::ParseDatetime)
+            })
+            .and(["start_time", "end_time"]);
+        let item = Item::new()
+            .with_field("title", Value::String("post".to_string()))
+            .with_field(
+                "start_time",
+                Value::String("2026-04-01T08:30:45+08:00".to_string()),
+            );
+
+        let error = futures::executor::block_on(validator.validate(&item)).unwrap_err();
 
         assert_eq!(
-            report.summary(),
-            "title: value is required; published_at: transform parse_datetime failed: invalid format"
+            error,
+            SpiderError::Parse(
+                "validation failed for field [start_time, end_time]: relation and expected all fields to be present, missing: end_time"
+                    .to_string()
+            )
         );
     }
 }

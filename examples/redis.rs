@@ -14,7 +14,7 @@ use halo_spider::error::SpiderError;
 use halo_spider::item::Item;
 use halo_spider::pipeline::Pipeline;
 use halo_spider::response::Response;
-use halo_spider::settings::Settings;
+use halo_spider::settings::Config;
 use halo_spider::spider::{Output, Spider};
 use halo_spider::store::Redis;
 use halo_spider::value::Value;
@@ -85,9 +85,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (redis_url, commands_rx, server_handle) = spawn_fake_redis_server().await;
     let redis = Redis::new(redis_url, "period_items");
-    let settings = Settings::default().with_idle_timeout(SignedDuration::from_millis(200));
+    let settings = Config::default().with_idle_timeout(SignedDuration::from_millis(200));
 
-    let engine = Engine::new().with_settings(settings);
+    let engine = Engine::new().with_config(settings);
     let handle = engine.shutdown_handle();
 
     let mut engine = engine

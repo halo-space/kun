@@ -1,9 +1,9 @@
 pub mod file;
 
-use crate::engine::context::EngineContext;
-use crate::engine::flow::Flow;
+use crate::engine::{context, flow};
 use crate::error::SpiderError;
 use crate::future::BoxFuture;
+use crate::middleware::HTTP_CACHE;
 use crate::middleware::traits::Middleware;
 use crate::request::{Headers, Request, RequestMode};
 use crate::response::{Response, certificate::CertificateInfo};
@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 pub use file::File;
 
-const CACHE_FLAG: &str = "http_cache";
+const CACHE_FLAG: &str = HTTP_CACHE;
 const IF_NONE_MATCH: &str = "If-None-Match";
 const IF_MODIFIED_SINCE: &str = "If-Modified-Since";
 const ETAG: &str = "ETag";
@@ -163,86 +163,79 @@ impl HttpCache {
 }
 
 impl Middleware for HttpCache {
-    fn process_request<'a>(
-        &'a self,
-        context: &'a mut EngineContext,
-    ) -> BoxFuture<'a, Result<Flow, SpiderError>> {
-        Box::pin(async move {
-            let Some(key) = cache_key(&context.request) else {
-                return Ok(Flow::Continue);
-            };
+    async fn before_download(
+        &self,
+        context: &mut context::Download,
+    ) -> Result<flow::Download, SpiderError> {
+        let Some(key) = cache_key(&context.request) else {
+            return Ok(flow::Download::Continue);
+        };
 
-            let Some(entry) = self.cache.load(&key).await? else {
-                record_http_cache_miss(context);
-                return Ok(Flow::Continue);
-            };
+        let Some(entry) = self.cache.load(&key).await? else {
+            record_http_cache_miss(context);
+            return Ok(flow::Download::Continue);
+        };
 
-            if self.is_stale(entry.stored_at, current_time()) || !entry.has_validators() {
-                self.cache.remove(&key).await?;
-                record_http_cache_miss(context);
-                return Ok(Flow::Continue);
-            }
+        if self.is_stale(entry.stored_at, current_time()) || !entry.has_validators() {
+            self.cache.remove(&key).await?;
+            record_http_cache_miss(context);
+            return Ok(flow::Download::Continue);
+        }
 
-            if let Some(stats) = context.stats() {
-                stats.record_http_cache_revalidate();
-            }
-            entry.apply_conditionals(&mut context.request);
+        if let Some(stats) = context.stats() {
+            stats.record_http_cache_revalidate();
+        }
+        entry.apply_conditionals(&mut context.request);
 
-            Ok(Flow::Continue)
-        })
+        Ok(flow::Download::Continue)
     }
 
-    fn process_response<'a>(
-        &'a self,
-        context: &'a mut EngineContext,
-    ) -> BoxFuture<'a, Result<Flow, SpiderError>> {
-        Box::pin(async move {
-            let Some(key) = cache_key(&context.request) else {
-                return Ok(Flow::Continue);
-            };
+    async fn after_download(
+        &self,
+        context: &mut context::Download,
+        response: &mut Response,
+    ) -> Result<flow::Download, SpiderError> {
+        let Some(key) = cache_key(&context.request) else {
+            return Ok(flow::Download::Continue);
+        };
 
-            let Some(response) = context.response.as_ref() else {
-                return Ok(Flow::Continue);
-            };
-
-            match response.status {
-                200 => {
-                    if let Some(entry) =
-                        Entry::from_response(key.clone(), response, self.strategy, current_time())
-                    {
-                        self.cache.save(&entry).await?;
-                        if let Some(stats) = context.stats() {
-                            stats.record_http_cache_store();
-                        }
-                    } else {
-                        self.cache.remove(&key).await?;
-                    }
-                }
-                304 => {
-                    let Some(mut entry) = self.cache.load(&key).await? else {
-                        return Ok(Flow::Continue);
-                    };
-
-                    if self.is_stale(entry.stored_at, current_time()) {
-                        self.cache.remove(&key).await?;
-                        return Ok(Flow::Continue);
-                    }
-
-                    entry.refresh_from_not_modified(response, current_time());
+        match response.status {
+            200 => {
+                if let Some(entry) =
+                    Entry::from_response(key.clone(), response, self.strategy, current_time())
+                {
                     self.cache.save(&entry).await?;
-
-                    if let Some(restored) = entry.restore_response(&context.request) {
-                        if let Some(stats) = context.stats() {
-                            stats.record_http_cache_hit();
-                        }
-                        context.response = Some(restored);
+                    if let Some(stats) = context.stats() {
+                        stats.record_http_cache_store();
                     }
+                } else {
+                    self.cache.remove(&key).await?;
                 }
-                _ => {}
             }
+            304 => {
+                let Some(mut entry) = self.cache.load(&key).await? else {
+                    return Ok(flow::Download::Continue);
+                };
 
-            Ok(Flow::Continue)
-        })
+                if self.is_stale(entry.stored_at, current_time()) {
+                    self.cache.remove(&key).await?;
+                    return Ok(flow::Download::Continue);
+                }
+
+                entry.refresh_from_not_modified(response, current_time());
+                self.cache.save(&entry).await?;
+
+                if let Some(restored) = entry.restore_response(&context.request) {
+                    if let Some(stats) = context.stats() {
+                        stats.record_http_cache_hit();
+                    }
+                    *response = restored;
+                }
+            }
+            _ => {}
+        }
+
+        Ok(flow::Download::Continue)
     }
 }
 
@@ -401,7 +394,7 @@ fn current_time() -> u64 {
     u64::try_from(Timestamp::now().as_millisecond()).unwrap_or_default()
 }
 
-fn record_http_cache_miss(context: &EngineContext) {
+fn record_http_cache_miss(context: &context::Download) {
     if let Some(stats) = context.stats() {
         stats.record_http_cache_miss();
     }
@@ -421,27 +414,27 @@ mod tests {
     fn http_cache_adds_if_none_match_after_caching_etag_response() {
         let middleware = HttpCache::default();
         let request = Request::new("https://example.com/feed");
-        let mut first = EngineContext::new(request.clone());
-        first.response = Some(Response::from_request(
+        let mut first = context::Download::new(request.clone());
+        let mut first_response = Response::from_request(
             request.clone(),
             200,
             [("ETag".to_string(), vec!["v1".to_string()])]
                 .into_iter()
                 .collect(),
             b"body".to_vec(),
-        ));
+        );
 
-        block_on(middleware.process_response(&mut first)).unwrap();
+        block_on(middleware.after_download(&mut first, &mut first_response)).unwrap();
 
-        let mut second = EngineContext::new(request);
-        block_on(middleware.process_request(&mut second)).unwrap();
+        let mut second = context::Download::new(request);
+        block_on(middleware.before_download(&mut second)).unwrap();
 
         assert_eq!(
             second
                 .request
                 .headers
                 .get(IF_NONE_MATCH)
-                .and_then(|values| values.first())
+                .and_then(|values: &Vec<String>| values.first())
                 .map(String::as_str),
             Some("v1")
         );
@@ -451,8 +444,8 @@ mod tests {
     fn http_cache_adds_if_modified_since_after_caching_last_modified_response() {
         let middleware = HttpCache::default();
         let request = Request::new("https://example.com/feed");
-        let mut first = EngineContext::new(request.clone());
-        first.response = Some(Response::from_request(
+        let mut first = context::Download::new(request.clone());
+        let mut first_response = Response::from_request(
             request.clone(),
             200,
             [(
@@ -462,19 +455,19 @@ mod tests {
             .into_iter()
             .collect(),
             b"body".to_vec(),
-        ));
+        );
 
-        block_on(middleware.process_response(&mut first)).unwrap();
+        block_on(middleware.after_download(&mut first, &mut first_response)).unwrap();
 
-        let mut second = EngineContext::new(request);
-        block_on(middleware.process_request(&mut second)).unwrap();
+        let mut second = context::Download::new(request);
+        block_on(middleware.before_download(&mut second)).unwrap();
 
         assert_eq!(
             second
                 .request
                 .headers
                 .get(IF_MODIFIED_SINCE)
-                .and_then(|values| values.first())
+                .and_then(|values: &Vec<String>| values.first())
                 .map(String::as_str),
             Some("Wed, 21 Oct 2015 07:28:00 GMT")
         );
@@ -484,29 +477,23 @@ mod tests {
     fn http_cache_restores_cached_response_when_server_returns_not_modified() {
         let middleware = HttpCache::default();
         let request = Request::new("https://example.com/feed");
-        let mut first = EngineContext::new(request.clone());
-        first.response = Some(Response::from_request(
+        let mut first = context::Download::new(request.clone());
+        let mut first_response = Response::from_request(
             request.clone(),
             200,
             [("ETag".to_string(), vec!["v1".to_string()])]
                 .into_iter()
                 .collect(),
             b"cached".to_vec(),
-        ));
+        );
 
-        block_on(middleware.process_response(&mut first)).unwrap();
+        block_on(middleware.after_download(&mut first, &mut first_response)).unwrap();
 
-        let mut second = EngineContext::new(request.clone());
-        second.response = Some(Response::from_request(
-            request,
-            304,
-            Headers::new(),
-            Vec::new(),
-        ));
+        let mut second = context::Download::new(request.clone());
+        let mut response = Response::from_request(request, 304, Headers::new(), Vec::new());
 
-        block_on(middleware.process_response(&mut second)).unwrap();
+        block_on(middleware.after_download(&mut second, &mut response)).unwrap();
 
-        let response = second.response.expect("cached response should exist");
         assert_eq!(response.status, 200);
         assert_eq!(response.text, "cached");
         assert!(response.flags.iter().any(|flag| flag == CACHE_FLAG));
@@ -516,29 +503,23 @@ mod tests {
     fn http_cache_strategy_validators_keeps_304_without_cached_body() {
         let middleware = HttpCache::default().with_strategy(Strategy::Validators);
         let request = Request::new("https://example.com/feed");
-        let mut first = EngineContext::new(request.clone());
-        first.response = Some(Response::from_request(
+        let mut first = context::Download::new(request.clone());
+        let mut first_response = Response::from_request(
             request.clone(),
             200,
             [("ETag".to_string(), vec!["v1".to_string()])]
                 .into_iter()
                 .collect(),
             b"cached".to_vec(),
-        ));
+        );
 
-        block_on(middleware.process_response(&mut first)).unwrap();
+        block_on(middleware.after_download(&mut first, &mut first_response)).unwrap();
 
-        let mut second = EngineContext::new(request.clone());
-        second.response = Some(Response::from_request(
-            request,
-            304,
-            Headers::new(),
-            Vec::new(),
-        ));
+        let mut second = context::Download::new(request.clone());
+        let mut response = Response::from_request(request, 304, Headers::new(), Vec::new());
 
-        block_on(middleware.process_response(&mut second)).unwrap();
+        block_on(middleware.after_download(&mut second, &mut response)).unwrap();
 
-        let response = second.response.expect("304 response should remain");
         assert_eq!(response.status, 304);
         assert!(response.text.is_empty());
         assert!(!response.flags.iter().any(|flag| flag == CACHE_FLAG));
@@ -549,20 +530,20 @@ mod tests {
         let middleware = HttpCache::default().with_ttl(SignedDuration::from_millis(0));
         let tracker = Arc::new(Tracker::default());
         let request = Request::new("https://example.com/feed");
-        let mut first = EngineContext::new(request.clone()).with_stats(tracker.clone());
-        first.response = Some(Response::from_request(
+        let mut first = context::Download::new(request.clone()).with_stats(tracker.clone());
+        let mut first_response = Response::from_request(
             request.clone(),
             200,
             [("ETag".to_string(), vec!["v1".to_string()])]
                 .into_iter()
                 .collect(),
             b"body".to_vec(),
-        ));
+        );
 
-        block_on(middleware.process_response(&mut first)).unwrap();
+        block_on(middleware.after_download(&mut first, &mut first_response)).unwrap();
 
-        let mut second = EngineContext::new(request).with_stats(tracker.clone());
-        block_on(middleware.process_request(&mut second)).unwrap();
+        let mut second = context::Download::new(request).with_stats(tracker.clone());
+        block_on(middleware.before_download(&mut second)).unwrap();
 
         assert!(!second.request.headers.contains_key(IF_NONE_MATCH));
         assert_eq!(tracker.snapshot().http_cache_miss_count, 1);
@@ -575,20 +556,20 @@ mod tests {
         let tracker = Arc::new(Tracker::default());
         let request = Request::new("https://example.com/feed");
 
-        let mut first = EngineContext::new(request.clone()).with_stats(tracker.clone());
-        block_on(middleware.process_request(&mut first)).unwrap();
+        let mut first = context::Download::new(request.clone()).with_stats(tracker.clone());
+        block_on(middleware.before_download(&mut first)).unwrap();
 
-        let mut second = EngineContext::new(request.clone()).with_stats(tracker.clone());
-        second.response = Some(Response::from_request(
+        let mut second = context::Download::new(request.clone()).with_stats(tracker.clone());
+        let mut second_response = Response::from_request(
             request,
             200,
             [("ETag".to_string(), vec!["v1".to_string()])]
                 .into_iter()
                 .collect(),
             b"body".to_vec(),
-        ));
+        );
 
-        block_on(middleware.process_response(&mut second)).unwrap();
+        block_on(middleware.after_download(&mut second, &mut second_response)).unwrap();
 
         assert_eq!(tracker.snapshot().http_cache_miss_count, 1);
         assert_eq!(tracker.snapshot().http_cache_store_count, 1);

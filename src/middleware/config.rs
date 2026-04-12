@@ -4,8 +4,10 @@ use std::collections::BTreeMap;
 /// Execution stage where a middleware hook applies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
+    Enqueue,
     Download,
     Spider,
+    Item,
 }
 
 /// Runtime configuration for a middleware entry.

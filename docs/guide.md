@@ -3,7 +3,7 @@
 这份文档是 `halo-spider` 的手册首页。
 README 只保留项目简介与导航；详细能力、边界和用法按章节收口在这里。
 
-`halo-spider` 是一个受 Scrapy 启发的 Rust 异步爬虫框架。当前优先补齐和稳定代码爬虫与共享底层能力；DSL 入口仍保留，但配置面暂时后置，并使用 OpenSpec 管理规范与变更。
+`halo-spider` 是一个受 Scrapy 启发的 Rust 异步爬虫框架。当前优先继续收口代码爬虫与共享底层能力；rules DSL v1 已经按共享主链接入，并使用 OpenSpec 管理规范与变更。
 
 ## 阅读顺序
 
@@ -46,7 +46,7 @@ README 只保留项目简介与导航；详细能力、边界和用法按章节�
 - 代码爬虫主线已经可用，当前重点是持续收口共享 runtime 边界
 - durable scheduler 已具备统一读能力、control 能力和 batch 吞吐入口
 - plugin 当前只用于 `middleware` 的声明式装配
-- DSL 继续后置，先与代码爬虫主线共享同一套底层模型
+- DSL v1 已经接入共享底层模型，当前继续补齐剩余 gap 并收口文档与规范
 
 ## 仓库定位
 

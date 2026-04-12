@@ -1,7 +1,8 @@
-use crate::dedup::{Dedup, Key, fingerprint};
+use super::{Dedup, Key, fingerprint};
 use crate::error::SpiderError;
 use crate::request::Request;
 use std::collections::hash_map::DefaultHasher;
+use std::future;
 use std::hash::{Hash, Hasher};
 
 const DEFAULT_EXPECTED_ITEMS: usize = 100_000;
@@ -109,19 +110,41 @@ impl Default for Bloom {
 }
 
 impl Dedup for Bloom {
-    async fn check_and_insert(&mut self, request: &Request) -> Result<bool, SpiderError> {
+    fn check_and_insert(
+        &mut self,
+        request: &Request,
+    ) -> impl std::future::Future<Output = Result<bool, SpiderError>> + Send {
         let fingerprint = fingerprint(request, &self.keys);
         let indexes = bloom_indexes(fingerprint.as_str(), self.bit_len, self.hash_count);
 
         if indexes.iter().all(|index| self.bit(*index)) {
-            return Ok(false);
+            return future::ready(Ok(false));
         }
 
         for index in indexes {
             self.set_bit(index);
         }
 
-        Ok(true)
+        future::ready(Ok(true))
+    }
+
+    fn check_and_insert_with_keys(
+        &mut self,
+        request: &Request,
+        keys: &[Key],
+    ) -> impl std::future::Future<Output = Result<bool, SpiderError>> + Send {
+        let fingerprint = fingerprint(request, keys);
+        let indexes = bloom_indexes(fingerprint.as_str(), self.bit_len, self.hash_count);
+
+        if indexes.iter().all(|index| self.bit(*index)) {
+            return future::ready(Ok(false));
+        }
+
+        for index in indexes {
+            self.set_bit(index);
+        }
+
+        future::ready(Ok(true))
     }
 }
 

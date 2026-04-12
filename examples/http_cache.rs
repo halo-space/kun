@@ -1,7 +1,7 @@
 //! HTTP cache example.
 //!
 //! 展示：
-//! - `Settings::with_http_cache(true)` 开启缓存
+//! - `Config::with_http_cache(true)` 开启缓存
 //! - `with_http_cache_ttl(...)`、`with_http_cache_strategy(...)`
 //! - `with_http_cache_file(...)` 使用内置 file backend
 //! - 同一个 URL 第二次请求会自动补条件请求头，并在 `304` 时回填缓存 body
@@ -14,11 +14,12 @@ use halo_spider::download::traits::Downloader;
 use halo_spider::engine::{Engine, ShutdownHandle};
 use halo_spider::error::SpiderError;
 use halo_spider::item::Item;
+use halo_spider::middleware::DEDUP;
 use halo_spider::middleware::http_cache::Strategy;
 use halo_spider::pipeline::Pipeline;
 use halo_spider::request::{Headers, Request};
 use halo_spider::response::Response;
-use halo_spider::settings::Settings;
+use halo_spider::settings::Config;
 use halo_spider::spider::{Output, Spider};
 use halo_spider::store::Memory as MemoryStore;
 use halo_spider::value::Value;
@@ -94,7 +95,7 @@ impl Spider for HttpCacheSpider {
             vec![
                 response
                     .follow(response.url.clone())
-                    .with_dont_filter(true)
+                    .skip([DEDUP])
                     .with_meta("round", Value::Number(2.0)),
             ]
         } else {
@@ -138,7 +139,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cache_path = unique_cache_path();
     let store = MemoryStore::default();
-    let settings = Settings::default()
+    let settings = Config::default()
         .with_http_cache(true)
         .with_http_cache_ttl(SignedDuration::from_hours(12))
         .with_http_cache_strategy(Strategy::Response)
@@ -148,7 +149,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let engine = Engine::new()
         .with_http(ConditionalCacheHttp::default())
         .with_browser(Browser)
-        .with_settings(settings);
+        .with_config(settings);
     let handle = engine.shutdown_handle();
 
     let mut engine = engine

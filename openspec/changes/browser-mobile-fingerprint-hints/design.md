@@ -9,7 +9,7 @@
 
 - `FingerprintProfile` 新增 `mobile: Option<bool>`
 - builder 提供 `with_mobile(bool)`
-- DSL `fetch.browser.device_profile.fingerprint.mobile` 也能编译进来
+- 配置化 browser 编译入口也能把 `device_profile.fingerprint.mobile` 编译进来
 
 2. 运行时解析
 

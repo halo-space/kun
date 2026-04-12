@@ -300,32 +300,169 @@
 - **THEN** 框架继续建议通过自定义 `store::Store` 扩展
 - **AND** 当前内置维护范围明确保持在 `Memory / File / Sqlite / Webhook / Redis / Kafka`
 
-### Requirement: Request Dedup Is An Explicit Engine Component
+### Requirement: Request Execution Policies Run On Explicit Lifecycle Boundaries
 
-系统 MUST 把 request dedup 收口为显式 engine 组件，而不是继续默认依赖 dedup middleware。
+系统 MUST 把 request-scoped execution policy 放在明确的生命周期边界执行，而不是继续混成 engine 全局组件或模糊的 `schedule` 语义。
 
-#### Scenario: Default engine uses in-memory dedup
+#### Scenario: Request execution policy order is deterministic
 
-- **WHEN** 调用方直接使用 `Engine::new()`
-- **THEN** 引擎默认使用 `dedup::Memory`
-- **AND** request 会在进入 scheduler 前先经过这个 dedup 组件
+- **WHEN** 一条新 request 被发现，并最终完成一次 download attempt
+- **THEN** 系统按固定顺序执行这些边界：
+- **AND** 先在 admission 阶段执行 allowed-domain 检查与 request dedup
+- **AND** request 进入 scheduler 并被 claim 后，再在 download attempt 前执行 download-before middleware
+- **AND** download 返回错误或 retryable response 后，才执行 retry middleware
 
-#### Scenario: Built-in Bloom dedup can be selected explicitly
+#### Scenario: Admission policies run before a request enters the scheduler
 
-- **WHEN** 调用方显式调用 `Engine::with_dedup(dedup::Bloom::default())`
-- **THEN** 该请求会走布隆过滤器去重
-- **AND** 调用方清楚这是一种近似 dedup，存在误判边界
+- **WHEN** start request、follow request、manual enqueue request 或其它新发现 request 准备进入 scheduler
+- **THEN** 系统先执行 request admission 边界上的策略
+- **AND** 这条边界至少明确包含 allowed-domain 检查与 request dedup
 
-#### Scenario: Callers can replace dedup explicitly
+#### Scenario: Download-before middleware runs before each download attempt
 
-- **WHEN** 调用方调用 `Engine::with_dedup(...)`
-- **THEN** 引擎改用这个显式 dedup 组件决定请求是否可以入队
+- **WHEN** 某条 task 已被 claim，并即将发起一次 download attempt
+- **THEN** 系统先执行当前 request 的 effective download-before middleware
+- **AND** 如果该 attempt 需要退避，任务会带 delay 回到 scheduler，而不是阻塞 worker
 
-#### Scenario: Duplicate requests are dropped before scheduler
+#### Scenario: Delay is distinct from retry
 
-- **WHEN** dedup 组件判定某个 request 已重复
-- **THEN** 引擎不会把该 request 放进 scheduler
-- **AND** `dont_filter` request 继续绕过这层 dedup 判断
+- **WHEN** 某条 request 在 download 前因为 `concurrency`、`interval`、`rate_limit`、`auto_throttle`、crawl-delay 或其它同类原因被延迟
+- **THEN** 系统把它视为一次 `Delay`
+- **AND** 这次事件不会增加 retry 次数
+- **AND** 它会回到 scheduler delayed bucket，而不是走 retry 计数路径
+
+#### Scenario: Retry runs after a failed download attempt or retryable response
+
+- **WHEN** download 返回错误，或 response 命中 retry policy
+- **THEN** 系统在这次 attempt 之后执行 request 的 effective retry policy
+- **AND** 如果命中 retry，下一次 attempt 继续沿用同一条 request 的有效运行时上下文
+- **AND** retry 不会倒置到 download-before middleware 或 dedup 之前执行
+
+### Requirement: Middleware Lifecycle Uses Object-Scoped Flow And Context Types
+
+系统 MUST 按对象生命周期组织 middleware 的 flow 与 context，而不是继续让所有 hook 共享一个总 `Flow` 和一个大一统上下文。
+
+#### Scenario: Middleware flow families are scoped by lifecycle object
+
+- **WHEN** 框架为 middleware 暴露控制流类型
+- **THEN** 它至少区分 `enqueue`、`download`、`parse` 与 `item` 四类生命周期对象
+- **AND** admission hook 只使用 enqueue flow
+- **AND** download 相关 hook 共享 download flow
+- **AND** parse 相关 hook 共享 parse flow
+- **AND** item 相关 hook 共享 item flow
+
+#### Scenario: Observational hooks do not pretend to be control-flow hooks
+
+- **WHEN** 某个 hook 只是做收尾、副作用、日志、状态释放或埋点
+- **THEN** 它返回普通结果而不是 flow
+- **AND** 系统不会要求调用方为这类 hook 返回无意义的 `Continue`
+
+#### Scenario: Contexts are object-scoped and event payload is passed separately
+
+- **WHEN** middleware 在 download、parse 或 item 生命周期中执行
+- **THEN** 框架按对象生命周期提供对应 context
+- **AND** `response`、`error` 这类事件数据按需作为 hook 参数传入
+- **AND** 框架不会继续把 request、response、error、item 强行混进一个充满可选字段的统一 context
+
+### Requirement: Request Dedup Is A Request-Scoped Admission Policy
+
+系统 MUST 把 dedup 建模成 request-scoped admission policy，而不是继续默认把所有 request 都挂在 engine 全局 dedup 组件上。
+
+#### Scenario: Requests without dedup policy skip request dedup
+
+- **WHEN** 某条 request 没有声明 dedup policy，且没有命中默认 request runtime dedup
+- **THEN** 系统不会对它执行 request dedup
+- **AND** 该 request 仍然可以继续走 allowed-domain 检查和后续调度
+
+#### Scenario: Different requests can use different dedup policies in one spider run
+
+- **WHEN** 同一轮 spider 运行里，列表页 request、详情页 request 或其它请求声明了不同 dedup policy
+- **THEN** 系统按各自 request 的 effective dedup policy 做 admission 决策
+- **AND** 不要求它们共享同一个 engine 全局 dedup 规则
+
+#### Scenario: Internal retries are not rejected as fresh duplicates
+
+- **WHEN** 某条 request 已经进入 retry 路径
+- **THEN** 系统不会把这次内部 retry 当成一条新的外部发现 request 再次按原始 dedup policy 拒绝
+- **AND** retry 路径的 admission 语义保持显式、可测试
+
+### Requirement: Download-Before Middleware Uses Explicit Shared Buckets
+
+系统 MUST 让 download-before middleware 基于显式 bucket 生效，而不是继续依赖 middleware instance 的匿名本地状态。
+
+#### Scenario: Requests in the same bucket share limit state
+
+- **WHEN** 两条 request 解析到同一个 limit bucket
+- **THEN** 它们共享该 bucket 的 `concurrency`、`interval`、`rate_limit` 或 `auto_throttle` 状态
+
+#### Scenario: Requests in different buckets do not accidentally share state
+
+- **WHEN** 两条 request 解析到不同的 limit bucket
+- **THEN** 它们的 limit state 相互隔离
+- **AND** 系统不会因为复用同一个 step chain 或 middleware instance 就错误串桶
+
+### Requirement: Engine Process Controls Stay Distinct From Request Policies
+
+系统 MUST 把 engine worker/process 级控制，与 request-scoped execution policy 区分开。
+
+#### Scenario: Global worker concurrency remains an engine throughput control
+
+- **WHEN** 调用方配置 engine 的全局并发或 per-domain 并发
+- **THEN** 这些值继续控制 worker 能同时 claim / 执行多少任务
+- **AND** 它们不等价于某条 request 自己的 download-before middleware policy
+
+#### Scenario: Download-before middleware and engine throughput controls can coexist
+
+- **WHEN** engine 配了全局 worker 并发，同时某些 request 额外声明了更严格的 download-before middleware
+- **THEN** 系统同时尊重这两层边界
+- **AND** 不会把 request 级 download-before middleware 退化成 engine 全局吞吐开关
+
+### Requirement: Engine Processes Spider Callback Outputs As Request-Scoped Work
+
+系统 MUST 把 spider callback 返回的 request / item 收口回 engine 的固定执行边界，而不是让调用方自己推断后续执行顺序。
+
+#### Scenario: Callback output requests re-enter admission after callback returns
+
+- **WHEN** spider callback 通过 `Output { items, requests }` 返回了一条新的 request
+- **THEN** engine 在 callback 返回后统一接管这条 request
+- **AND** 它会重新进入 admission 边界，再按自己的 effective request runtime 执行 dedup / download-before middleware / retry middleware
+
+#### Scenario: Callback output handling does not bypass runtime boundaries
+
+- **WHEN** spider callback 返回 `Output { items, requests }`
+- **THEN** 这些输出只表达“产出下一批工作”
+- **AND** 它们不会绕过 scheduler、admission、download attempt 或 store/pipeline 这些既定 engine 边界
+
+### Requirement: Request Middleware Resolution Uses Global, Step, And Request Layers
+
+系统 MUST 以 engine global、current step default、current request override 三层来解析 request middleware，并且不允许 step 间或父子 request 间发生隐式覆盖继承。
+
+#### Scenario: Request override wins over step and engine defaults
+
+- **WHEN** 某条 request 显式给某个 middleware 写入 `Use(config)` 或 `Skip`
+- **THEN** 该 request 的显式覆盖优先于当前 step 默认值与 engine 全局默认值
+
+#### Scenario: Step default wins over engine global default
+
+- **WHEN** 当前 step 给某个 middleware 配置了默认值，而 request 本身没有显式覆盖
+- **THEN** 系统使用该 step 默认值
+- **AND** 不再回退到 engine 全局默认值
+
+#### Scenario: Middleware overrides do not inherit from parent request
+
+- **WHEN** 某条 request 派生出 follow request 或 callback 中又构造出新的 request
+- **THEN** 新 request 默认不继承父 request 的 middleware override
+- **AND** 它只解析自己的 override、目标 step 默认值与 engine 全局默认值
+
+### Requirement: Middleware Trait Uses Native Async Functions
+
+系统 MUST 在 `Spider`、`Middleware` 与相关回调 trait 上使用 Rust 原生 `async fn in trait`，而不是依赖 `#[async_trait]` 宏。
+
+#### Scenario: Middleware hooks use native async fn in trait
+
+- **WHEN** 框架定义 middleware hook 或 spider callback trait
+- **THEN** 这些 trait 使用 Rust 原生 `async fn in trait`
+- **AND** 本次变更不引入 `#[async_trait]`
 
 ### Requirement: Downloaders Are Explicit Engine Components
 
@@ -388,25 +525,20 @@
 
 ### Requirement: Engine Supports Minimal AutoThrottle
 
-系统 MUST 提供最小 `AutoThrottle` 能力，作为现有下载链路上的自适应限速 middleware，而不是单独发明另一套 runtime。
+系统 MUST 继续提供最小 `AutoThrottle` 能力，但它应当属于 download-before middleware 语义，而不是继续伪装成 `runtime.schedule`。
 
-#### Scenario: Settings derive auto throttle runtime config
+#### Scenario: AutoThrottle is derived as a default download-before middleware policy
 
-- **WHEN** 调用方在 `Settings` 上开启 `with_auto_throttle(true)`
+- **WHEN** 调用方在 `Config` 上开启 `with_auto_throttle(true)`
 - **AND** 同时设置 `download_delay`、`with_auto_throttle_target_concurrency(...)` 与 `with_auto_throttle_max_delay(...)`
-- **THEN** 引擎会把这些值归一化成 `auto_throttle` 所需的 runtime schedule
-- **AND** `download_delay` 作为起始/最小 delay 使用，而不是继续单独派生成固定 `interval_gate`
+- **THEN** 系统把它归一化为默认 download-before middleware
+- **AND** `download_delay` 继续表示起始/最小 delay，而不是另一条独立执行阶段
 
-#### Scenario: AutoThrottle raises delay from latency and failures
+#### Scenario: AutoThrottle feedback stays inside the resolved limit bucket
 
-- **WHEN** 同一个 origin 最近请求变慢、返回 `429 / 5xx`，或下载直接失败
-- **THEN** `auto_throttle` 会提高该 origin 的后续 delay
-
-#### Scenario: AutoThrottle respects target concurrency per origin
-
-- **WHEN** 某个 origin 的 inflight 请求数已经达到 `target_concurrency`
-- **THEN** 后续同 origin 请求会先退避
-- **AND** 其它 origin 的请求仍可继续独立放行
+- **WHEN** 同一个 bucket 最近请求变慢、返回 `429 / 5xx`，或下载直接失败
+- **THEN** `auto_throttle` 只调整该 bucket 的后续 delay
+- **AND** 不会错误影响其它 limit bucket
 
 ### Requirement: Engine Exposes Minimal Runtime Stats
 
@@ -465,7 +597,7 @@
 
 - **WHEN** 调用方调用 `Engine::with_robots(...)`
 - **THEN** 引擎改用这个显式 robots 组件判断请求是否允许继续
-- **AND** `Settings::with_robots_obey(...)` 与 `Settings::with_robots_user_agent(...)` 继续只负责启用开关与 user-agent 选择
+- **AND** `Config::with_robots_obey(...)` 与 `Config::with_robots_user_agent(...)` 继续只负责启用开关与 user-agent 选择
 
 #### Scenario: robots.txt policy stays disabled unless enabled explicitly
 
@@ -474,20 +606,20 @@
 
 #### Scenario: Disallowed requests are skipped before download
 
-- **WHEN** 调用方通过 `Settings::with_robots_obey(true)` 开启 robots 策略
+- **WHEN** 调用方通过 `Config::with_robots_obey(true)` 开启 robots 策略
 - **AND** 当前 origin 的 `robots.txt` 不允许该请求路径
 - **THEN** 引擎在真正下载前跳过该请求
 
 #### Scenario: Crawl-delay is enforced as a real runtime delay
 
-- **WHEN** 调用方通过 `Settings::with_robots_obey(true)` 开启 robots 策略
+- **WHEN** 调用方通过 `Config::with_robots_obey(true)` 开启 robots 策略
 - **AND** 当前 origin 的 `robots.txt` 为匹配到的 user-agent group 声明了 `Crawl-delay`
 - **THEN** 引擎会按该 delay 退避并重试同 origin 的后续请求
 - **AND** 不会把这类请求误当成永久 `Disallow`
 
 #### Scenario: Request-rate is enforced as a real runtime delay
 
-- **WHEN** 调用方通过 `Settings::with_robots_obey(true)` 开启 robots 策略
+- **WHEN** 调用方通过 `Config::with_robots_obey(true)` 开启 robots 策略
 - **AND** 当前 origin 的 `robots.txt` 为匹配到的 user-agent group 声明了 `Request-rate`
 - **THEN** 引擎会按 `window / requests` 计算出的均匀间隔最小 delay 退避并重试同 origin 的后续请求
 - **AND** 如果同一个 group 同时声明了 `Crawl-delay` 与 `Request-rate`，当前取更严格的 delay
@@ -530,7 +662,7 @@
 
 #### Scenario: Engine can turn robots sitemaps into seed requests
 
-- **WHEN** 调用方开启 `Settings::with_robots_sitemap_seeds(true)`
+- **WHEN** 调用方开启 `Config::with_robots_sitemap_seeds(true)`
 - **AND** 当前 origin 的 `robots.txt` 声明了一个或多个 `Sitemap`
 - **THEN** 引擎会抓取这些 sitemap 文档，并把其中声明的页面 URL 自动加入种子请求集合
 - **AND** 这些自动发现的种子请求仍然走引擎现有的 dedup 路径
@@ -543,14 +675,14 @@
 
 #### Scenario: Engine can override robots sitemap seed priority and depth
 
-- **WHEN** 调用方开启 `Settings::with_robots_sitemap_seeds(true)`
+- **WHEN** 调用方开启 `Config::with_robots_sitemap_seeds(true)`
 - **AND** 它额外配置了 `with_robots_sitemap_seed_priority(...)` 或 `with_robots_sitemap_seed_depth(...)`
 - **THEN** 引擎生成的 robots sitemap 种子请求会带上这些显式 `priority` / `depth`
 
 #### Scenario: Robots sitemap requests inherit shared request semantics from start requests
 
 - **WHEN** spider 通过 `build_start_requests()` 提供了带 cookies、proxy、session 或 browser mode 的起始请求
-- **AND** 调用方开启 `Settings::with_robots_sitemap_seeds(true)`
+- **AND** 调用方开启 `Config::with_robots_sitemap_seeds(true)`
 - **THEN** 引擎抓 sitemap 时继续继承这些共享请求语义，但强制走 HTTP 下载
 - **AND** 由 sitemap 生成的页面种子请求继续继承对应 start request 的共享请求语义
 
@@ -633,13 +765,13 @@
 
 #### Scenario: Minimal HTTP cache adds conditional request headers from cached validators
 
-- **WHEN** 调用方通过 `Settings::with_http_cache(true)` 开启最小 HTTP cache
+- **WHEN** 调用方通过 `Config::with_http_cache(true)` 开启最小 HTTP cache
 - **AND** 某个 HTTP `GET` 请求之前已经缓存了 `ETag` 或 `Last-Modified`
 - **THEN** 后续同请求会自动补 `If-None-Match` 或 `If-Modified-Since`
 
 #### Scenario: Minimal HTTP cache restores cached response on 304
 
-- **WHEN** 调用方通过 `Settings::with_http_cache(true)` 开启最小 HTTP cache
+- **WHEN** 调用方通过 `Config::with_http_cache(true)` 开启最小 HTTP cache
 - **AND** 某个 HTTP `GET` 请求之前已经缓存了响应 body 与对应 validator
 - **AND** 服务端对后续同请求返回 `304 Not Modified`
 - **THEN** 引擎会回填缓存响应 body
@@ -652,7 +784,7 @@
 
 #### Scenario: HTTP cache can persist entries through a file backend
 
-- **WHEN** 调用方通过 `Settings::with_http_cache_file(...)` 或 `HttpCache::with_cache(...)` 选择 `middleware::http_cache::File`
+- **WHEN** 调用方通过 `Config::with_http_cache_file(...)` 或 `HttpCache::with_cache(...)` 选择 `middleware::http_cache::File`
 - **THEN** HTTP cache 条目会持久化到磁盘 JSON 文件
 
 #### Scenario: ttl expiration turns stale entries into misses

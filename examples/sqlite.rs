@@ -14,7 +14,7 @@ use halo_spider::error::SpiderError;
 use halo_spider::item::Item;
 use halo_spider::pipeline::Pipeline;
 use halo_spider::response::Response;
-use halo_spider::settings::Settings;
+use halo_spider::settings::Config;
 use halo_spider::spider::{Output, Spider};
 use halo_spider::store::{FieldColumnType, Sqlite as SqliteStore};
 use halo_spider::value::Value;
@@ -91,9 +91,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_field_column("front_page", "front_page", FieldColumnType::Text)
         .with_field_column("edition_url", "edition_url", FieldColumnType::Text)
         .with_field_column("issue_key", "issue_key", FieldColumnType::Text);
-    let settings = Settings::default().with_idle_timeout(SignedDuration::from_millis(200));
+    let settings = Config::default().with_idle_timeout(SignedDuration::from_millis(200));
 
-    let engine = Engine::new().with_settings(settings);
+    let engine = Engine::new().with_config(settings);
     let handle = engine.shutdown_handle();
 
     let mut engine = engine

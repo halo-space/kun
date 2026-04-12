@@ -3,7 +3,7 @@
 //! 演示两种注册自定义中间件的方式：
 //!
 //! 1. `add_middleware()` — 直接注册中间件实例到引擎级链
-//! 2. `register_middleware()` — 注册工厂函数，通过 Settings/MIDDLEWARES 配置驱动
+//! 2. `register_middleware()` — 注册工厂函数，通过 Config/request middleware 配置驱动
 //!
 //! 本示例实现三个自定义中间件：
 //! - `custom_ua`: 为所有请求注入自定义 User-Agent（方式1）
@@ -14,15 +14,13 @@
 //! 按 Ctrl+C 优雅退出
 
 use halo_spider::engine::Engine;
-use halo_spider::engine::context::EngineContext;
-use halo_spider::engine::flow::Flow;
+use halo_spider::engine::{context, flow};
 use halo_spider::error::SpiderError;
-use halo_spider::future::BoxFuture;
 use halo_spider::item::Item;
+use halo_spider::middleware::Stage;
 use halo_spider::middleware::traits::Middleware;
-use halo_spider::middleware::{Config, Stage};
 use halo_spider::response::Response;
-use halo_spider::settings::Settings;
+use halo_spider::settings::Config;
 use halo_spider::spider::{Output, Spider};
 use halo_spider::value::Value;
 use halo_spider::{cb, spider_callbacks};
@@ -43,18 +41,16 @@ impl UserAgentMiddleware {
 }
 
 impl Middleware for UserAgentMiddleware {
-    fn process_request<'a>(
-        &'a self,
-        context: &'a mut EngineContext,
-    ) -> BoxFuture<'a, Result<Flow, SpiderError>> {
-        Box::pin(async move {
-            context
-                .request
-                .headers
-                .entry("User-Agent".to_string())
-                .or_insert_with(|| vec![self.ua.clone()]);
-            Ok(Flow::Continue)
-        })
+    async fn before_download(
+        &self,
+        context: &mut context::Download,
+    ) -> Result<flow::Download, SpiderError> {
+        context
+            .request
+            .headers
+            .entry("User-Agent".to_string())
+            .or_insert_with(|| vec![self.ua.clone()]);
+        Ok(flow::Download::Continue)
     }
 }
 
@@ -63,40 +59,35 @@ impl Middleware for UserAgentMiddleware {
 struct RequestLoggerMiddleware;
 
 impl Middleware for RequestLoggerMiddleware {
-    fn process_request<'a>(
-        &'a self,
-        context: &'a mut EngineContext,
-    ) -> BoxFuture<'a, Result<Flow, SpiderError>> {
-        Box::pin(async move {
-            halo_spider::trace::info(
-                "request_logger.start",
-                vec![
-                    halo_spider::trace::prop("url", context.request.url.as_str()),
-                    halo_spider::trace::prop("method", context.request.method.as_str()),
-                    halo_spider::trace::prop("headers", format!("{:?}", context.request.headers)),
-                ],
-            );
-            Ok(Flow::Continue)
-        })
+    async fn before_download(
+        &self,
+        context: &mut context::Download,
+    ) -> Result<flow::Download, SpiderError> {
+        halo_spider::trace::info(
+            "request_logger.start",
+            vec![
+                halo_spider::trace::prop("url", context.request.url.as_str()),
+                halo_spider::trace::prop("method", context.request.method.as_str()),
+                halo_spider::trace::prop("headers", format!("{:?}", context.request.headers)),
+            ],
+        );
+        Ok(flow::Download::Continue)
     }
 
-    fn process_response<'a>(
-        &'a self,
-        context: &'a mut EngineContext,
-    ) -> BoxFuture<'a, Result<Flow, SpiderError>> {
-        Box::pin(async move {
-            if let Some(ref resp) = context.response {
-                halo_spider::trace::info(
-                    "request_logger.ok",
-                    vec![
-                        halo_spider::trace::prop("url", context.request.url.as_str()),
-                        halo_spider::trace::prop("status", resp.status),
-                        halo_spider::trace::prop("bytes", resp.body.len()),
-                    ],
-                );
-            }
-            Ok(Flow::Continue)
-        })
+    async fn after_download(
+        &self,
+        context: &mut context::Download,
+        response: &mut Response,
+    ) -> Result<flow::Download, SpiderError> {
+        halo_spider::trace::info(
+            "request_logger.ok",
+            vec![
+                halo_spider::trace::prop("url", context.request.url.as_str()),
+                halo_spider::trace::prop("status", response.status),
+                halo_spider::trace::prop("bytes", response.body.len()),
+            ],
+        );
+        Ok(flow::Download::Continue)
     }
 }
 
@@ -125,38 +116,35 @@ impl StatsMiddleware {
 }
 
 impl Middleware for StatsMiddleware {
-    fn process_request<'a>(
-        &'a self,
-        _context: &'a mut EngineContext,
-    ) -> BoxFuture<'a, Result<Flow, SpiderError>> {
-        Box::pin(async move {
-            let n = self.request_count.fetch_add(1, Ordering::Relaxed) + 1;
-            halo_spider::trace::info(
-                "stats.request",
-                vec![
-                    halo_spider::trace::prop("label", self.label.as_str()),
-                    halo_spider::trace::prop("requests", n),
-                ],
-            );
-            Ok(Flow::Continue)
-        })
+    async fn before_download(
+        &self,
+        _context: &mut context::Download,
+    ) -> Result<flow::Download, SpiderError> {
+        let n = self.request_count.fetch_add(1, Ordering::Relaxed) + 1;
+        halo_spider::trace::info(
+            "stats.request",
+            vec![
+                halo_spider::trace::prop("label", self.label.as_str()),
+                halo_spider::trace::prop("requests", n),
+            ],
+        );
+        Ok(flow::Download::Continue)
     }
 
-    fn process_response<'a>(
-        &'a self,
-        _context: &'a mut EngineContext,
-    ) -> BoxFuture<'a, Result<Flow, SpiderError>> {
-        Box::pin(async move {
-            let n = self.response_count.fetch_add(1, Ordering::Relaxed) + 1;
-            halo_spider::trace::info(
-                "stats.response",
-                vec![
-                    halo_spider::trace::prop("label", self.label.as_str()),
-                    halo_spider::trace::prop("responses", n),
-                ],
-            );
-            Ok(Flow::Continue)
-        })
+    async fn after_download(
+        &self,
+        _context: &mut context::Download,
+        _response: &mut Response,
+    ) -> Result<flow::Download, SpiderError> {
+        let n = self.response_count.fetch_add(1, Ordering::Relaxed) + 1;
+        halo_spider::trace::info(
+            "stats.response",
+            vec![
+                halo_spider::trace::prop("label", self.label.as_str()),
+                halo_spider::trace::prop("responses", n),
+            ],
+        );
+        Ok(flow::Download::Continue)
     }
 }
 
@@ -222,15 +210,15 @@ impl PeriodDemoSpider {
 async fn main() {
     halo_spider::trace::init_console();
 
-    let settings = Settings::default()
+    let settings = Config::default()
         .with_download_delay(SignedDuration::from_millis(500))
         .with_idle_timeout(SignedDuration::from_secs(3));
 
-    // 方式2：通过 Settings 配置 stats 中间件
+    // 方式2：通过 Config 配置 stats 中间件
     // 只需要声明名字和 options，引擎通过工厂自动实例化
-    let settings = settings.with_middleware(
+    let settings = settings.with_request_middleware(
         "stats",
-        Config {
+        halo_spider::middleware::Config {
             enabled: true,
             stage: Stage::Download,
             order: 10,
@@ -239,11 +227,11 @@ async fn main() {
     );
 
     let mut engine = Engine::new()
-        .with_settings(settings)
+        .with_config(settings)
         // 方式1：直接注册中间件实例 —— UserAgent
         .add_middleware(
             "custom_ua",
-            Config {
+            halo_spider::middleware::Config {
                 enabled: true,
                 stage: Stage::Download,
                 order: 100,
@@ -256,7 +244,7 @@ async fn main() {
         // 方式1：直接注册中间件实例 —— RequestLogger
         .add_middleware(
             "request_logger",
-            Config {
+            halo_spider::middleware::Config {
                 enabled: true,
                 stage: Stage::Download,
                 order: 200,
@@ -279,7 +267,7 @@ async fn main() {
     println!("  - request_logger (order=200): log requests and responses");
     println!();
     println!("Registered config-driven middleware:");
-    println!("  - stats (order=10): count requests and responses via Settings");
+    println!("  - stats (order=10): count requests and responses via Config");
     println!();
     println!("Middleware order: stats(10) -> custom_ua(100) -> request_logger(200)");
     println!("Press Ctrl+C to stop");

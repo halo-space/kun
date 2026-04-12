@@ -14,7 +14,7 @@ use halo_spider::error::SpiderError;
 use halo_spider::item::Item;
 use halo_spider::pipeline::Pipeline;
 use halo_spider::response::Response;
-use halo_spider::settings::Settings;
+use halo_spider::settings::Config;
 use halo_spider::spider::{Output, Spider};
 use halo_spider::store::{File as FileStore, FileFormat};
 use halo_spider::value::Value;
@@ -83,9 +83,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let output_path = std::env::temp_dir().join("halo-spider-period-items.pretty.json");
     let file_store = FileStore::new(output_path.clone()).with_format(FileFormat::PrettyJsonBlocks);
-    let settings = Settings::default().with_idle_timeout(SignedDuration::from_millis(200));
+    let settings = Config::default().with_idle_timeout(SignedDuration::from_millis(200));
 
-    let engine = Engine::new().with_settings(settings);
+    let engine = Engine::new().with_config(settings);
     let handle = engine.shutdown_handle();
 
     let mut engine = engine

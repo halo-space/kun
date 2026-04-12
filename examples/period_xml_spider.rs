@@ -12,7 +12,7 @@ use halo_spider::engine::Engine;
 use halo_spider::error::SpiderError;
 use halo_spider::item::Item;
 use halo_spider::response::Response;
-use halo_spider::settings::Settings;
+use halo_spider::settings::Config;
 use halo_spider::spider::{Output, Spider};
 use halo_spider::value::Value;
 use halo_spider::{cb, spider_callbacks};
@@ -160,14 +160,14 @@ impl PeriodSpider {
 async fn main() {
     halo_spider::trace::init_console();
 
-    let settings = Settings::default()
+    let settings = Config::default()
         .with_download_delay(SignedDuration::from_millis(0)) // 移除延迟，展示并发
         .with_concurrent_requests(16)
         .with_concurrent_requests_per_domain(8)
         .with_idle_timeout(SignedDuration::from_secs(10));
 
     let spider = PeriodSpider;
-    let mut engine = Engine::new().with_settings(settings);
+    let mut engine = Engine::new().with_config(settings);
 
     match engine.run(&spider).await {
         Ok(_) => println!("\n=== Crawl Complete ==="),

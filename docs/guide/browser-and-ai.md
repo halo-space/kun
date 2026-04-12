@@ -154,12 +154,12 @@ halo-spider = { version = "0.0.5", features = ["ai-selector"] }
 
 ```rust
 // 设置 API key（优先从环境变量读取）
-let settings = Settings::default()
+let config = Config::default()
     .with_openai_api_key(std::env::var("OPENAI_API_KEY").ok().unwrap())
     .with_openai_model("gpt-4o-mini");
 
 // 使用自定义 API endpoint（兼容 OpenAI 的服务）
-let settings = Settings::default()
+let config = Config::default()
     .with_openai_api_key("your-api-key")
     .with_openai_base_url("https://your-api-endpoint.com/v1")
     .with_openai_model("your-model-name");

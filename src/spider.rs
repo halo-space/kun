@@ -4,7 +4,6 @@ use crate::request::{Metadata, Request};
 use crate::response::Response;
 use crate::rules::Config as RulesConfig;
 use crate::rules::{Compiled, CompiledStep, apply as apply_dsl};
-use crate::value::Value;
 
 /// Turn a method name into a callback string with a function-reference-like
 /// syntax.
@@ -131,12 +130,8 @@ impl Failure {
         }
     }
 
-    pub fn kwargs(&self) -> &Metadata {
-        &self.request.kwargs
-    }
-
-    pub fn kwarg(&self, key: &str) -> Option<&Value> {
-        self.request.kwargs.get(key)
+    pub fn cb_kwargs(&self) -> &Metadata {
+        &self.request.cb_kwargs
     }
 }
 
@@ -175,7 +170,7 @@ pub trait Spider: Send + Sync {
         None
     }
 
-    fn validator(&self) -> Option<crate::validator::Config> {
+    fn validator(&self) -> Option<crate::validator::StepValidator> {
         None
     }
 

@@ -20,30 +20,22 @@
 
 当前仓库如果只有一个进行中的变更，可以直接从该变更开始；如果后续有多个变更，先确认你要接手的是哪一个。
 
-### 当前 active changes 地图（2026-03-30）
+### 当前 active changes 地图（2026-04-11）
 
-当前 `openspec/changes/` 里建议只按下面一个 active change 理解优先级。
+当前 `openspec/changes/` 里建议按实际进行中的 change 理解优先级：
 
 | change | 当前判断 | 建议动作 |
 |--------|----------|----------|
-| `track-kun-core-capability-gaps` | 当前主线 change | 继续作为底层能力补齐的统一入口 |
+| `realign-request-runtime-boundaries` | 当前主线 change | 优先继续处理 runtime/request 边界与 callback 发射模型 |
+| `plan-multi-spider-distributed-v2` | 规划中 change | 需要时再进入方案讨论 |
 
-可以把这些 change 粗略分成三组：
+已经完成但仍保留在 `changes/` 中的 change：
 
-```text
-继续推进
-└─ track-kun-core-capability-gaps
-```
-
-已在 2026-03-30 归档：
-
-- `ai-selector-concurrency-examples`
-- `parse-period-xml-and-detail-pages`
-- `dsl-runtime-logic-implementation`
-- `period-xml-dsl-example`
-- `dsl-step-config-enhancement`
-- `dsl-next-url-config-and-type-semantics`
-- `finalize-rules-dsl-structure`
+- `implement-rules-dsl-v1`
+- `browser-mobile-fingerprint-hints`
+- `browser-session-profile-pinning`
+- `browser-device-screen-profiles`
+- `browser-keep-alive-controls`
 
 补充说明：
 

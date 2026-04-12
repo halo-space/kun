@@ -8,7 +8,7 @@ use crate::request::{Headers, Metadata, Request};
 use certificate::CertificateInfo;
 use chardetng::EncodingDetector;
 use encoding_rs::Encoding;
-use follow::build_follow_request;
+use follow::{build_follow_request, urljoin as join_url};
 use regex::Regex as PatternRegex;
 use std::net::IpAddr;
 use std::sync::OnceLock;
@@ -187,16 +187,12 @@ impl Response {
         }
     }
 
-    pub fn kwargs(&self) -> &Metadata {
+    pub fn cb_kwargs(&self) -> &Metadata {
         if let Some(request) = self.request.as_deref() {
-            &request.kwargs
+            &request.cb_kwargs
         } else {
             empty_metadata()
         }
-    }
-
-    pub fn kwarg(&self, key: &str) -> Option<&crate::value::Value> {
-        self.kwargs().get(key)
     }
 
     pub fn css(&self, selector: impl Into<String>) -> CssQuery {
@@ -231,8 +227,22 @@ impl Response {
         SitemapQuery::from_bytes(self.body.clone())
     }
 
+    pub fn urljoin(&self, url: impl AsRef<str>) -> String {
+        join_url(&self.url, url.as_ref())
+    }
+
     pub fn follow(&self, url: impl Into<String>) -> Request {
         self.follow_with_meta(url, &Metadata::new())
+    }
+
+    pub fn follow_all<I, S>(&self, urls: I) -> Vec<Request>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        urls.into_iter()
+            .map(|url| self.follow(url.into()))
+            .collect()
     }
 
     pub fn follow_with_callback(
@@ -382,7 +392,6 @@ mod tests {
             .with_kwarg("page_size", Value::Number(50.0))
             .with_callback("parse_list")
             .with_errback("handle_error")
-            .with_dont_filter(true)
             .with_meta("page", Value::Number(1.0));
         let response = Response::from_request(request, 200, Headers::new(), b"list".to_vec());
 
@@ -414,11 +423,48 @@ mod tests {
                 .as_ref()
                 .is_some_and(|http| http.query.is_empty())
         );
-        assert!(follow_request.kwargs.is_empty());
+        assert!(follow_request.cb_kwargs.is_empty());
         assert!(follow_request.callback.is_none());
         assert!(follow_request.errback.is_none());
-        assert!(!follow_request.dont_filter);
         assert_eq!(follow_request.meta.get("page"), Some(&Value::Number(1.0)));
+    }
+
+    #[test]
+    fn response_urljoin_resolves_relative_links_against_response_url() {
+        let response = Response::new(
+            "https://example.com/news/list/index.html",
+            200,
+            Headers::new(),
+            b"ok".to_vec(),
+        );
+
+        assert_eq!(
+            response.urljoin("../detail/1.html"),
+            "https://example.com/news/detail/1.html"
+        );
+        assert_eq!(
+            response.urljoin("https://other.example.com/post"),
+            "https://other.example.com/post"
+        );
+    }
+
+    #[test]
+    fn follow_all_builds_requests_with_same_follow_semantics() {
+        let request =
+            Request::browser("https://example.com/list").with_meta("page", Value::Number(1.0));
+        let response = Response::from_request(request, 200, Headers::new(), b"list".to_vec());
+
+        let requests = response.follow_all(["detail/1.html", "/detail/2.html"]);
+
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].url, "https://example.com/detail/1.html");
+        assert_eq!(requests[1].url, "https://example.com/detail/2.html");
+        assert_eq!(requests[0].mode, RequestMode::Browser);
+        assert_eq!(requests[1].mode, RequestMode::Browser);
+        assert_eq!(requests[0].meta.get("page"), Some(&Value::Number(1.0)));
+        assert_eq!(requests[1].meta.get("page"), Some(&Value::Number(1.0)));
+        assert!(requests[0].cb_kwargs.is_empty());
+        assert!(requests[1].cb_kwargs.is_empty());
     }
 
     #[test]
@@ -428,7 +474,7 @@ mod tests {
         let response = Response::from_request(request, 200, Headers::new(), b"detail".to_vec());
 
         assert_eq!(
-            response.kwarg("edition"),
+            response.cb_kwargs().get("edition"),
             Some(&Value::String("night".to_string()))
         );
     }
