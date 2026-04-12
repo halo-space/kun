@@ -99,7 +99,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n=== DSL Crawl Complete ===");
     println!("items stored in memory: {}", store.items().len());
 
-    for item in store.items().iter().take(5) {
+    for item in store.items() {
         println!("{item:#?}");
     }
 
