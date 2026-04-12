@@ -7,6 +7,7 @@
 它默认就是 `scheduler::Memory + download::Http + download::Browser + store::File`。
 
 - `period_xml_spider.rs`：代码爬虫的多级回调、`meta` 透传、`follow` 链路
+- `period_xml_dsl.rs`：同一站点的 DSL 版本，展示 `seed -> step -> follow -> output` 配置式抓取
 - `memory.rs`：`parse -> item -> pipeline -> store::Memory`，展示最终 item 直接在 `parse()` 里组装
 - `file.rs`：`parse -> item -> pipeline -> store::File`，并演示 pretty file format
 - `sqlite.rs`：`parse -> item -> pipeline -> store::Sqlite`
@@ -26,4 +27,4 @@
 
 如果你要接 PostgreSQL，当前也建议按 `custom Store` 模式自己实现，而不是继续加内置 PG 分支。
 
-DSL 示例暂不放在 `examples/`；等配置面和模块边界收敛后，再按模块逐步补回。
+当前补了一个 `period_xml_dsl.rs` 作为最小可运行 DSL 示例，后续再按模块继续补。

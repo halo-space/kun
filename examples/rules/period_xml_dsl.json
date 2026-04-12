@@ -1,0 +1,311 @@
+{
+  "spider": {
+    "name": "period_xml_dsl",
+    "clock": {
+      "timezone": "Asia/Shanghai"
+    }
+  },
+  "engine": {
+    "dedup": {
+      "request_url": {
+        "backend": "memory",
+        "key": ["url"]
+      }
+    }
+  },
+  "sinks": {
+    "default": {
+      "type": "memory"
+    }
+  },
+  "seeds": [
+    {
+      "id": "period_xml",
+      "request": {
+        "url": {
+          "template": "https://ep.shxwcb.com/{year}/{month}/period.xml",
+          "vars": {
+            "year": {
+              "from": "$now",
+              "transforms": [
+                {
+                  "type": "date_format",
+                  "format": "%Y"
+                }
+              ]
+            },
+            "month": {
+              "from": "$now",
+              "transforms": [
+                {
+                  "type": "date_format",
+                  "format": "%m"
+                }
+              ]
+            }
+          }
+        }
+      },
+      "next_step": "period_xml"
+    }
+  ],
+  "steps": [
+    {
+      "id": "period_xml",
+      "bind": {
+        "latest_period": {
+          "selector": "period:last-child",
+          "html": true
+        },
+        "period_date": {
+          "from": "$bind.latest_period",
+          "transforms": [
+            {
+              "type": "regex",
+              "pattern": "<period_date>([^<]+)</period_date>"
+            }
+          ]
+        },
+        "front_page": {
+          "from": "$bind.latest_period",
+          "transforms": [
+            {
+              "type": "regex",
+              "pattern": "<front_page>([^<]+)</front_page>"
+            }
+          ]
+        },
+        "year": {
+          "from": "$bind.period_date",
+          "transforms": [
+            {
+              "type": "date_format",
+              "input_format": "%Y-%m-%d",
+              "format": "%Y"
+            }
+          ]
+        },
+        "month": {
+          "from": "$bind.period_date",
+          "transforms": [
+            {
+              "type": "date_format",
+              "input_format": "%Y-%m-%d",
+              "format": "%m"
+            }
+          ]
+        },
+        "day": {
+          "from": "$bind.period_date",
+          "transforms": [
+            {
+              "type": "date_format",
+              "input_format": "%Y-%m-%d",
+              "format": "%d"
+            }
+          ]
+        }
+      },
+      "follow": [
+        {
+          "next_step": "issue",
+          "request": {
+            "url": {
+              "template": "https://ep.shxwcb.com/{year}/{month}/{day}/{front_page}?f={year}/{month}/period.xml",
+              "vars": {
+                "year": {
+                  "from": "$bind.year"
+                },
+                "month": {
+                  "from": "$bind.month"
+                },
+                "day": {
+                  "from": "$bind.day"
+                },
+                "front_page": {
+                  "from": "$bind.front_page"
+                }
+              }
+            }
+          },
+          "meta": {
+            "period_xml_url": {
+              "from": "$response.url"
+            },
+            "period_date": {
+              "from": "$bind.period_date"
+            },
+            "front_page": {
+              "from": "$bind.front_page"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "issue",
+      "follow": [
+        {
+          "item": "div.list-right ul li",
+          "next_step": "edition",
+          "request": {
+            "url": {
+              "selector": "a",
+              "attr": "href"
+            }
+          },
+          "meta": {
+            "period_xml_url": {
+              "from": "$meta.period_xml_url"
+            },
+            "period_date": {
+              "from": "$meta.period_date"
+            },
+            "front_page": {
+              "from": "$meta.front_page"
+            },
+            "edition_name": {
+              "selector": ".text",
+              "text": true
+            }
+          },
+          "engine": {
+            "dedup": "request_url"
+          }
+        }
+      ]
+    },
+    {
+      "id": "edition",
+      "follow": [
+        {
+          "item": "#artPList1 li",
+          "next_step": "detail",
+          "request": {
+            "url": {
+              "selector": "a",
+              "attr": "href"
+            }
+          },
+          "meta": {
+            "period_xml_url": {
+              "from": "$meta.period_xml_url"
+            },
+            "period_date": {
+              "from": "$meta.period_date"
+            },
+            "front_page": {
+              "from": "$meta.front_page"
+            },
+            "edition_url": {
+              "from": "$response.url"
+            },
+            "edition_name": {
+              "from": "$meta.edition_name"
+            },
+            "article_title": {
+              "selector": "a",
+              "text": true
+            }
+          },
+          "engine": {
+            "dedup": "request_url"
+          }
+        }
+      ]
+    },
+    {
+      "id": "detail",
+      "fields": {
+        "title": {
+          "selector": "p.title1",
+          "text": true
+        },
+        "lead": {
+          "selector": "p.title3",
+          "text": true
+        },
+        "subtitle": {
+          "selector": "p.title5",
+          "text": true
+        },
+        "content": {
+          "selector": "td.content_tt",
+          "text": true
+        }
+      },
+      "bind": {
+        "title_clean": {
+          "from": "$fields.title",
+          "transforms": [
+            {
+              "type": "trim"
+            }
+          ]
+        },
+        "lead_clean": {
+          "from": "$fields.lead",
+          "transforms": [
+            {
+              "type": "trim"
+            }
+          ]
+        },
+        "subtitle_clean": {
+          "from": "$fields.subtitle",
+          "transforms": [
+            {
+              "type": "trim"
+            }
+          ]
+        },
+        "content_clean": {
+          "from": "$fields.content",
+          "transforms": [
+            {
+              "type": "trim"
+            }
+          ]
+        }
+      },
+      "output": {
+        "item": {
+          "url": {
+            "from": "$response.url"
+          },
+          "period_xml_url": {
+            "from": "$meta.period_xml_url"
+          },
+          "period_date": {
+            "from": "$meta.period_date"
+          },
+          "front_page": {
+            "from": "$meta.front_page"
+          },
+          "edition_url": {
+            "from": "$meta.edition_url"
+          },
+          "edition_name": {
+            "from": "$meta.edition_name"
+          },
+          "title": {
+            "from": "$bind.title_clean",
+            "fallback": {
+              "from": "$meta.article_title"
+            }
+          },
+          "lead": {
+            "from": "$bind.lead_clean"
+          },
+          "subtitle": {
+            "from": "$bind.subtitle_clean"
+          },
+          "content": {
+            "from": "$bind.content_clean"
+          }
+        },
+        "sinks": ["default"]
+      }
+    }
+  ]
+}
